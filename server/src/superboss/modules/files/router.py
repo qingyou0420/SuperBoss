@@ -1,7 +1,7 @@
 from collections.abc import AsyncIterator
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Request, status
+from fastapi import APIRouter, Depends, Header, Path, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core.actors import Actor, get_actor
@@ -73,7 +73,7 @@ async def complete(
 @router.post("/uploads/{upload_id}/parts/{part_number}")
 async def part(
     upload_id: UUID,
-    part_number: int,
+    part_number: int = Path(ge=1, le=10000),
     actor: Actor = Depends(get_actor),
     service: FileService = Depends(get_service),
 ) -> dict[str, str]:
