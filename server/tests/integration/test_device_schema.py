@@ -147,7 +147,13 @@ def test_0016_round_trip_and_guard_are_atomic(postgres_database: str) -> None:
             check=True,
         )
         subprocess.run(
-            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "0016_device_connections",
+            ],
             cwd=SERVER_ROOT,
             env=environment,
             check=True,
@@ -170,7 +176,13 @@ def test_0016_round_trip_and_guard_are_atomic(postgres_database: str) -> None:
         assert revision == "0015_discover_unbound_multipart"
         assert not DEVICE_TABLES & tables
         subprocess.run(
-            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "0016_device_connections",
+            ],
             cwd=SERVER_ROOT,
             env=environment,
             check=True,
