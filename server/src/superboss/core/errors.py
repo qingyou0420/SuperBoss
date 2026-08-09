@@ -33,3 +33,13 @@ class NotFoundError(DomainError):
 class ConflictError(DomainError):
     def __init__(self) -> None:
         super().__init__("PROJECT_NAME_CONFLICT", "A project with this name already exists", 409)
+
+
+class FileUploadSizeMismatchError(DomainError):
+    def __init__(self) -> None:
+        super().__init__("FILE_UPLOAD_SIZE_MISMATCH", "Uploaded object size does not match declared size", 409)
+
+
+class FileStorageFailureError(DomainError):
+    def __init__(self) -> None:
+        super().__init__("FILE_STORAGE_FAILURE", "File storage operation failed", 502)

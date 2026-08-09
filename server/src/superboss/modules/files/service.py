@@ -7,7 +7,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core.actors import Actor, require_project_access
-from superboss.core.errors import ConflictError, NotFoundError
+from superboss.core.errors import (
+    ConflictError,
+    FileStorageFailureError,
+    FileUploadSizeMismatchError,
+    NotFoundError,
+)
 from superboss.modules.files.models import File, FileState, Upload
 from superboss.modules.files.schemas import UploadStart
 from superboss.modules.files.storage import CompletedPart, ObjectStorage
@@ -148,14 +153,22 @@ class FileService:
             raise ConflictError()
         if len({p.part_number for p in parts}) != len(parts):
             raise ValueError("duplicate part number")
-        metadata = await self._storage().complete_multipart(
-            file.object_key, upload.multipart_id, sorted(parts, key=lambda p: p.part_number)
-        )
+        try:
+            metadata = await self._storage().complete_multipart(file.object_key, upload.multipart_id, sorted(parts, key=lambda p: p.part_number))
+        except Exception as error:
+            await self._fail_upload(file, upload.multipart_id)
+            raise FileStorageFailureError() from error
         if metadata.size_bytes != file.size_bytes:
-            await self._storage().abort_multipart(file.object_key, upload.multipart_id)
-            file.state = FileState.FAILED
-            await self.session.flush()
-            raise ConflictError()
+            await self._fail_upload(file, upload.multipart_id)
+            raise FileUploadSizeMismatchError()
         file.state = FileState.QUARANTINED
         await self.session.flush()
         return file
+
+    async def _fail_upload(self, file: File, multipart_id: str) -> None:
+        try:
+            await self._storage().abort_multipart(file.object_key, multipart_id)
+        except Exception:  # noqa: BLE001 -- abort failures must not prevent durable FAILED state
+            file.scan_result = "abort_failed"
+        file.state = FileState.FAILED
+        await self.session.commit()

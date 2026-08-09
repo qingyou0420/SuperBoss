@@ -137,6 +137,21 @@ async def test_complete_sorts_parts_and_quarantines_without_enqueue(db_session, 
 
 
 @pytest.mark.asyncio
+async def test_size_mismatch_aborts_and_persists_failed(db_session, active_owner) -> None:
+    from superboss.core.errors import FileUploadSizeMismatchError
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileService
+    from superboss.modules.files.storage import CompletedPart
+    project = Project(name="Mismatch"); db_session.add(project); await db_session.flush()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    storage = InMemoryObjectStorage(complete_size=2); service = FileService(db_session, storage)
+    upload = await service.start_upload(actor, UploadStart(project_id=project.id, filename="x.pdf", size_bytes=1, sha256="0" * 64, category="资料", file_date="2026-08-09"), "mismatch")
+    with pytest.raises(FileUploadSizeMismatchError): await service.complete_upload(actor, upload.id, [CompletedPart(1, "e")])
+    await db_session.refresh(await db_session.get(__import__("superboss.modules.files.models", fromlist=["File"]).File, upload.file_id))
+    assert upload.multipart_id in storage.aborted
+
+
+@pytest.mark.asyncio
 async def test_part_presign_accepts_s3_boundaries(db_session, active_owner) -> None:
     """Changing the S3 boundary would reject valid first or last parts."""
     from superboss.modules.files.schemas import UploadStart
@@ -200,3 +215,19 @@ def test_idempotency_key_grammar(key: str) -> None:
     """Header keys are printable ASCII tokens, never whitespace or controls."""
     import re
     assert bool(re.fullmatch(r"[!-~]{1,255}", key)) == (key in {"x", "!" * 255})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("abort_error", [None, RuntimeError("abort secret")])
+async def test_storage_error_is_safe_and_leaves_failed_file(db_session, active_owner, abort_error) -> None:
+    from superboss.core.errors import FileStorageFailureError
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileService
+    from superboss.modules.files.storage import CompletedPart
+    project = Project(name="Storage error"); db_session.add(project); await db_session.flush()
+    storage = InMemoryObjectStorage(complete_error=RuntimeError("S3 secret"), abort_error=abort_error)
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset()); service = FileService(db_session, storage)
+    upload = await service.start_upload(actor, UploadStart(project_id=project.id, filename="x.pdf", size_bytes=1, sha256="0" * 64, category="资料", file_date="2026-08-09"), "storage-error")
+    with pytest.raises(FileStorageFailureError) as error: await service.complete_upload(actor, upload.id, [CompletedPart(1, "e")])
+    assert "secret" not in str(error.value).lower()
+    assert upload.multipart_id in storage.aborted

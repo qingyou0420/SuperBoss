@@ -14,6 +14,8 @@ class InMemoryObjectStorage:
     aborted: set[str] = field(default_factory=set)
     objects: dict[str, ObjectMetadata] = field(default_factory=dict)
     expiries: list[int] = field(default_factory=list)
+    complete_error: Exception | None = None
+    abort_error: Exception | None = None
 
     async def create_multipart(self, object_key: str, content_type: str) -> str:
         upload_id = str(uuid4())
@@ -25,6 +27,8 @@ class InMemoryObjectStorage:
         return f"memory://part/{multipart_id}/{part_number}"
 
     async def complete_multipart(self, object_key: str, multipart_id: str, parts: list[CompletedPart]) -> ObjectMetadata:
+        if self.complete_error is not None:
+            raise self.complete_error
         self.active.pop(multipart_id)
         self.completed[multipart_id] = parts
         metadata = ObjectMetadata(self.complete_size)
@@ -34,6 +38,8 @@ class InMemoryObjectStorage:
     async def abort_multipart(self, object_key: str, multipart_id: str) -> None:
         self.active.pop(multipart_id, None)
         self.aborted.add(multipart_id)
+        if self.abort_error is not None:
+            raise self.abort_error
 
     async def presign_get(self, object_key: str, expires_seconds: int) -> str:
         self.expiries.append(expires_seconds)
