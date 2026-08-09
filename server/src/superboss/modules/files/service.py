@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 import json
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -20,6 +20,7 @@ from superboss.core.errors import (
     FileUploadSizeMismatchError,
     NotFoundError,
 )
+from superboss.infrastructure.clamav import Scanner, ScanStatus
 from superboss.modules.audit.schemas import AuditEventInput
 from superboss.modules.audit.service import AuditService
 from superboss.modules.files.models import (
@@ -62,6 +63,75 @@ class FileUploadProjectMismatchError(FileUploadConflictError):
         DomainError.__init__(
             self, "FILE_UPLOAD_PROJECT_MISMATCH", "Upload project does not match file", 409
         )
+
+
+class FileScanService:
+    """Atomically scan one quarantined object under its PostgreSQL File lock."""
+
+    _TERMINAL_STATES = frozenset(
+        {FileState.CLEAN, FileState.INFECTED, FileState.FAILED}
+    )
+    _MAX_SIGNATURE_LENGTH = 128
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        storage: ObjectStorage,
+        scanner: Scanner,
+    ) -> None:
+        self.session_factory = session_factory
+        self.storage = storage
+        self.scanner = scanner
+
+    @classmethod
+    def _safe_signature(cls, signature: str | None) -> str:
+        if signature is None:
+            return "INFECTED"
+        sanitized = re.sub(r"[^A-Za-z0-9._: +()\-]", "_", signature)
+        return sanitized[: cls._MAX_SIGNATURE_LENGTH] or "INFECTED"
+
+    async def scan_file(self, file_id: UUID) -> None:
+        async with self.session_factory() as session, session.begin():
+            file = await session.scalar(
+                select(File).where(File.id == file_id).with_for_update()
+            )
+            if file is None or file.state in self._TERMINAL_STATES:
+                return
+            if file.state != FileState.QUARANTINED:
+                return
+
+            file.state = FileState.SCANNING
+            await session.flush()
+            digest = hashlib.sha256()
+
+            async def hashing_chunks() -> AsyncGenerator[bytes]:
+                async for chunk in self.storage.stream(file.object_key):
+                    digest.update(chunk)
+                    yield chunk
+
+            chunks = hashing_chunks()
+            try:
+                try:
+                    verdict = await self.scanner.scan(chunks)
+                finally:
+                    await chunks.aclose()
+            except Exception:  # noqa: BLE001 -- persist only the fixed safe result
+                file.state = FileState.FAILED
+                file.scan_result = "SCAN_FAILED"
+                return
+
+            if digest.hexdigest() != file.sha256:
+                file.state = FileState.FAILED
+                file.scan_result = "HASH_MISMATCH"
+            elif verdict.status == ScanStatus.CLEAN:
+                file.state = FileState.CLEAN
+                file.scan_result = "CLEAN"
+            elif verdict.status == ScanStatus.INFECTED:
+                file.state = FileState.INFECTED
+                file.scan_result = self._safe_signature(verdict.signature)
+            else:
+                file.state = FileState.FAILED
+                file.scan_result = "SCAN_FAILED"
 
 
 class FileService:

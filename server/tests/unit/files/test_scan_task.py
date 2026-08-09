@@ -68,10 +68,21 @@ class BlockingCleanScanner:
         return self.verdict
 
 
+class CancellingScanner:
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+
+    async def scan(self, chunks: AsyncIterator[bytes]) -> object:
+        async for _chunk in chunks:
+            break
+        self.entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
 def scan_contract() -> tuple[type[Any], type[Any], Any]:
     """Load the wished-for production API inside each test so RED is a test failure."""
     from superboss.infrastructure.clamav import ScanStatus, ScanVerdict
-
     from superboss.modules.files.service import FileScanService
 
     return FileScanService, ScanVerdict, ScanStatus
@@ -168,6 +179,22 @@ async def test_scanner_timeout_fails_closed_without_provider_text(
 
 
 @pytest.mark.asyncio
+async def test_hash_mismatch_fails_after_scanning_the_stream(db_session: AsyncSession) -> None:
+    """Skipping the same-stream digest check would release substituted object bytes."""
+    service_type, verdict_type, status = scan_contract()
+    file = await quarantined_file(db_session, content=b"declared bytes")
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    scanner = RecordingScanner(verdict_type(status.CLEAN))
+
+    await service_type(factory, ChunkStorage([b"tampered bytes"]), scanner).scan_file(file.id)
+
+    saved = await persisted_file(factory, file.id)
+    assert saved.state == FileState.FAILED
+    assert saved.scan_result == "HASH_MISMATCH"
+    assert scanner.received == [b"tampered bytes"]
+
+
+@pytest.mark.asyncio
 async def test_terminal_replay_performs_no_storage_or_scanner_work(
     db_session: AsyncSession,
 ) -> None:
@@ -212,3 +239,27 @@ async def test_concurrent_scan_deliveries_call_scanner_once(
     assert saved.state == FileState.CLEAN
     assert storage.stream_calls == 1
     assert scanner.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_scan_rolls_back_to_retryable_quarantine(
+    db_session: AsyncSession,
+) -> None:
+    """Committing SCANNING before external work would strand a cancelled delivery."""
+    service_type, _verdict_type, _status = scan_contract()
+    content = b"retry after cancellation"
+    file = await quarantined_file(db_session, content=content)
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    scanner = CancellingScanner()
+    task = asyncio.create_task(
+        service_type(factory, ChunkStorage([content]), scanner).scan_file(file.id)
+    )
+    await asyncio.wait_for(scanner.entered.wait(), timeout=3)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    saved = await persisted_file(factory, file.id)
+    assert saved.state == FileState.QUARANTINED
+    assert saved.scan_result is None
