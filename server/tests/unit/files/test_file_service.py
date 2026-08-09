@@ -354,10 +354,18 @@ def test_idempotency_key_grammar(key: str) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("abort_error", [None, RuntimeError("abort secret")])
-async def test_storage_error_is_safe_and_leaves_failed_file(
+async def test_storage_error_is_safe_and_leaves_prepared_file(
     db_session, active_owner, abort_error
 ) -> None:
-    from superboss.core.errors import FileStorageFailureError
+    from sqlalchemy import select
+
+    from superboss.core.errors import FileCompletionPendingError
+    from superboss.modules.files.models import (
+        File,
+        FileState,
+        FileStorageCleanup,
+        FileUploadLifecycle,
+    )
     from superboss.modules.files.schemas import UploadStart
     from superboss.modules.files.service import FileService
     from superboss.modules.files.storage import CompletedPart
@@ -382,10 +390,16 @@ async def test_storage_error_is_safe_and_leaves_failed_file(
         ),
         "storage-error",
     )
-    with pytest.raises(FileStorageFailureError) as error:
+    with pytest.raises(FileCompletionPendingError) as error:
         await service.complete_upload(actor, upload.id, [CompletedPart(1, "e")])
     assert "secret" not in str(error.value).lower()
-    assert upload.multipart_id in storage.aborted
+    file = await db_session.get(File, upload.file_id)
+    lifecycle = await db_session.get(FileUploadLifecycle, upload.id)
+    assert file is not None and file.state == FileState.UPLOADING
+    assert lifecycle is not None and lifecycle.completion_state == "PREPARED"
+    assert lifecycle.completion_last_error_code == "COMPLETION_AMBIGUOUS"
+    assert upload.multipart_id in storage.active and upload.multipart_id not in storage.aborted
+    assert list(await db_session.scalars(select(FileStorageCleanup))) == []
 
 
 @pytest.mark.asyncio
@@ -1164,8 +1178,9 @@ async def test_completion_replay_finalizes_once_and_persists_safe_outbox(
         "state",
         "attempt_count",
         "next_attempt_at",
-        "locked_at",
-        "last_error_code",
+            "locked_at",
+            "claim_token",
+            "last_error_code",
         "created_at",
         "updated_at",
     }
@@ -2440,3 +2455,80 @@ async def test_global_delivery_drain_skips_future_or_live_scan_lease(
     )
     assert scan is not None and scan.state == ("DELIVERING" if live_lease else "PENDING")
     assert scan.attempt_count == (1 if live_lease else 0) and delivered == []
+
+
+@pytest.mark.asyncio
+async def test_late_complete_timeout_recovers_from_durable_prepared_state(db_session, active_owner) -> None:
+    """A timed-out provider call that completes later is recovered by stat, not compensation."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+
+    from superboss.core.errors import FileCompletionPendingError
+    from superboss.modules.files.models import (
+        File,
+        FileLifecycleOutbox,
+        FileStorageCleanup,
+        FileUploadLifecycle,
+    )
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileService
+    from superboss.modules.files.storage import CompletedPart
+
+    project = Project(name="Late completion recovery")
+    db_session.add(project)
+    await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    storage = InMemoryObjectStorage(complete_late_success_delay=0.15)
+    service = FileService(db_session, storage)
+    upload = await service.start_upload(actor, UploadStart(project_id=project.id, filename="late.pdf", category="docs", file_date="2026-08-09", size_bytes=1, sha256="0" * 64), "late-timeout")
+    with pytest.raises(FileCompletionPendingError):
+        await service.complete_upload(actor, upload.id, [CompletedPart(1, "etag")])
+    file = await db_session.get(File, upload.file_id)
+    lifecycle = await db_session.get(FileUploadLifecycle, upload.id)
+    assert file is not None and file.state.value == "UPLOADING"
+    assert lifecycle is not None and lifecycle.completion_state == "PREPARED" and lifecycle.completion_last_error_code == "COMPLETION_AMBIGUOUS"
+    assert list(await db_session.scalars(select(FileStorageCleanup))) == []
+    await storage.await_late_completions()
+    lifecycle.completion_next_attempt_at = datetime.now(UTC)
+    await db_session.commit()
+    replayed = await service.complete_upload(actor, upload.id, [CompletedPart(1, "etag")])
+    assert replayed.state.value == "QUARANTINED" and len(storage.completed) == 1
+    assert len(list(await db_session.scalars(select(FileLifecycleOutbox)))) == 2
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_completion_grace_never_retries_complete(db_session, active_owner) -> None:
+    """Due replays inside ambiguity grace stat only and retain recovery coordinates."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+
+    from superboss.core.errors import FileCompletionPendingError
+    from superboss.modules.files.models import File, FileStorageCleanup, FileUploadLifecycle
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileService
+    from superboss.modules.files.storage import CompletedPart
+
+    project = Project(name="Ambiguous grace")
+    db_session.add(project); await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    storage = InMemoryObjectStorage(complete_error=TimeoutError("provider secret"))
+    service = FileService(db_session, storage)
+    upload = await service.start_upload(actor, UploadStart(project_id=project.id, filename="grace.pdf", category="docs", file_date="2026-08-09", size_bytes=1, sha256="0" * 64), "ambiguous-grace")
+    parts = [CompletedPart(1, "etag")]
+    with pytest.raises(FileCompletionPendingError):
+        await service.complete_upload(actor, upload.id, parts)
+    for _ in range(3):
+        lifecycle = await db_session.get(FileUploadLifecycle, upload.id)
+        assert lifecycle is not None
+        lifecycle.completion_next_attempt_at = datetime.now(UTC)
+        await db_session.commit()
+        with pytest.raises(FileCompletionPendingError):
+            await service.complete_upload(actor, upload.id, parts)
+    file = await db_session.get(File, upload.file_id)
+    lifecycle = await db_session.get(FileUploadLifecycle, upload.id)
+    assert storage.complete_calls == 1 and file is not None and file.state.value == "UPLOADING"
+    assert lifecycle is not None and lifecycle.completion_state == "PREPARED"
+    assert lifecycle.completion_last_error_code == "COMPLETION_AMBIGUOUS" and "secret" not in lifecycle.completion_last_error_code
+    assert list(await db_session.scalars(select(FileStorageCleanup))) == []

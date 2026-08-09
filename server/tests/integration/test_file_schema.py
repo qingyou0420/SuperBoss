@@ -191,7 +191,7 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
             check=True,
         )
         tables, constraints, indexes = asyncio.run(catalog())
-        assert asyncio.run(revision()) == "0010_cleanup_claim_lease"
+        assert asyncio.run(revision()) == "0011_completion_ambiguity_retry"
         assert "trg_files_snapshot_storage_cleanup" in asyncio.run(trigger_names())
         assert {"files", "uploads", "file_upload_lifecycle", "file_lifecycle_outbox", "file_storage_cleanup"} <= set(tables)
         assert asyncio.run(table_columns("files")) == [
@@ -208,7 +208,8 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
             "declared_size_bytes", "provision_state", "completion_state", "parts_digest",
             "completion_event_key", "created_at", "updated_at", "canonical_parts_json",
             "completion_actor_kind", "completion_actor_id", "completion_actor_role",
-            "completion_request_id", "prepared_at",
+            "completion_request_id", "prepared_at", "completion_attempt_count",
+            "completion_next_attempt_at", "completion_last_error_code",
         ]
         assert asyncio.run(table_columns("file_lifecycle_outbox")) == [
             "id", "kind", "dedupe_key", "file_id", "project_id", "state", "attempt_count",
@@ -242,6 +243,8 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
             "ck_file_upload_lifecycle_completion_state", "ck_file_upload_lifecycle_size",
             "ck_file_upload_lifecycle_object_key", "ck_file_upload_lifecycle_content_type",
             "ck_file_upload_lifecycle_multipart_id", "ck_file_upload_lifecycle_parts_digest",
+            "ck_file_upload_lifecycle_completion_attempt_count",
+            "ck_file_upload_lifecycle_completion_error_code",
         }
         assert {name for (table, name) in definitions if table == "file_lifecycle_outbox"} >= {
             "pk_file_lifecycle_outbox", "uq_file_lifecycle_outbox_kind_dedupe",
@@ -273,6 +276,7 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
         assert "INDEXix_file_lifecycle_outbox_due_leaseONpublic.file_lifecycle_outboxUSINGbtree(state,next_attempt_at,locked_at)" in normalized_indexes
         assert "INDEXix_file_storage_cleanup_pendingONpublic.file_storage_cleanupUSINGbtree(state,next_attempt_at)" in normalized_indexes
         assert "INDEXix_file_storage_cleanup_due_leaseONpublic.file_storage_cleanupUSINGbtree(state,next_attempt_at,locked_at)" in normalized_indexes
+        assert "INDEXix_file_upload_lifecycle_completion_dueONpublic.file_upload_lifecycleUSINGbtree(completion_state,completion_next_attempt_at)" in normalized_indexes
         assert "UNIQUEINDEXuq_file_storage_cleanup_operation_target" in normalized_indexes
 
         subprocess.run(

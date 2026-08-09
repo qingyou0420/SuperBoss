@@ -22,8 +22,11 @@ class InMemoryObjectStorage:
     create_error_after_create: Exception | None = None
     list_error: Exception | None = None
     create_calls: int = 0
+    complete_calls: int = 0
     list_calls: int = 0
     stat_error: Exception | None = None
+    complete_late_success_delay: float | None = None
+    late_completion_tasks: list[asyncio.Task[None]] = field(default_factory=list)
     delete_error: Exception | None = None
     deleted: list[str] = field(default_factory=list)
 
@@ -59,6 +62,16 @@ class InMemoryObjectStorage:
         return f"memory://part/{multipart_id}/{part_number}"
 
     async def complete_multipart(self, object_key: str, multipart_id: str, parts: list[CompletedPart]) -> ObjectMetadata:
+        self.complete_calls += 1
+        if self.complete_late_success_delay is not None:
+            async def complete_later() -> None:
+                await asyncio.sleep(self.complete_late_success_delay)
+                self.active.pop(multipart_id, None)
+                self.completed[multipart_id] = parts
+                self.objects[object_key] = ObjectMetadata(self.complete_size)
+
+            self.late_completion_tasks.append(asyncio.create_task(complete_later()))
+            raise TimeoutError("provider secret")
         if self.complete_error is not None:
             raise self.complete_error
         self.active.pop(multipart_id)
@@ -66,6 +79,12 @@ class InMemoryObjectStorage:
         metadata = ObjectMetadata(self.complete_size)
         self.objects[object_key] = metadata
         return metadata
+
+    async def await_late_completions(self) -> None:
+        tasks = self.late_completion_tasks
+        self.late_completion_tasks = []
+        if tasks:
+            await asyncio.gather(*tasks)
 
     async def abort_multipart(self, object_key: str, multipart_id: str) -> None:
         self.active.pop(multipart_id, None)

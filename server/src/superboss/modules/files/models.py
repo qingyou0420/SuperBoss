@@ -152,10 +152,23 @@ class FileUploadLifecycle(Base):
             "parts_digest IS NULL OR parts_digest ~ '^[0-9a-f]{64}$'",
             name="ck_file_upload_lifecycle_parts_digest",
         ),
+        CheckConstraint(
+            "completion_attempt_count >= 0",
+            name="ck_file_upload_lifecycle_completion_attempt_count",
+        ),
+        CheckConstraint(
+            "completion_last_error_code IS NULL OR completion_last_error_code IN ('COMPLETION_AMBIGUOUS')",
+            name="ck_file_upload_lifecycle_completion_error_code",
+        ),
         Index(
             "ix_file_upload_lifecycle_nonterminal",
             "provision_state",
             "completion_state",
+        ),
+        Index(
+            "ix_file_upload_lifecycle_completion_due",
+            "completion_state",
+            "completion_next_attempt_at",
         ),
     )
     upload_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
@@ -179,6 +192,13 @@ class FileUploadLifecycle(Base):
     completion_request_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
     prepared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completion_event_key: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
+    completion_attempt_count: Mapped[int] = mapped_column(
+        Integer, server_default=text("0"), nullable=False
+    )
+    completion_next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    completion_last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

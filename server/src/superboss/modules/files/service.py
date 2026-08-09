@@ -17,7 +17,6 @@ from superboss.core.errors import (
     FileCompletionPendingError,
     FileNotFoundError,
     FileProvisioningPendingError,
-    FileStorageFailureError,
     FileUploadSizeMismatchError,
     NotFoundError,
 )
@@ -66,6 +65,8 @@ class FileUploadProjectMismatchError(FileUploadConflictError):
 
 
 class FileService:
+    _COMPLETION_EXTERNAL_TIMEOUT_SECONDS = 20
+    _COMPLETION_AMBIGUITY_GRACE_SECONDS = 120
     def __init__(
         self,
         session: AsyncSession,
@@ -353,35 +354,67 @@ class FileService:
             await self.session.commit()
         elif lifecycle.parts_digest != digest:
             raise FileUploadConflictError()
+        now = datetime.now(UTC)
+        if (
+            lifecycle.completion_next_attempt_at is not None
+            and lifecycle.completion_next_attempt_at > now
+        ):
+            raise FileCompletionPendingError()
         lifecycle = await self.session.scalar(
             select(FileUploadLifecycle)
             .where(FileUploadLifecycle.upload_id == upload_id)
             .with_for_update()
         )
         assert lifecycle is not None
+        within_ambiguity_grace = (
+            lifecycle.completion_attempt_count > 0
+            and lifecycle.prepared_at is not None
+            and datetime.now(UTC) - lifecycle.prepared_at
+            < timedelta(seconds=self._COMPLETION_AMBIGUITY_GRACE_SECONDS)
+        )
         try:
-            metadata = await self._storage().stat_object(file.object_key)
+            metadata = await asyncio.wait_for(
+                self._storage().stat_object(file.object_key),
+                timeout=self._COMPLETION_EXTERNAL_TIMEOUT_SECONDS,
+            )
         except Exception as error:
             await self.session.rollback()
             raise FileCompletionPendingError() from error
         if metadata is None:
+            if within_ambiguity_grace:
+                await self._mark_completion_ambiguous(lifecycle)
+                raise FileCompletionPendingError()
             try:
-                metadata = await self._storage().complete_multipart(
-                    file.object_key, upload.multipart_id, canonical
+                metadata = await asyncio.wait_for(
+                    self._storage().complete_multipart(
+                        file.object_key, upload.multipart_id, canonical
+                    ),
+                    timeout=self._COMPLETION_EXTERNAL_TIMEOUT_SECONDS,
                 )
             except Exception:  # noqa: BLE001 -- a post-complete stat distinguishes ambiguity
                 try:
-                    metadata = await self._storage().stat_object(file.object_key)
-                except Exception as error:
-                    await self.session.rollback()
-                    raise FileCompletionPendingError() from error
+                    metadata = await asyncio.wait_for(
+                        self._storage().stat_object(file.object_key),
+                        timeout=self._COMPLETION_EXTERNAL_TIMEOUT_SECONDS,
+                    )
+                except Exception:  # noqa: BLE001 -- ambiguous provider result is intentionally retried
+                    metadata = None
                 if metadata is None:
-                    await self._fail_upload(file, upload, lifecycle)
-                    raise FileStorageFailureError()
+                    await self._mark_completion_ambiguous(lifecycle)
+                    raise FileCompletionPendingError()
         if metadata.size_bytes != file.size_bytes:
             await self._fail_upload(file, upload, lifecycle)
             raise FileUploadSizeMismatchError()
         return await self._finalize_completion(file, lifecycle)
+
+    async def _mark_completion_ambiguous(self, lifecycle: FileUploadLifecycle) -> None:
+        lifecycle.completion_state = "PREPARED"
+        lifecycle.completion_attempt_count += 1
+        lifecycle.completion_last_error_code = "COMPLETION_AMBIGUOUS"
+        lifecycle.completion_next_attempt_at = datetime.now(UTC) + timedelta(
+            seconds=self._COMPLETION_AMBIGUITY_GRACE_SECONDS
+        )
+        await self.session.commit()
 
     async def _finalize_completion(
         self,

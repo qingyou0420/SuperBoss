@@ -11,6 +11,24 @@ from superboss.infrastructure.s3 import Boto3ObjectStorage
 from superboss.modules.files.storage import CompletedPart, ObjectMetadata
 
 
+def test_boto3_default_client_uses_bounded_transport_config(monkeypatch) -> None:
+    """An ambiguous completion cannot leave a boto call retrying past service recovery bounds."""
+    from superboss.infrastructure import s3
+
+    captured: dict[str, object] = {}
+
+    def client(*_args: object, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(s3.boto3, "client", client)
+    _ = Boto3ObjectStorage(bucket="files-bucket", endpoint_url="http://s3")
+    config = captured["config"]
+    assert config.connect_timeout == 5
+    assert config.read_timeout == 10
+    assert config.retries["max_attempts"] == 2
+
+
 @dataclass
 class RecordingS3Client:
     """A complete local boto3 surface used by the adapter, never a network client."""

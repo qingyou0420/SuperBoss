@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 from mypy_boto3_s3 import S3Client
 
@@ -25,6 +26,7 @@ class Boto3ObjectStorage:
             endpoint_url=endpoint_url,
             aws_access_key_id=access_key_id or None,
             aws_secret_access_key=secret_access_key or None,
+            config=Config(connect_timeout=5, read_timeout=10, retries={"max_attempts": 2}),
         )
 
     async def create_multipart(self, object_key: str, content_type: str) -> str:
