@@ -53,3 +53,8 @@ class FileStorageFailureError(DomainError):
 class FileProvisioningPendingError(DomainError):
     def __init__(self) -> None:
         super().__init__("FILE_PROVISIONING_PENDING", "File upload provisioning is pending", 503)
+
+
+class FileCompletionPendingError(DomainError):
+    def __init__(self) -> None:
+        super().__init__("FILE_COMPLETION_PENDING", "File completion is pending", 503)

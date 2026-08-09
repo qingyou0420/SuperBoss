@@ -180,7 +180,7 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
             check=True,
         )
         tables, constraints, indexes = asyncio.run(catalog())
-        assert asyncio.run(revision()) == "0006_file_lifecycle_recovery"
+        assert asyncio.run(revision()) == "0007_completion_recovery"
         assert {"files", "uploads", "file_upload_lifecycle", "file_lifecycle_outbox", "file_storage_cleanup"} <= set(tables)
         assert asyncio.run(table_columns("files")) == [
             "id", "project_id", "filename", "category", "file_date", "object_key", "size_bytes",
@@ -194,7 +194,9 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
         assert asyncio.run(table_columns("file_upload_lifecycle")) == [
             "upload_id", "file_id", "project_id", "object_key", "multipart_id", "content_type",
             "declared_size_bytes", "provision_state", "completion_state", "parts_digest",
-            "completion_event_key", "created_at", "updated_at",
+            "completion_event_key", "created_at", "updated_at", "canonical_parts_json",
+            "completion_actor_kind", "completion_actor_id", "completion_actor_role",
+            "completion_request_id", "prepared_at",
         ]
         assert asyncio.run(table_columns("file_lifecycle_outbox")) == [
             "id", "kind", "dedupe_key", "file_id", "project_id", "state", "attempt_count",

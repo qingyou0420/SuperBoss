@@ -427,7 +427,7 @@ async def test_concurrent_complete_locks_upload_before_storage_completion(db_ses
         async def complete_multipart(
             self, object_key: str, multipart_id: str, parts: list[CompletedPart]
         ) -> ObjectMetadata:
-            del object_key, multipart_id, parts
+            del multipart_id, parts
             self.complete_calls += 1
             if self.complete_calls == 1:
                 try:
@@ -436,7 +436,9 @@ async def test_concurrent_complete_locks_upload_before_storage_completion(db_ses
                     pass
             else:
                 self.second_complete_arrived.set()
-            return ObjectMetadata(size_bytes=1)
+            metadata = ObjectMetadata(size_bytes=1)
+            self.objects[object_key] = metadata
+            return metadata
 
     actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
     factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
@@ -481,7 +483,7 @@ async def test_concurrent_complete_locks_upload_before_storage_completion(db_ses
         results = await asyncio.wait_for(asyncio.gather(complete_once(), complete_once()), timeout=5)
         db_session.expire_all()
         file = await db_session.get(File, file_id)
-        assert sorted(results) == [False, True]
+        assert results == [True, True]
         assert storage.complete_calls == 1
         assert file is not None and file.state == FileState.QUARANTINED
 
@@ -720,3 +722,66 @@ async def test_start_replay_recovers_after_exact_key_listing_failure(db_session,
     recovered = await service.start_upload(actor, command, "list-retry")
     assert recovered.id == upload.id and recovered.multipart_id is not None
     assert storage.create_calls == 1 and storage.list_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_completion_replay_finalizes_once_and_persists_safe_outbox(db_session, active_owner) -> None:
+    """Prepared canonical parts recover to one quarantine transition and two opaque jobs."""
+    from sqlalchemy import select
+
+    from superboss.modules.files.models import (
+        File,
+        FileLifecycleOutbox,
+        FileState,
+        FileUploadLifecycle,
+    )
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileService
+    from superboss.modules.files.storage import CompletedPart
+
+    project = Project(name="Completion recovery")
+    db_session.add(project)
+    await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    storage = InMemoryObjectStorage(complete_size=2)
+    service = FileService(db_session, storage)
+    upload = await service.start_upload(
+        actor,
+        UploadStart(
+            project_id=project.id,
+            filename="replay.pdf",
+            category="docs",
+            file_date="2026-08-09",
+            size_bytes=2,
+            sha256="0" * 64,
+        ),
+        "completion-replay",
+    )
+    request_id = uuid4()
+    parts = [CompletedPart(2, "etag-2"), CompletedPart(1, "etag-1")]
+
+    first = await service.complete_upload(actor, upload.id, parts, request_id)
+    second = await service.complete_upload(actor, upload.id, list(reversed(parts)), request_id)
+
+    lifecycle = await db_session.get(FileUploadLifecycle, upload.id)
+    outbox = list(await db_session.scalars(select(FileLifecycleOutbox).order_by(FileLifecycleOutbox.kind)))
+    assert first.id == second.id == upload.file_id
+    assert first.state == FileState.QUARANTINED
+    assert lifecycle is not None and lifecycle.completion_state == "QUARANTINED"
+    assert lifecycle.canonical_parts_json == [
+        {"part_number": 1, "etag": "etag-1"},
+        {"part_number": 2, "etag": "etag-2"},
+    ]
+    assert lifecycle.completion_actor_id == active_owner.id
+    assert lifecycle.completion_request_id == request_id
+    assert len(storage.completed) == 1
+    assert [(entry.kind, entry.file_id, entry.project_id) for entry in outbox] == [
+        ("completion_audit", upload.file_id, project.id),
+        ("scan_dispatch", upload.file_id, project.id),
+    ]
+    assert {column.name for column in FileLifecycleOutbox.__table__.columns} == {
+        "id", "kind", "dedupe_key", "file_id", "project_id", "state", "attempt_count",
+        "next_attempt_at", "locked_at", "last_error_code", "created_at", "updated_at",
+    }
+    persisted_file = await db_session.get(File, upload.file_id)
+    assert persisted_file is not None and persisted_file.state == FileState.QUARANTINED

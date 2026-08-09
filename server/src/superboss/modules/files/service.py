@@ -1,7 +1,9 @@
 import hashlib
+import json
 import re
 from collections.abc import Awaitable, Callable
-from uuid import UUID, uuid4
+from datetime import UTC, datetime
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -11,6 +13,7 @@ from superboss.core.actors import Actor, require_project_access
 from superboss.core.errors import (
     ConflictError,
     DomainError,
+    FileCompletionPendingError,
     FileNotFoundError,
     FileProvisioningPendingError,
     FileStorageFailureError,
@@ -19,6 +22,7 @@ from superboss.core.errors import (
 )
 from superboss.modules.files.models import (
     File,
+    FileLifecycleOutbox,
     FileState,
     FileStorageCleanup,
     FileUploadLifecycle,
@@ -289,7 +293,7 @@ class FileService:
         )
 
     async def complete_upload(
-        self, actor: Actor, upload_id: UUID, parts: list[CompletedPart]
+        self, actor: Actor, upload_id: UUID, parts: list[CompletedPart], request_id: UUID | None = None
     ) -> File:
         upload = await self.session.scalar(
             select(Upload).where(Upload.id == upload_id).with_for_update()
@@ -299,23 +303,79 @@ class FileService:
         file = await self.session.get(File, upload.file_id)
         if file is not None and file.project_id != upload.project_id:
             raise FileUploadProjectMismatchError()
-        if file is None or file.state != FileState.UPLOADING:
+        if file is None:
             raise FileUploadNotActiveError()
+        lifecycle = await self.session.scalar(
+            select(FileUploadLifecycle)
+            .where(FileUploadLifecycle.upload_id == upload_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if lifecycle is None or lifecycle.provision_state != "READY":
+            raise FileUploadNotActiveError()
+        await self.session.refresh(file)
         require_project_access(actor, file.project_id)
         if upload.multipart_id is None:
             raise FileUploadNotActiveError()
         if len({p.part_number for p in parts}) != len(parts):
             raise ValueError("duplicate part number")
+        canonical = sorted(parts, key=lambda p: p.part_number)
+        encoded_parts = [{"part_number": p.part_number, "etag": p.etag} for p in canonical]
+        digest = hashlib.sha256(json.dumps(encoded_parts, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+        if lifecycle.completion_state == "QUARANTINED":
+            if lifecycle.parts_digest == digest and file.state == FileState.QUARANTINED:
+                return file
+            raise FileUploadConflictError()
+        if lifecycle.completion_state == "NONE":
+            if file.state != FileState.UPLOADING:
+                raise FileUploadNotActiveError()
+            lifecycle.completion_state = "PREPARED"
+            lifecycle.parts_digest = digest
+            lifecycle.canonical_parts_json = encoded_parts
+            lifecycle.completion_actor_kind = actor.kind
+            lifecycle.completion_actor_id = actor.subject_id
+            lifecycle.completion_actor_role = actor.role.value if actor.role is not None else None
+            lifecycle.completion_request_id = request_id
+            lifecycle.prepared_at = datetime.now(UTC)
+            lifecycle.completion_event_key = uuid5(NAMESPACE_URL, f"file-complete:{upload_id}:{digest}")
+            await self.session.commit()
+        elif lifecycle.parts_digest != digest:
+            raise FileUploadConflictError()
+        lifecycle = await self.session.scalar(
+            select(FileUploadLifecycle).where(FileUploadLifecycle.upload_id == upload_id).with_for_update()
+        )
+        assert lifecycle is not None
         try:
-            metadata = await self._storage().complete_multipart(file.object_key, upload.multipart_id, sorted(parts, key=lambda p: p.part_number))
+            metadata = await self._storage().stat_object(file.object_key)
         except Exception as error:
-            await self._fail_upload(file, upload.multipart_id)
-            raise FileStorageFailureError() from error
+            await self.session.rollback()
+            raise FileCompletionPendingError() from error
+        if metadata is None:
+            try:
+                metadata = await self._storage().complete_multipart(file.object_key, upload.multipart_id, canonical)
+            except Exception:  # noqa: BLE001 -- a post-complete stat distinguishes ambiguity
+                try:
+                    metadata = await self._storage().stat_object(file.object_key)
+                except Exception as error:
+                    await self.session.rollback()
+                    raise FileCompletionPendingError() from error
+                if metadata is None:
+                    await self._fail_upload(file, upload.multipart_id)
+                    raise FileStorageFailureError()
         if metadata.size_bytes != file.size_bytes:
             await self._fail_upload(file, upload.multipart_id)
             raise FileUploadSizeMismatchError()
         file.state = FileState.QUARANTINED
-        await self.session.flush()
+        lifecycle.completion_state = "QUARANTINED"
+        event_key = lifecycle.completion_event_key
+        assert event_key is not None
+        for kind in ("scan_dispatch", "completion_audit"):
+            self.session.add(FileLifecycleOutbox(id=uuid4(), kind=kind, dedupe_key=event_key, file_id=file.id, project_id=file.project_id))
+        try:
+            await self.session.commit()
+        except IntegrityError:
+            await self.session.rollback()
+            return await self.complete_upload(actor, upload_id, parts, request_id)
         return file
 
     async def _fail_upload(self, file: File, multipart_id: str) -> None:

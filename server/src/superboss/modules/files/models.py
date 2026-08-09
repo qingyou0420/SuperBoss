@@ -20,6 +20,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -171,6 +172,12 @@ class FileUploadLifecycle(Base):
         String(32), server_default=text("'NONE'"), nullable=False
     )
     parts_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    canonical_parts_json: Mapped[list[dict[str, object]] | None] = mapped_column(JSONB, nullable=True)
+    completion_actor_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    completion_actor_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
+    completion_actor_role: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    completion_request_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
+    prepared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completion_event_key: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

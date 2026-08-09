@@ -9,7 +9,7 @@ from superboss.core.actors import Actor, get_actor
 from superboss.core.errors import DomainError
 from superboss.modules.audit.schemas import AuditEventInput
 from superboss.modules.audit.service import AuditService
-from superboss.modules.files.models import File, Upload
+from superboss.modules.files.models import File, FileUploadLifecycle, Upload
 from superboss.modules.files.schemas import UploadComplete, UploadStart
 from superboss.modules.files.service import FileService
 from superboss.modules.files.storage import CompletedPart
@@ -139,9 +139,14 @@ async def complete(
     actor: Actor = Depends(get_actor),
     service: FileService = Depends(get_service),
 ) -> dict[str, str]:
+    lifecycle = await service.session.get(FileUploadLifecycle, upload_id)
+    was_quarantined = lifecycle is not None and lifecycle.completion_state == "QUARANTINED"
     try:
         file = await service.complete_upload(
-            actor, upload_id, [CompletedPart(p.part_number, p.etag) for p in command.parts]
+            actor,
+            upload_id,
+            [CompletedPart(p.part_number, p.etag) for p in command.parts],
+            UUID(request.state.request_id),
         )
     except DomainError as error:
         await _record_upload_denial_audit(
@@ -155,21 +160,22 @@ async def complete(
         )
         raise
     await service.session.commit()
-    dispatched = request.app.state.enqueue_file_scan(file.id)
-    if isawaitable(dispatched):
-        await dispatched
-    await AuditService(request.app.state.session_factory).record(
-        AuditEventInput(
-            actor=actor,
-            action="file.upload.complete",
-            object_type="file",
-            object_id=file.id,
-            project_id=file.project_id,
-            outcome="SUCCESS",
-            request_id=UUID(request.state.request_id),
-            metadata={"state": file.state.value, "size_bytes": file.size_bytes},
+    if not was_quarantined:
+        dispatched = request.app.state.enqueue_file_scan(file.id)
+        if isawaitable(dispatched):
+            await dispatched
+        await AuditService(request.app.state.session_factory).record(
+            AuditEventInput(
+                actor=actor,
+                action="file.upload.complete",
+                object_type="file",
+                object_id=file.id,
+                project_id=file.project_id,
+                outcome="SUCCESS",
+                request_id=UUID(request.state.request_id),
+                metadata={"state": file.state.value, "size_bytes": file.size_bytes},
+            )
         )
-    )
     return {"file_id": str(file.id), "state": file.state}
 
 

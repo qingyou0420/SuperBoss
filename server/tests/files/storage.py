@@ -23,6 +23,7 @@ class InMemoryObjectStorage:
     list_error: Exception | None = None
     create_calls: int = 0
     list_calls: int = 0
+    stat_error: Exception | None = None
 
     async def create_multipart(self, object_key: str, content_type: str) -> str:
         self.create_calls += 1
@@ -39,6 +40,11 @@ class InMemoryObjectStorage:
         if self.list_error is not None:
             raise self.list_error
         return sorted(upload_id for upload_id, key in self.active.items() if key == object_key)
+
+    async def stat_object(self, object_key: str) -> ObjectMetadata | None:
+        if self.stat_error is not None:
+            raise self.stat_error
+        return self.objects.get(object_key)
 
     async def presign_upload_part(self, object_key: str, multipart_id: str, part_number: int, expires_seconds: int) -> str:
         self.expiries.append(expires_seconds)

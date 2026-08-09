@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator
 
 import boto3
+from botocore.exceptions import ClientError
 from mypy_boto3_s3 import S3Client
 
 from superboss.modules.files.storage import CompletedPart, ObjectMetadata
@@ -47,6 +48,15 @@ class Boto3ObjectStorage:
             for upload in uploads
             if upload.get("Key") == object_key and upload.get("UploadId") is not None
         )
+
+    async def stat_object(self, object_key: str) -> ObjectMetadata | None:
+        try:
+            head = await asyncio.to_thread(self.client.head_object, Bucket=self.bucket, Key=object_key)
+        except ClientError as error:
+            if error.response.get("Error", {}).get("Code") in {"404", "NoSuchKey", "NotFound"}:
+                return None
+            raise
+        return ObjectMetadata(int(head["ContentLength"]), head.get("ETag"))
 
     async def presign_upload_part(
         self, object_key: str, multipart_id: str, part_number: int, expires_seconds: int
