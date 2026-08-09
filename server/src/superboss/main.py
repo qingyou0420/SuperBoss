@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from superboss.api.router import api_router
 from superboss.core.config import Settings, get_settings
+from superboss.core.security import TokenError, decode_access_token
 from superboss.infrastructure.wecom import build_wecom_provider
 
 
@@ -24,9 +25,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def enforce_browser_csrf(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
-        if request.method in {"POST", "PUT", "PATCH", "DELETE"} and not request.headers.get(
-            "Authorization"
-        ):
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            authorization = request.headers.get("Authorization")
+            if authorization is not None and not request.cookies.get("access_token"):
+                if not authorization.startswith("Bearer "):
+                    return JSONResponse({"detail": "Invalid bearer token"}, status_code=401)
+                try:
+                    decode_access_token(active_settings, authorization.removeprefix("Bearer "))
+                except TokenError:
+                    return JSONResponse({"detail": "Invalid bearer token"}, status_code=401)
+                return await call_next(request)
             csrf_cookie = request.cookies.get("XSRF-TOKEN")
             csrf_header = request.headers.get("X-CSRF-Token")
             if (

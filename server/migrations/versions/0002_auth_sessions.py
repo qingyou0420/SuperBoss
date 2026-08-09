@@ -39,7 +39,17 @@ def upgrade() -> None:
         sa.UniqueConstraint("access_jti"),
         sa.UniqueConstraint("refresh_token_hash"),
     )
+    op.create_table(
+        "oauth_states",
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("nonce_hash", sa.String(length=64), nullable=False),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("consumed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("nonce_hash"),
+    )
 
 
 def downgrade() -> None:
+    op.drop_table("oauth_states")
     op.drop_table("auth_sessions")

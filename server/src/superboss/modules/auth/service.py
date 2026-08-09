@@ -114,6 +114,7 @@ class AuthService:
             claims = decode_access_token(self.settings, raw_token)
             session_id = UUID(str(claims["session_id"]))
             user_id = UUID(str(claims["sub"]))
+            token_role = Role(str(claims["role"]))
         except (TokenError, ValueError) as error:
             raise InvalidSession("Access token is invalid") from error
         auth_session = await self.auth_repository.by_id(session_id)
@@ -126,7 +127,7 @@ class AuthService:
         ):
             raise InvalidSession("Access token is invalid")
         user = await self.session.get(User, user_id)
-        if user is None or user.status != UserStatus.ACTIVE:
+        if user is None or user.status != UserStatus.ACTIVE or user.role != token_role:
             raise InvalidSession("Access token is invalid")
         return user
 

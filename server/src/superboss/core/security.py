@@ -57,4 +57,11 @@ def decode_access_token(settings: Settings, token: str) -> dict[str, object]:
         raise TokenError("Invalid access token") from error
     if set(payload) != {"sub", "role", "session_id", "iat", "exp", "jti"}:
         raise TokenError("Invalid access token claims")
+    if not all(
+        isinstance(payload[key], str) and payload[key]
+        for key in ("sub", "role", "session_id", "jti")
+    ):
+        raise TokenError("Invalid access token claims")
+    if not all(isinstance(payload[key], int) for key in ("iat", "exp")):
+        raise TokenError("Invalid access token claims")
     return payload

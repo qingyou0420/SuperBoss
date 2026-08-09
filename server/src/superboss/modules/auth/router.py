@@ -9,8 +9,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core.config import Settings
-from superboss.core.security import new_csrf_token
+from superboss.core.security import hash_token, new_csrf_token, utcnow
 from superboss.infrastructure.wecom import WeComError
+from superboss.modules.auth.models import OAuthState
 from superboss.modules.auth.repository import AuthRepository
 from superboss.modules.auth.schemas import SessionPair
 from superboss.modules.auth.service import AuthService, ForbiddenIdentity, InvalidSession
@@ -83,8 +84,13 @@ def _set_session_cookies(response: Response, pair: SessionPair) -> None:
 
 
 @router.get("/wecom/start")
-async def wecom_start(request: Request, response: Response) -> dict[str, str]:
+async def wecom_start(
+    request: Request, response: Response, session: AsyncSession = Depends(get_session)
+) -> dict[str, str]:
     state = secrets.token_urlsafe(32)
+    await AuthRepository(session).add_oauth_state(
+        OAuthState(nonce_hash=hash_token(state), expires_at=utcnow() + timedelta(minutes=10))
+    )
     response.set_cookie(
         _OAUTH_STATE_COOKIE,
         _state_cookie(request.app.state.settings, state),
@@ -107,8 +113,11 @@ async def wecom_callback(
     state: str | None = None,
     service: AuthService = Depends(get_service),
 ) -> None:
+    response.delete_cookie(_OAUTH_STATE_COOKIE, path="/api/v1/auth/wecom")
     _verify_state(request.app.state.settings, request.cookies.get(_OAUTH_STATE_COOKIE), state)
     assert state is not None
+    if not await service.auth_repository.consume_oauth_state(hash_token(state), utcnow()):
+        raise HTTPException(400, "Invalid OAuth state")
     try:
         pair = await service.complete_wecom_login(code, state)
     except (ForbiddenIdentity, WeComError) as error:
@@ -132,7 +141,13 @@ async def refresh(
 async def logout(
     request: Request, response: Response, service: AuthService = Depends(get_service)
 ) -> None:
-    await service.logout(request.cookies.get("access_token"), request.cookies.get("refresh_token"))
+    authorization = request.headers.get("Authorization", "")
+    access_token = (
+        authorization.removeprefix("Bearer ")
+        if authorization.startswith("Bearer ")
+        else request.cookies.get("access_token")
+    )
+    await service.logout(access_token, request.cookies.get("refresh_token"))
     response.delete_cookie("access_token", path="/")
     response.delete_cookie("refresh_token", path="/api/v1/auth")
     response.delete_cookie("XSRF-TOKEN", path="/")
@@ -140,12 +155,12 @@ async def logout(
 
 @router.get("/me")
 async def me(request: Request, service: AuthService = Depends(get_service)) -> dict[str, str]:
-    token = request.cookies.get("access_token")
-    if token is None:
-        authorization = request.headers.get("Authorization", "")
-        token = (
-            authorization.removeprefix("Bearer ") if authorization.startswith("Bearer ") else None
-        )
+    authorization = request.headers.get("Authorization", "")
+    token = (
+        authorization.removeprefix("Bearer ")
+        if authorization.startswith("Bearer ")
+        else request.cookies.get("access_token")
+    )
     if token is None:
         raise HTTPException(401, "Authentication required")
     try:

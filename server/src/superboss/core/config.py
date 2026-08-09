@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,6 +16,12 @@ class Settings(BaseSettings):
     owner_wecom_userid: str = ""
 
     model_config = SettingsConfigDict(env_prefix="SUPERBOSS_", extra="forbid")
+
+    @model_validator(mode="after")
+    def validate_secure_jwt_secret(self) -> "Settings":
+        if self.environment in {"staging", "production"} and len(self.jwt_secret.encode()) < 32:
+            raise ValueError("JWT secret must be at least 32 bytes in staging and production")
+        return self
 
 
 @lru_cache

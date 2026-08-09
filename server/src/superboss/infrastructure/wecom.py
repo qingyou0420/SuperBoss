@@ -19,8 +19,11 @@ class WeComIdentity:
 
 
 class WeComIdentityProvider:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None
+    ) -> None:
         self.settings = settings
+        self.transport = transport
 
     def authorization_url(self, state: str) -> str:
         query = urlencode(
@@ -37,7 +40,7 @@ class WeComIdentityProvider:
 
     async def exchange_code(self, code: str) -> WeComIdentity:
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=10.0, transport=self.transport) as client:
                 token_response = await client.get(
                     "https://qyapi.weixin.qq.com/cgi-bin/gettoken",
                     params={
@@ -46,18 +49,32 @@ class WeComIdentityProvider:
                     },
                 )
                 token_data = token_response.json()
-                access_token = token_data.get("access_token")
-                if token_response.status_code != 200 or not isinstance(access_token, str):
+                access_token = (
+                    token_data.get("access_token") if isinstance(token_data, dict) else None
+                )
+                if (
+                    token_response.status_code != 200
+                    or not isinstance(token_data, dict)
+                    or token_data.get("errcode") != 0
+                    or not isinstance(access_token, str)
+                    or not access_token
+                ):
                     raise WeComError("WeCom token exchange failed")
                 user_response = await client.get(
-                    "https://qyapi.weixin.qq.com/cgi-bin/user/getuserinfo",
+                    "https://qyapi.weixin.qq.com/cgi-bin/auth/getuserinfo",
                     params={"access_token": access_token, "code": code},
                 )
                 user_data = user_response.json()
         except (httpx.HTTPError, ValueError) as error:
             raise WeComError("WeCom identity exchange failed") from error
-        userid = user_data.get("UserId")
-        if user_response.status_code != 200 or not isinstance(userid, str) or not userid:
+        userid = user_data.get("userid") if isinstance(user_data, dict) else None
+        if (
+            user_response.status_code != 200
+            or not isinstance(user_data, dict)
+            or user_data.get("errcode") != 0
+            or not isinstance(userid, str)
+            or not userid
+        ):
             raise WeComError("WeCom identity exchange failed")
         return WeComIdentity(userid=userid)
 

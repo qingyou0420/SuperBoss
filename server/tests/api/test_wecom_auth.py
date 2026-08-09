@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core.config import Settings
 from superboss.main import create_app
-from superboss.modules.auth.models import AuthSession
+from superboss.modules.auth.models import AuthSession, OAuthState
 from superboss.modules.users.models import Role, User, UserStatus
 
 
@@ -22,6 +22,7 @@ async def api_client(
     with TestClient(app, base_url="https://testserver") as client:
         yield client
     await db_session.rollback()
+    await db_session.execute(delete(OAuthState))
     await db_session.execute(delete(AuthSession))
     await db_session.execute(delete(User))
     await db_session.commit()

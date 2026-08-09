@@ -8,6 +8,7 @@ def test_settings_reads_environment_from_superboss_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SUPERBOSS_ENVIRONMENT", "production")
+    monkeypatch.setenv("SUPERBOSS_JWT_SECRET", "test-only-production-key-with-thirty-two-bytes")
 
     assert Settings().environment == "production"
 
