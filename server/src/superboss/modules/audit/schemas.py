@@ -1,10 +1,11 @@
 """Validated audit inputs with bounded, Unicode-aware secret redaction."""
 
+import json
 import math
 import unicodedata
 from uuid import UUID
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from superboss.core.actors import Actor
 
@@ -12,6 +13,7 @@ _REDACTED = "[REDACTED]"
 _MAX_DEPTH = 32
 _MAX_NODES = 1000
 _MAX_TEXT_BYTES = 64 * 1024
+_MAX_JSON_INTEGER = 2**53 - 1
 _FORBIDDEN_METADATA_KEYS = frozenset(
     unicodedata.normalize("NFKC", key).casefold()
     for key in ("access_token", "refresh_token", "authorization", "cookie", "file_content", "model_input")
@@ -27,8 +29,12 @@ def sanitize_metadata(value: object) -> dict[str, object]:
     if not isinstance(value, dict):
         raise TypeError("metadata must be an object")
     budget = _Budget()
-    result = _sanitize_value(value, 0, set(), budget)
+    _validate_value(value, 0, set(), budget)
+    result = _copy_sanitized(value)
     assert isinstance(result, dict)
+    encoded = json.dumps(result, allow_nan=False, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(encoded) > _MAX_TEXT_BYTES:
+        raise ValueError("metadata exceeds JSON size budget")
     return result
 
 
@@ -48,21 +54,23 @@ class _Budget:
             raise ValueError("metadata exceeds text budget")
 
 
-def _sanitize_value(value: object, depth: int, ancestors: set[int], budget: _Budget) -> object:
+def _validate_value(value: object, depth: int, ancestors: set[int], budget: _Budget) -> None:
     budget.node()
     if depth > _MAX_DEPTH:
         raise ValueError("metadata exceeds maximum depth")
     if value is None or isinstance(value, bool):
-        return value
+        return
     if isinstance(value, str):
         budget.text(value)
-        return value
+        return
     if isinstance(value, int):
-        return value
+        if value < -_MAX_JSON_INTEGER or value > _MAX_JSON_INTEGER:
+            raise ValueError("metadata integer is outside JSON interoperability range")
+        return
     if isinstance(value, float):
         if not math.isfinite(value):
             raise ValueError("metadata numbers must be finite")
-        return value
+        return
     if isinstance(value, (dict, list)):
         identity = id(value)
         if identity in ancestors:
@@ -70,25 +78,38 @@ def _sanitize_value(value: object, depth: int, ancestors: set[int], budget: _Bud
         ancestors.add(identity)
         try:
             if isinstance(value, list):
-                return [_sanitize_value(item, depth + 1, ancestors, budget) for item in value]
-            sanitized: dict[str, object] = {}
+                for item in value:
+                    _validate_value(item, depth + 1, ancestors, budget)
+                return
             for key, item in value.items():
                 if not isinstance(key, str):
                     raise TypeError("metadata keys must be strings")
                 budget.text(key)
-                normalized_key = unicodedata.normalize("NFKC", key).casefold()
-                sanitized[key] = (
-                    _REDACTED
-                    if normalized_key in _FORBIDDEN_METADATA_KEYS
-                    else _sanitize_value(item, depth + 1, ancestors, budget)
-                )
-            return sanitized
+                _validate_value(item, depth + 1, ancestors, budget)
+            return
         finally:
             ancestors.remove(identity)
     raise ValueError("metadata must contain JSON values only")
 
 
+def _copy_sanitized(value: object) -> object:
+    """Copy already validated metadata; sensitive subtrees are never copied."""
+    if isinstance(value, list):
+        return [_copy_sanitized(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: (
+                _REDACTED
+                if unicodedata.normalize("NFKC", key).casefold() in _FORBIDDEN_METADATA_KEYS
+                else _copy_sanitized(item)
+            )
+            for key, item in value.items()
+        }
+    return value
+
+
 class AuditEventInput(BaseModel):
+    model_config = ConfigDict(hide_input_in_errors=True)
     actor: Actor
     action: str
     object_type: str

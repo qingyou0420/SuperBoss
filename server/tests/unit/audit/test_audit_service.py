@@ -1,5 +1,6 @@
 """Audit service persistence and redaction tests."""
 
+import copy
 from uuid import uuid4
 
 import pytest
@@ -118,3 +119,69 @@ def test_audit_metadata_rejects_cycles_and_excessive_depth(metadata: dict[str, o
             request_id=uuid4(),
             metadata=metadata,
         )
+
+
+@pytest.mark.parametrize(
+    "key", ["access_token", "refresh_token", "authorization", "cookie", "file_content", "model_input"]
+)
+@pytest.mark.parametrize("invalid", [object(), float("nan"), float("inf")])
+def test_forbidden_metadata_values_are_still_validated(key: str, invalid: object) -> None:
+    """Redaction must not make malformed sensitive values silently acceptable."""
+    with pytest.raises(ValidationError, match="invalid audit metadata") as error:
+        AuditEventInput(
+            actor=Actor("user", uuid4(), Role.OWNER, frozenset(), frozenset()),
+            action="project.read",
+            object_type="project",
+            outcome="SUCCESS",
+            request_id=uuid4(),
+            metadata={key: invalid},
+        )
+    assert "ORIGINAL-SECRET" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "key", ["access_token", "refresh_token", "authorization", "cookie", "file_content", "model_input"]
+)
+def test_forbidden_metadata_cycles_are_still_rejected(key: str) -> None:
+    """A sensitive key cannot hide a self-referential structure from validation."""
+    cycle: dict[str, object] = {}
+    cycle[key] = cycle
+    with pytest.raises(ValidationError, match="invalid audit metadata"):
+        AuditEventInput(
+            actor=Actor("user", uuid4(), Role.OWNER, frozenset(), frozenset()),
+            action="project.read",
+            object_type="project",
+            outcome="SUCCESS",
+            request_id=uuid4(),
+            metadata=cycle,
+        )
+
+
+@pytest.mark.parametrize("metadata", [{"n": 10**100000}, {"text": "x" * (64 * 1024)}])
+def test_audit_metadata_rejects_values_that_exceed_json_size_budget(metadata: dict[str, object]) -> None:
+    """Oversized accepted values would otherwise fail later in the database JSON serializer."""
+    with pytest.raises(ValidationError, match="invalid audit metadata"):
+        AuditEventInput(
+            actor=Actor("user", uuid4(), Role.OWNER, frozenset(), frozenset()),
+            action="project.read",
+            object_type="project",
+            outcome="SUCCESS",
+            request_id=uuid4(),
+            metadata=metadata,
+        )
+
+
+def test_audit_metadata_copy_and_redaction_do_not_mutate_caller() -> None:
+    """Sanitizing audit metadata must not alter an application's in-memory request object."""
+    metadata: dict[str, object] = {"nested": [{"access_token": "ORIGINAL-SECRET"}]}
+    original = copy.deepcopy(metadata)
+    event = AuditEventInput(
+        actor=Actor("user", uuid4(), Role.OWNER, frozenset(), frozenset()),
+        action="project.read",
+        object_type="project",
+        outcome="SUCCESS",
+        request_id=uuid4(),
+        metadata=metadata,
+    )
+    assert metadata == original
+    assert event.metadata == {"nested": [{"access_token": "[REDACTED]"}]}
