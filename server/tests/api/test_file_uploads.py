@@ -7,7 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core.config import Settings
 from superboss.main import create_app
-from superboss.modules.projects.models import Project
+from superboss.modules.projects.models import Project, ProjectMember
+from superboss.modules.users.models import Role, User, UserStatus
 from tests.files.storage import InMemoryObjectStorage
 
 
@@ -34,6 +35,21 @@ async def test_owner_starts_upload_with_injected_storage(file_client, db_session
     _login(client)
     response = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "happy", "X-Request-ID": "bba39a39-47ba-4ac5-9250-ccdba1d7f25e"})
     assert response.status_code == 201 and response.headers["X-Request-ID"] == "bba39a39-47ba-4ac5-9250-ccdba1d7f25e"
+
+
+@pytest.mark.asyncio
+async def test_assigned_staff_starts_upload(file_client, db_session: AsyncSession) -> None:
+    from superboss.modules.files.models import File
+    client, _storage = file_client
+    staff = User(wecom_userid="staff-1", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
+    project = Project(name="Staff HTTP")
+    db_session.add_all([staff, project]); await db_session.flush(); db_session.add(ProjectMember(project_id=project.id, user_id=staff.id)); await db_session.commit()
+    started = client.get("/api/v1/auth/wecom/start")
+    assert client.get("/api/v1/auth/wecom/callback", params={"code": "staff-code", "state": started.json()["state"]}).status_code == 204
+    response = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "staff-upload"})
+    assert response.status_code == 201
+    file = await db_session.get(File, response.json()["file_id"])
+    assert file is not None and file.project_id == project.id and file.uploader_id == staff.id and file.uploader_kind == "user"
 from pydantic import ValidationError
 
 
