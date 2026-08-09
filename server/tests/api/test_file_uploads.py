@@ -474,3 +474,52 @@ async def test_foreign_staff_cannot_complete_upload(file_client, db_session: Asy
     assert file is not None and file.state.value == "UPLOADING"
     assert upload.multipart_id in storage.active and storage.completed == {} and dispatched == []
     assert not [event for event in events if event.action == "file.upload.complete" and event.outcome == "SUCCESS"]
+
+
+@pytest.mark.asyncio
+async def test_anonymous_complete_uses_authentication_error_before_csrf(file_client, db_session: AsyncSession) -> None:
+    from uuid import uuid4
+
+    from sqlalchemy import select
+
+    from superboss.modules.audit.models import AuditLog
+
+    client, storage = file_client
+    dispatched: list[object] = []
+    client.app.state.enqueue_file_scan = lambda file_id: dispatched.append(file_id)
+
+    response = client.post(
+        f"/api/v1/files/uploads/{uuid4()}/complete",
+        json={"parts": [{"part_number": 1, "etag": "etag"}]},
+    )
+
+    events = list((await db_session.scalars(select(AuditLog))).all())
+    assert response.status_code == 401 and response.json()["error"]["code"] == "AUTHENTICATION_REQUIRED"
+    assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"]
+    assert storage.completed == {} and storage.expiries == [] and dispatched == [] and events == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("csrf", [None, "wrong"])
+async def test_owner_complete_requires_valid_csrf(file_client, db_session: AsyncSession, csrf: str | None) -> None:
+    from uuid import uuid4
+
+    from sqlalchemy import select
+
+    from superboss.modules.audit.models import AuditLog
+
+    client, storage = file_client
+    dispatched: list[object] = []
+    client.app.state.enqueue_file_scan = lambda file_id: dispatched.append(file_id)
+    _login(client)
+    headers = {} if csrf is None else {"X-CSRF-Token": csrf}
+    response = client.post(
+        f"/api/v1/files/uploads/{uuid4()}/complete",
+        json={"parts": [{"part_number": 1, "etag": "etag"}]},
+        headers=headers,
+    )
+
+    events = list((await db_session.scalars(select(AuditLog))).all())
+    assert response.status_code == 403 and response.json()["error"]["code"] == "CSRF_VALIDATION_FAILED"
+    assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"]
+    assert storage.completed == {} and storage.expiries == [] and dispatched == [] and events == []
