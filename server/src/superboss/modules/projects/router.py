@@ -39,19 +39,20 @@ async def create_project(
     actor: Actor = Depends(get_actor),
     service: ProjectService = Depends(get_service),
 ) -> ProjectRead:
-    return ProjectRead.model_validate(
-        await service.create(actor, command, UUID(request.state.request_id))
-    )
+    request_id = UUID(request.state.request_id)
+    project = await service.create(actor, command, request_id)
+    await service.commit_and_record_success(actor, "project.create", request_id, project.id)
+    return ProjectRead.model_validate(project)
 
 
 @router.get("", response_model=list[ProjectRead])
 async def list_projects(
     request: Request, actor: Actor = Depends(get_actor), service: ProjectService = Depends(get_service)
 ) -> list[ProjectRead]:
-    return [
-        ProjectRead.model_validate(project)
-        for project in await service.list(actor, UUID(request.state.request_id))
-    ]
+    request_id = UUID(request.state.request_id)
+    projects = await service.list(actor, request_id)
+    await service.commit_and_record_success(actor, "project.list", request_id)
+    return [ProjectRead.model_validate(project) for project in projects]
 
 
 @router.get("/{project_id}", response_model=ProjectRead)
@@ -61,4 +62,7 @@ async def get_project(
     actor: Actor = Depends(get_actor),
     service: ProjectService = Depends(get_service),
 ) -> ProjectRead:
-    return ProjectRead.model_validate(await service.get(actor, project_id, UUID(request.state.request_id)))
+    request_id = UUID(request.state.request_id)
+    project = await service.get(actor, project_id, request_id)
+    await service.commit_and_record_success(actor, "project.read", request_id, project_id)
+    return ProjectRead.model_validate(project)

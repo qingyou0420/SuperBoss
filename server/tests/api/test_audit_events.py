@@ -97,3 +97,22 @@ def test_audit_log_has_no_http_mutation_routes(client: TestClient) -> None:
     """An exposed audit mutation endpoint would violate append-only event history."""
     paths = [getattr(route, "path", "") for route in client.app.routes]
     assert all("audit" not in path for path in paths)
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "status"),
+    [
+        ("post", "/api/v1/projects/not/a/route", 404),
+        ("put", "/api/v1/projects/not/a/route", 404),
+        ("patch", "/api/v1/projects/not/a/route", 404),
+        ("delete", "/api/v1/projects/not/a/route", 404),
+        ("post", "/api/v1/projects/not-a-uuid", 405),
+    ],
+)
+def test_unsafe_unmatched_project_responses_always_have_request_id(
+    client: TestClient, method: str, path: str, status: int
+) -> None:
+    """The anonymous project-write exception must not bypass correlation headers."""
+    response = getattr(client, method)(path)
+    assert response.status_code == status
+    assert UUID(response.headers["X-Request-ID"])

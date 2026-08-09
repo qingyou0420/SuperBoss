@@ -65,7 +65,7 @@ async def test_record_redacts_forbidden_metadata_keys_at_every_depth(
 
 def test_audit_metadata_rejects_non_json_objects() -> None:
     """Coercing arbitrary objects can persist opaque, non-portable audit metadata."""
-    with pytest.raises(ValidationError, match="metadata must contain JSON values only"):
+    with pytest.raises(ValidationError, match="invalid audit metadata"):
         AuditEventInput(
             actor=Actor("user", uuid4(), Role.OWNER, frozenset(), frozenset()),
             action="project.read",
@@ -73,4 +73,48 @@ def test_audit_metadata_rejects_non_json_objects() -> None:
             outcome="SUCCESS",
             request_id=uuid4(),
             metadata={"unserializable": object()},
+        )
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "ACCESS_TOKEN",
+        "acce\N{LATIN SMALL LETTER LONG S}\N{LATIN SMALL LETTER LONG S}_token",
+        "\N{FULLWIDTH LATIN SMALL LETTER A}\N{FULLWIDTH LATIN SMALL LETTER C}\N{FULLWIDTH LATIN SMALL LETTER C}\N{FULLWIDTH LATIN SMALL LETTER E}\N{FULLWIDTH LATIN SMALL LETTER S}\N{FULLWIDTH LATIN SMALL LETTER S}_\N{FULLWIDTH LATIN SMALL LETTER T}\N{FULLWIDTH LATIN SMALL LETTER O}\N{FULLWIDTH LATIN SMALL LETTER K}\N{FULLWIDTH LATIN SMALL LETTER E}\N{FULLWIDTH LATIN SMALL LETTER N}",
+    ],
+)
+def test_audit_metadata_redacts_unicode_equivalent_sensitive_keys(key: str) -> None:
+    """Unicode compatibility spellings must not bypass credential redaction."""
+    event = AuditEventInput(
+        actor=Actor("user", uuid4(), Role.OWNER, frozenset(), frozenset()),
+        action="project.read",
+        object_type="project",
+        outcome="SUCCESS",
+        request_id=uuid4(),
+        metadata={"nested": [{key: "ORIGINAL-SECRET"}]},
+    )
+    assert event.metadata == {"nested": [{key: "[REDACTED]"}]}
+
+
+@pytest.mark.parametrize("metadata", [{"loop": None}, {"deep": {}}])
+def test_audit_metadata_rejects_cycles_and_excessive_depth(metadata: dict[str, object]) -> None:
+    """Unbounded recursive inputs must become validation failures, never interpreter recursion errors."""
+    if "loop" in metadata:
+        metadata["loop"] = metadata
+    else:
+        cursor = metadata["deep"]
+        assert isinstance(cursor, dict)
+        for _ in range(33):
+            next_value: dict[str, object] = {}
+            cursor["deep"] = next_value
+            cursor = next_value
+    with pytest.raises(ValidationError):
+        AuditEventInput(
+            actor=Actor("user", uuid4(), Role.OWNER, frozenset(), frozenset()),
+            action="project.read",
+            object_type="project",
+            outcome="SUCCESS",
+            request_id=uuid4(),
+            metadata=metadata,
         )

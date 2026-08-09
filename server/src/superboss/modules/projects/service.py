@@ -55,11 +55,9 @@ class ProjectService:
         project = Project(name=command.name, is_test=command.is_test)
         try:
             await self.repository.create(project)
-            await self.repository.session.commit()
         except IntegrityError as error:
             await self.repository.session.rollback()
             raise ConflictError() from error
-        await self._record(actor, "project.create", "SUCCESS", request_id, project.id)
         return project
 
     async def list(self, actor: Actor, request_id: UUID | None = None) -> list[Project]:
@@ -72,7 +70,6 @@ class ProjectService:
             projects = await self.repository.list_all()
         else:
             projects = await self.repository.list_for_staff(actor.subject_id)
-        await self._record(actor, "project.list", "SUCCESS", request_id)
         return projects
 
     async def get(self, actor: Actor, project_id: UUID, request_id: UUID | None = None) -> Project:
@@ -89,5 +86,11 @@ class ProjectService:
         except ForbiddenError:
             await self._record(actor, "project.read", "DENIED", request_id, project_id)
             raise
-        await self._record(actor, "project.read", "SUCCESS", request_id, project_id)
         return project
+
+    async def commit_and_record_success(
+        self, actor: Actor, action: str, request_id: UUID, project_id: UUID | None = None
+    ) -> None:
+        """Close the business transaction before independently committing success evidence."""
+        await self.repository.session.commit()
+        await self._record(actor, action, "SUCCESS", request_id, project_id)

@@ -43,6 +43,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             headers={"X-Request-ID": request_id},
         )
 
+    def finalize_response(request: Request, response: Response) -> Response:
+        response.headers["X-Request-ID"] = request.state.request_id
+        return response
+
     @app.exception_handler(DomainError)
     async def handle_domain_error(request: Request, error: DomainError) -> JSONResponse:
         return error_response(request, error.code, error.message, error.status_code)
@@ -78,11 +82,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     return error_response(
                         request, "AUTHENTICATION_REQUIRED", "Authentication required", 401
                     )
-                response = await call_next(request)
-                response.headers["X-Request-ID"] = request.state.request_id
-                return response
+                return finalize_response(request, await call_next(request))
             if not has_browser_credentials and request.url.path.startswith("/api/v1/projects"):
-                return await call_next(request)
+                return finalize_response(request, await call_next(request))
             csrf_cookie = request.cookies.get("XSRF-TOKEN")
             csrf_header = request.headers.get("X-CSRF-Token")
             if (
@@ -91,9 +93,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 or not secrets.compare_digest(csrf_cookie, csrf_header)
             ):
                 return error_response(request, "CSRF_VALIDATION_FAILED", "CSRF validation failed", 403)
-        response = await call_next(request)
-        response.headers["X-Request-ID"] = request.state.request_id
-        return response
+        return finalize_response(request, await call_next(request))
 
     app.include_router(api_router, prefix="/api/v1")
     return app
