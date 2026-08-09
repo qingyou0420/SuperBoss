@@ -153,6 +153,76 @@ async def test_boto3_adapter_lists_only_exact_key_multipart_ids_off_loop() -> No
 
 
 @pytest.mark.asyncio
+async def test_boto3_adapter_paginates_exact_key_multipart_ids_off_loop() -> None:
+    """Discovery must not strand page-two multipart IDs behind a 1000-item response."""
+    object_key = "projects/p/x.pdf"
+
+    @dataclass
+    class PaginatedClient:
+        calls: list[dict[str, Any]] = field(default_factory=list)
+        thread_ids: list[int] = field(default_factory=list)
+
+        def list_multipart_uploads(self, **kwargs: Any) -> dict[str, object]:
+            self.calls.append(kwargs)
+            self.thread_ids.append(threading.get_ident())
+            if len(self.calls) == 1:
+                return {
+                    "Uploads": [
+                        {"Key": object_key, "UploadId": f"upload-{number:04d}"}
+                        for number in range(1000)
+                    ]
+                    + [{"Key": f"{object_key}.neighbor", "UploadId": "neighbor"}],
+                    "IsTruncated": True,
+                    "NextKeyMarker": object_key,
+                    "NextUploadIdMarker": "upload-0999",
+                }
+            return {
+                "Uploads": [{"Key": object_key, "UploadId": "upload-1000"}],
+                "IsTruncated": False,
+            }
+
+    client = PaginatedClient()
+    storage = Boto3ObjectStorage(bucket="files-bucket", client=client)  # type: ignore[arg-type]
+    main_thread = threading.get_ident()
+
+    ids = await storage.list_multipart_uploads(object_key)
+
+    assert ids == [f"upload-{number:04d}" for number in range(1001)]
+    assert client.calls == [
+        {"Bucket": "files-bucket", "Prefix": object_key},
+        {
+            "Bucket": "files-bucket",
+            "Prefix": object_key,
+            "KeyMarker": object_key,
+            "UploadIdMarker": "upload-0999",
+        },
+    ]
+    assert all(thread_id != main_thread for thread_id in client.thread_ids)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("marker_response", [{}, {"NextKeyMarker": "same", "NextUploadIdMarker": "same"}])
+async def test_boto3_adapter_rejects_nonprogressing_multipart_pagination(
+    marker_response: dict[str, str]
+) -> None:
+    """Malformed or repeated truncated-page markers must fail boundedly, never loop."""
+    @dataclass
+    class BrokenPaginationClient:
+        calls: int = 0
+
+        def list_multipart_uploads(self, **_kwargs: Any) -> dict[str, object]:
+            self.calls += 1
+            return {"Uploads": [], "IsTruncated": True, **marker_response}
+
+    client = BrokenPaginationClient()
+    storage = Boto3ObjectStorage(bucket="files-bucket", client=client)  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError, match="multipart pagination"):
+        await storage.list_multipart_uploads("projects/p/x.pdf")
+    assert client.calls <= 2
+
+
+@pytest.mark.asyncio
 async def test_boto3_adapter_deletes_exact_object_off_loop() -> None:
     """Compensation deletion must not run the blocking client on the event loop."""
     client = RecordingS3Client()

@@ -11,6 +11,10 @@ from mypy_boto3_s3 import S3Client
 from superboss.modules.files.storage import CompletedPart, ObjectMetadata
 
 
+class MultipartPaginationError(RuntimeError):
+    """The provider returned a truncated multipart listing without forward progress."""
+
+
 class Boto3ObjectStorage:
     def __init__(
         self,
@@ -39,17 +43,41 @@ class Boto3ObjectStorage:
         return str(result["UploadId"])
 
     async def list_multipart_uploads(self, object_key: str) -> list[str]:
-        result = await asyncio.to_thread(
-            self.client.list_multipart_uploads,
-            Bucket=self.bucket,
-            Prefix=object_key,
-        )
-        uploads = result.get("Uploads", [])
-        return sorted(
-            str(upload["UploadId"])
-            for upload in uploads
-            if upload.get("Key") == object_key and upload.get("UploadId") is not None
-        )
+        multipart_ids: set[str] = set()
+        seen_markers: set[tuple[str, str]] = set()
+        key_marker: str | None = None
+        upload_id_marker: str | None = None
+        while True:
+            if key_marker is not None and upload_id_marker is not None:
+                result = await asyncio.to_thread(
+                    self.client.list_multipart_uploads,
+                    Bucket=self.bucket,
+                    Prefix=object_key,
+                    KeyMarker=key_marker,
+                    UploadIdMarker=upload_id_marker,
+                )
+            else:
+                result = await asyncio.to_thread(
+                    self.client.list_multipart_uploads,
+                    Bucket=self.bucket,
+                    Prefix=object_key,
+                )
+            multipart_ids.update(
+                str(upload["UploadId"])
+                for upload in result.get("Uploads", [])
+                if upload.get("Key") == object_key and upload.get("UploadId") is not None
+            )
+            if not result.get("IsTruncated", False):
+                return sorted(multipart_ids)
+            next_key_marker = result.get("NextKeyMarker")
+            next_upload_id_marker = result.get("NextUploadIdMarker")
+            if not isinstance(next_key_marker, str) or not isinstance(next_upload_id_marker, str):
+                raise MultipartPaginationError("invalid multipart pagination")
+            next_markers = (next_key_marker, next_upload_id_marker)
+            if next_markers in seen_markers:
+                raise MultipartPaginationError("invalid multipart pagination")
+            seen_markers.add(next_markers)
+            key_marker, upload_id_marker = next_markers
 
     async def stat_object(self, object_key: str) -> ObjectMetadata | None:
         try:
