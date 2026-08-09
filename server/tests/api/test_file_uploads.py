@@ -147,11 +147,22 @@ def test_start_rejects_unsafe_category(file_client, category: str) -> None:
     assert response.status_code == 422 and response.json()["error"]["code"] == "VALIDATION_ERROR" and storage.active == {}
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("key", ["", "x" * 256, "x\x7f"])
-def test_start_rejects_invalid_idempotency_key(file_client, key: str) -> None:
+async def test_start_rejects_invalid_idempotency_key(file_client, db_session: AsyncSession, key: str) -> None:
+    from sqlalchemy import func, select
+    from superboss.modules.files.models import File, Upload
     client, storage = file_client; _login(client)
     response = client.post("/api/v1/files/uploads", json={"project_id": "00000000-0000-0000-0000-000000000001", "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": key})
     assert response.status_code == 422 and response.json()["error"]["code"] == "VALIDATION_ERROR" and storage.active == {}
+    assert await db_session.scalar(select(func.count()).select_from(File)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(Upload)) == 0
+
+
+def test_start_requires_idempotency_key(file_client) -> None:
+    client, storage = file_client; _login(client)
+    response = client.post("/api/v1/files/uploads", json={"project_id": "00000000-0000-0000-0000-000000000001", "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))})
+    assert response.status_code == 422 and response.json()["error"]["code"] == "VALIDATION_ERROR" and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and storage.active == {}
 
 
 @pytest.mark.asyncio
