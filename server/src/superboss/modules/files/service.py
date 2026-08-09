@@ -188,7 +188,9 @@ class FileService:
     async def complete_upload(
         self, actor: Actor, upload_id: UUID, parts: list[CompletedPart]
     ) -> File:
-        upload = await self.session.get(Upload, upload_id)
+        upload = await self.session.scalar(
+            select(Upload).where(Upload.id == upload_id).with_for_update()
+        )
         if upload is None:
             raise FileUploadNotFoundError()
         require_project_access(actor, upload.project_id)

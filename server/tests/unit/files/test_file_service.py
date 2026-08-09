@@ -398,3 +398,83 @@ async def test_non_idempotency_integrity_error_is_not_translated(db_session, act
     assert "" in storage.aborted
     assert await db_session.scalar(select(func.count()).select_from(File)) == 0
     assert await db_session.scalar(select(func.count()).select_from(Upload)) == 0
+
+
+@pytest.mark.asyncio
+async def test_concurrent_complete_locks_upload_before_storage_completion(db_session, active_owner) -> None:
+    """Without a row lock both sessions pass the state check and complete the same upload."""
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from superboss.modules.files.models import File, FileState
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileService, FileUploadNotActiveError
+    from superboss.modules.files.storage import CompletedPart, ObjectMetadata
+
+    class RacingCompleteStorage(InMemoryObjectStorage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.complete_calls = 0
+            self.second_complete_arrived = asyncio.Event()
+
+        async def complete_multipart(
+            self, object_key: str, multipart_id: str, parts: list[CompletedPart]
+        ) -> ObjectMetadata:
+            del object_key, multipart_id, parts
+            self.complete_calls += 1
+            if self.complete_calls == 1:
+                try:
+                    await asyncio.wait_for(self.second_complete_arrived.wait(), timeout=0.5)
+                except TimeoutError:
+                    pass
+            else:
+                self.second_complete_arrived.set()
+            return ObjectMetadata(size_bytes=1)
+
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    for round_number in range(3):
+        project = Project(name=f"Complete race {round_number}")
+        db_session.add(project)
+        await db_session.commit()
+        storage = RacingCompleteStorage()
+        upload = await FileService(db_session, storage).start_upload(
+            actor,
+            UploadStart(
+                project_id=project.id,
+                filename="x.pdf",
+                size_bytes=1,
+                sha256="0" * 64,
+                category="资料",
+                file_date="2026-08-09",
+            ),
+            f"complete-race-{round_number}",
+        )
+        await db_session.commit()
+        file_id = upload.file_id
+        barrier = asyncio.Barrier(2)
+
+        async def complete_once(
+            race_barrier: asyncio.Barrier = barrier,
+            race_storage: RacingCompleteStorage = storage,
+            upload_id: UUID = upload.id,
+        ) -> bool:
+            async with factory() as session:
+                await race_barrier.wait()
+                try:
+                    await FileService(session, race_storage).complete_upload(
+                        actor, upload_id, [CompletedPart(1, "etag")]
+                    )
+                    await session.commit()
+                    return True
+                except FileUploadNotActiveError:
+                    await session.rollback()
+                    return False
+
+        results = await asyncio.wait_for(asyncio.gather(complete_once(), complete_once()), timeout=5)
+        db_session.expire_all()
+        file = await db_session.get(File, file_id)
+        assert sorted(results) == [False, True]
+        assert storage.complete_calls == 1
+        assert file is not None and file.state == FileState.QUARANTINED
