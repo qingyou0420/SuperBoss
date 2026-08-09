@@ -1,13 +1,17 @@
 """Audit behavior exposed through real project HTTP requests."""
 
+import ast
 import asyncio
+import inspect
 from collections.abc import AsyncIterator
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
 import pytest_asyncio
 from fastapi import Depends, Request
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -332,3 +336,60 @@ async def test_concurrent_request_ids_keep_audit_actors_isolated(
         assert await db_session.scalar(select(AuditLog)) is None
         assert await db_session.scalar(select(Project)) is None
         assert await db_session.scalar(select(User)) is None
+
+
+@pytest.mark.asyncio
+async def test_audit_is_append_only_at_route_and_source_boundaries(
+    client: TestClient, db_session: AsyncSession
+) -> None:
+    """No unsafe route or audit implementation may update/delete a durable event."""
+    seed = AuditLog(
+        actor_kind="system",
+        actor_id=None,
+        action="seed.action",
+        object_type="seed",
+        object_id=None,
+        project_id=None,
+        outcome="SUCCESS",
+        metadata_json={"fixed": "value"},
+        request_id=UUID("99e3d94e-9c94-44df-86b1-2399aa63bbd0"),
+    )
+    db_session.add(seed)
+    await db_session.commit()
+    seed_id = seed.id
+    expected = (seed.actor_kind, seed.action, seed.object_type, seed.outcome, seed.metadata_json, seed.request_id)
+    try:
+        unsafe = {"POST", "PUT", "PATCH", "DELETE"}
+        for route in client.app.routes:
+            if not isinstance(route, APIRoute) or not (route.methods & unsafe):
+                continue
+            endpoint_module = route.endpoint.__module__
+            parameter_text = str(inspect.signature(route.endpoint))
+            assert not endpoint_module.startswith("superboss.modules.audit")
+            assert "AuditLog" not in parameter_text and "AuditService" not in parameter_text
+        _login(client, "owner-code")
+        csrf = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}
+        for method, path in [("post", "/api/v1/audit"), ("put", "/api/v1/events/1"), ("delete", "/api/v1/logs/1")]:
+            response = getattr(client, method)(path, headers=csrf)
+            assert response.status_code in {404, 405}
+        db_session.expire_all()
+        unchanged = await db_session.get(AuditLog, seed_id)
+        assert unchanged is not None
+        assert (unchanged.actor_kind, unchanged.action, unchanged.object_type, unchanged.outcome, unchanged.metadata_json, unchanged.request_id) == expected
+        public_methods = {
+            name for name, value in inspect.getmembers(AuditService, inspect.isfunction) if not name.startswith("_")
+        }
+        assert public_methods == {"record"}
+        audit_root = Path(__file__).resolve().parents[2] / "src" / "superboss" / "modules" / "audit"
+        for source in audit_root.glob("*.py"):
+            tree = ast.parse(source.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    assert "update" not in node.name.lower() and "delete" not in node.name.lower()
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                    assert node.func.attr not in {"update", "delete"}
+    finally:
+        await db_session.rollback()
+        await db_session.execute(delete(AuditLog))
+        await db_session.commit()
+        assert await db_session.scalar(select(AuditLog)) is None
