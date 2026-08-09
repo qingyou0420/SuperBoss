@@ -974,3 +974,50 @@ async def test_completion_delivery_retries_same_durable_scan_key_after_dispatch_
     assert [job.state for job in jobs] == ["DELIVERED", "DELIVERED"]
     assert seen == [(file_id, jobs[1].dedupe_key)]
     assert len(list(await db_session.scalars(select(AuditLog)))) == 1
+
+
+@pytest.mark.asyncio
+async def test_database_file_delete_snapshots_cleanup_before_cascade(db_session, active_owner) -> None:
+    """The database trigger preserves storage coordinates after ORM file deletion."""
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from superboss.modules.files.models import File, FileStorageCleanup, Upload
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileLifecycleService, FileService
+
+    project = Project(name="Delete cleanup")
+    db_session.add(project)
+    await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    storage = InMemoryObjectStorage()
+    upload = await FileService(db_session, storage).start_upload(
+        actor,
+        UploadStart(
+            project_id=project.id,
+            filename="delete.pdf",
+            category="docs",
+            file_date="2026-08-09",
+            size_bytes=1,
+            sha256="0" * 64,
+        ),
+        "delete-cleanup",
+    )
+    file = await db_session.get(File, upload.file_id)
+    assert file is not None and upload.multipart_id is not None
+    object_key = file.object_key
+    upload_id = upload.id
+    await db_session.delete(file)
+    await db_session.commit()
+    db_session.expire_all()
+
+    jobs = list(await db_session.scalars(select(FileStorageCleanup).order_by(FileStorageCleanup.operation)))
+    assert [job.operation for job in jobs] == ["ABORT_MULTIPART", "DELETE_OBJECT"]
+    assert all(job.state == "PENDING" and job.object_key == object_key for job in jobs)
+    assert await db_session.get(Upload, upload_id) is None
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    assert await FileLifecycleService(factory, storage).reconcile() == 2
+    db_session.expire_all()
+    jobs = list(await db_session.scalars(select(FileStorageCleanup).order_by(FileStorageCleanup.operation)))
+    assert [job.state for job in jobs] == ["DONE", "DONE"]
+    assert storage.active == {}

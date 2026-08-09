@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -434,7 +434,7 @@ class FileService:
                 select(FileStorageCleanup).where(
                     FileStorageCleanup.lifecycle_id == lifecycle_id,
                     FileStorageCleanup.state != "DONE",
-                )
+                ).order_by(case((FileStorageCleanup.operation == "DELETE_OBJECT", 0), else_=1))
             )
         )
         for cleanup in cleanups:
@@ -572,7 +572,10 @@ class FileLifecycleService:
                 await session.scalars(
                     select(FileStorageCleanup)
                     .where(FileStorageCleanup.state.in_(("PENDING", "RUNNING")))
-                    .order_by(FileStorageCleanup.next_attempt_at)
+                    .order_by(
+                        case((FileStorageCleanup.operation == "DELETE_OBJECT", 0), else_=1),
+                        FileStorageCleanup.next_attempt_at,
+                    )
                     .with_for_update(skip_locked=True)
                     .limit(limit)
                 )
@@ -607,6 +610,8 @@ class FileLifecycleService:
                 )
             )
             for lifecycle in lifecycles:
+                if lifecycle.provision_state == "CANCEL_REQUESTED":
+                    continue
                 upload = await session.get(Upload, lifecycle.upload_id)
                 file = await session.get(File, lifecycle.file_id)
                 if upload is None or file is None or upload.multipart_id is None:

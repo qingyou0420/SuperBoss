@@ -234,6 +234,13 @@ class FileStorageCleanup(Base):
         UniqueConstraint(
             "operation", "dedupe_key", name="uq_file_storage_cleanup_operation_dedupe"
         ),
+        Index(
+            "uq_file_storage_cleanup_operation_target",
+            "operation",
+            "object_key",
+            text("COALESCE(multipart_id, '')"),
+            unique=True,
+        ),
         CheckConstraint(
             "operation IN ('ABORT_MULTIPART','DELETE_OBJECT')",
             name="ck_file_storage_cleanup_operation",

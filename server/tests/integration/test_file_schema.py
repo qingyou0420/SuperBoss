@@ -98,6 +98,17 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
         finally:
             await connection.close()
 
+    async def trigger_names() -> set[str]:
+        connection = await asyncpg.connect(temporary_url.replace("postgresql+asyncpg", "postgresql"))
+        try:
+            rows = await connection.fetch(
+                "SELECT tgname FROM pg_trigger JOIN pg_class ON pg_class.oid = tgrelid "
+                "WHERE relname = 'files' AND NOT tgisinternal"
+            )
+            return {row["tgname"] for row in rows}
+        finally:
+            await connection.close()
+
     legacy_project_id = uuid4()
     legacy_file_id = uuid4()
     legacy_upload_id = uuid4()
@@ -180,7 +191,8 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
             check=True,
         )
         tables, constraints, indexes = asyncio.run(catalog())
-        assert asyncio.run(revision()) == "0007_completion_recovery"
+        assert asyncio.run(revision()) == "0008_file_delete_cleanup"
+        assert "trg_files_snapshot_storage_cleanup" in asyncio.run(trigger_names())
         assert {"files", "uploads", "file_upload_lifecycle", "file_lifecycle_outbox", "file_storage_cleanup"} <= set(tables)
         assert asyncio.run(table_columns("files")) == [
             "id", "project_id", "filename", "category", "file_date", "object_key", "size_bytes",
@@ -258,6 +270,7 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
         assert "UNIQUEINDEXuq_audit_logs_event_keyONpublic.audit_logsUSINGbtree(event_key)WHERE(event_keyISNOTNULL)" in normalized_indexes
         assert "INDEXix_file_lifecycle_outbox_pendingONpublic.file_lifecycle_outboxUSINGbtree(state,next_attempt_at)" in normalized_indexes
         assert "INDEXix_file_storage_cleanup_pendingONpublic.file_storage_cleanupUSINGbtree(state,next_attempt_at)" in normalized_indexes
+        assert "UNIQUEINDEXuq_file_storage_cleanup_operation_target" in normalized_indexes
 
         subprocess.run(
             [sys.executable, "-m", "alembic", "downgrade", "0003_unique_project_name"],
@@ -267,6 +280,7 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
         )
         assert asyncio.run(catalog()) == baseline
         assert "files" not in asyncio.run(catalog())[0] and "uploads" not in asyncio.run(catalog())[0]
+        assert asyncio.run(trigger_names()) == set()
     finally:
         asyncio.run(drop_database())
 
