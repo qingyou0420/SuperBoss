@@ -343,6 +343,19 @@ async def test_concurrent_request_ids_keep_audit_actors_isolated(
 _UNSAFE_ALLOWLIST = {
     ("POST", "/api/v1/auth/refresh", "superboss.modules.auth.router", "refresh"),
     ("POST", "/api/v1/auth/logout", "superboss.modules.auth.router", "logout"),
+    ("POST", "/api/v1/files/uploads", "superboss.modules.files.router", "start"),
+    (
+        "POST",
+        "/api/v1/files/uploads/{upload_id}/complete",
+        "superboss.modules.files.router",
+        "complete",
+    ),
+    (
+        "POST",
+        "/api/v1/files/uploads/{upload_id}/parts/{part_number}",
+        "superboss.modules.files.router",
+        "part",
+    ),
     ("POST", "/api/v1/projects", "superboss.modules.projects.router", "create_project"),
 }
 
