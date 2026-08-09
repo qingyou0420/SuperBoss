@@ -478,3 +478,73 @@ async def test_concurrent_complete_locks_upload_before_storage_completion(db_ses
         assert sorted(results) == [False, True]
         assert storage.complete_calls == 1
         assert file is not None and file.state == FileState.QUARANTINED
+
+
+@pytest.mark.asyncio
+async def test_corrupt_cross_project_upload_fails_before_part_or_completion_storage(
+    db_session, active_owner
+) -> None:
+    """Legacy project drift must not let B-authorized actors operate a file owned by A."""
+    from sqlalchemy import select, text
+
+    from superboss.modules.files.models import File, FileState, Upload
+    from superboss.modules.files.service import FileService, FileUploadConflictError
+    from superboss.modules.files.storage import CompletedPart
+
+    project_a = Project(name="Legacy file project A")
+    project_b = Project(name="Legacy file project B")
+    staff = User(
+        wecom_userid="legacy-project-staff",
+        display_name="Staff",
+        role=Role.STAFF,
+        status=UserStatus.ACTIVE,
+    )
+    db_session.add_all([project_a, project_b, staff])
+    await db_session.flush()
+    db_session.add(ProjectMember(project_id=project_b.id, user_id=staff.id))
+    file = File(
+        project_id=project_a.id,
+        filename="a.pdf",
+        category="资料",
+        file_date=date(2026, 8, 9),
+        object_key=f"projects/{project_a.id}/legacy/a.pdf",
+        size_bytes=1,
+        sha256="0" * 64,
+        state=FileState.UPLOADING,
+        uploader_id=active_owner.id,
+        uploader_kind="user",
+        content_type="application/pdf",
+    )
+    db_session.add(file)
+    await db_session.flush()
+    await db_session.execute(text("SET session_replication_role = replica"))
+    db_session.add(
+        Upload(
+            file_id=file.id,
+            project_id=project_b.id,
+            uploader_id=active_owner.id,
+            uploader_kind="user",
+            idempotency_key="legacy-cross-project",
+            metadata_fingerprint="0" * 64,
+            multipart_id="legacy-multipart",
+        )
+    )
+    await db_session.commit()
+    await db_session.execute(text("SET session_replication_role = origin"))
+
+    storage = InMemoryObjectStorage()
+    service = FileService(db_session, storage)
+    staff_actor = Actor("user", staff.id, Role.STAFF, frozenset({project_b.id}), frozenset())
+    owner_actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    upload = await db_session.scalar(
+        select(Upload).where(Upload.idempotency_key == "legacy-cross-project")
+    )
+    assert upload is not None
+    upload_id = upload.id
+    for actor in (staff_actor, owner_actor):
+        with pytest.raises(FileUploadConflictError):
+            await service.presign_part(actor, upload_id, 1)
+        with pytest.raises(FileUploadConflictError):
+            await service.complete_upload(actor, upload_id, [CompletedPart(1, "etag")])
+        await db_session.rollback()
+    assert storage.expiries == [] and storage.completed == {}

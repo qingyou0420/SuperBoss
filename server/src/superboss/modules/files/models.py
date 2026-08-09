@@ -10,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    ForeignKeyConstraint,
     Integer,
     String,
     Text,
@@ -34,6 +35,7 @@ class FileState(StrEnum):
 class File(Base):
     __tablename__ = "files"
     __table_args__ = (
+        UniqueConstraint("id", "project_id", name="uq_files_id_project"),
         CheckConstraint(
             "state IN ('UPLOADING','QUARANTINED','SCANNING','CLEAN','INFECTED','FAILED')",
             name="ck_files_state",
@@ -76,6 +78,12 @@ class File(Base):
 class Upload(Base):
     __tablename__ = "uploads"
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["file_id", "project_id"],
+            ["files.id", "files.project_id"],
+            name="fk_uploads_file_project",
+            ondelete="CASCADE",
+        ),
         UniqueConstraint(
             "project_id",
             "uploader_kind",
@@ -91,7 +99,6 @@ class Upload(Base):
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     file_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
-        ForeignKey("files.id", ondelete="CASCADE"),
         unique=True,
         nullable=False,
     )

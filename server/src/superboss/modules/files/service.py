@@ -43,6 +43,13 @@ class FileUploadNotActiveError(ConflictError):
         DomainError.__init__(self, "FILE_UPLOAD_NOT_ACTIVE", "Upload is not active", 409)
 
 
+class FileUploadProjectMismatchError(FileUploadConflictError):
+    def __init__(self) -> None:
+        DomainError.__init__(
+            self, "FILE_UPLOAD_PROJECT_MISMATCH", "Upload project does not match file", 409
+        )
+
+
 class FileService:
     def __init__(
         self,
@@ -177,10 +184,12 @@ class FileService:
         upload = await self.session.get(Upload, upload_id)
         if upload is None:
             raise FileUploadNotFoundError()
-        require_project_access(actor, upload.project_id)
         file = await self.session.get(File, upload.file_id)
+        if file is not None and file.project_id != upload.project_id:
+            raise FileUploadProjectMismatchError()
         if file is None or file.state != FileState.UPLOADING:
             raise FileUploadNotActiveError()
+        require_project_access(actor, file.project_id)
         return await self._storage().presign_upload_part(
             file.object_key, upload.multipart_id, part_number, 900
         )
@@ -193,10 +202,12 @@ class FileService:
         )
         if upload is None:
             raise FileUploadNotFoundError()
-        require_project_access(actor, upload.project_id)
         file = await self.session.get(File, upload.file_id)
+        if file is not None and file.project_id != upload.project_id:
+            raise FileUploadProjectMismatchError()
         if file is None or file.state != FileState.UPLOADING:
             raise FileUploadNotActiveError()
+        require_project_access(actor, file.project_id)
         if len({p.part_number for p in parts}) != len(parts):
             raise ValueError("duplicate part number")
         try:

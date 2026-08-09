@@ -4,11 +4,19 @@ import asyncio
 import os
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 import asyncpg
+import pytest
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from superboss.modules.files.models import File, FileState, Upload
+from superboss.modules.projects.models import Project
+from superboss.modules.users.models import User
 
 SERVER_ROOT = Path(__file__).resolve().parents[2]
 
@@ -110,7 +118,7 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
             check=True,
         )
         tables, constraints, indexes = asyncio.run(catalog())
-        assert asyncio.run(revision()) == "0004_files_and_uploads"
+        assert asyncio.run(revision()) == "0005_file_lifecycle"
         assert "files" in tables and "uploads" in tables
         assert asyncio.run(table_columns("files")) == [
             "id", "project_id", "filename", "category", "file_date", "object_key", "size_bytes",
@@ -124,11 +132,14 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
 
         definitions = {(table, name): definition for table, name, _kind, definition in constraints}
         assert definitions[("files", "files_project_id_fkey")] == "FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE"
-        assert definitions[("uploads", "uploads_file_id_fkey")] == "FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE"
+        assert definitions[("uploads", "fk_uploads_file_project")] == (
+            "FOREIGN KEY (file_id, project_id) REFERENCES files(id, project_id) ON DELETE CASCADE"
+        )
         assert definitions[("uploads", "uploads_project_id_fkey")] == "FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE"
         assert {name for (table, name) in definitions if table == "files"} >= {
             "ck_files_state", "ck_files_size", "ck_files_sha256", "ck_files_uploader_kind",
             "ck_files_filename", "ck_files_category", "ck_files_object_key", "ck_files_content_type",
+            "uq_files_id_project",
         }
         assert {name for (table, name) in definitions if table == "uploads"} >= {
             "ck_uploads_uploader_kind", "ck_uploads_idempotency_key", "ck_uploads_fingerprint",
@@ -142,6 +153,7 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
         assert "char_length" in multipart_constraint and "multipart_id" in multipart_constraint and "> 0" in multipart_constraint
         normalized_indexes = "\n".join(index_definition.replace(" ", "") for _table, index_definition in indexes)
         assert "UNIQUEINDEXfiles_object_key_keyONpublic.filesUSINGbtree(object_key)" in normalized_indexes
+        assert "UNIQUEINDEXuq_files_id_projectONpublic.filesUSINGbtree(id,project_id)" in normalized_indexes
         assert "UNIQUEINDEXuploads_file_id_keyONpublic.uploadsUSINGbtree(file_id)" in normalized_indexes
         assert "UNIQUE(project_id,uploader_kind,uploader_id,idempotency_key)" in definitions[("uploads", "uq_upload_idempotency")].replace(" ", "")
 
@@ -155,3 +167,44 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
         assert "files" not in asyncio.run(catalog())[0] and "uploads" not in asyncio.run(catalog())[0]
     finally:
         asyncio.run(drop_database())
+
+
+@pytest.mark.asyncio
+async def test_database_rejects_upload_referencing_file_from_other_project(
+    db_session: AsyncSession, active_owner: User
+) -> None:
+    """A cross-project Upload/File pair must be impossible even for direct database writers."""
+    project_a = Project(name="File project A")
+    project_b = Project(name="File project B")
+    db_session.add_all([project_a, project_b])
+    await db_session.flush()
+    file = File(
+        project_id=project_a.id,
+        filename="a.pdf",
+        category="资料",
+        file_date=date(2026, 8, 9),
+        object_key=f"projects/{project_a.id}/a.pdf",
+        size_bytes=1,
+        sha256="0" * 64,
+        state=FileState.UPLOADING,
+        uploader_id=active_owner.id,
+        uploader_kind="user",
+        content_type="application/pdf",
+    )
+    db_session.add(file)
+    await db_session.flush()
+    db_session.add(
+        Upload(
+            file_id=file.id,
+            project_id=project_b.id,
+            uploader_id=active_owner.id,
+            uploader_kind="user",
+            idempotency_key="cross-project",
+            metadata_fingerprint="0" * 64,
+            multipart_id="multipart-cross-project",
+        )
+    )
+
+    with pytest.raises(IntegrityError):
+        await db_session.commit()
+    await db_session.rollback()
