@@ -721,7 +721,9 @@ class FileLifecycleService:
                         ),
                     )
                     .with_for_update(skip_locked=True)
-                    .limit(limit)
+                    # A completion attempt commits its lease before storage I/O; do not
+                    # retain additional unlocked ORM rows across that commit.
+                    .limit(1)
                 )
             )
             for lifecycle in lifecycles:
@@ -828,29 +830,41 @@ class FileLifecycleService:
                     .limit(limit)
                 )
             )
+            claimed_cleanups: list[tuple[UUID, UUID, str, str, str | None]] = []
             for cleanup in cleanups:
                 cleanup.state = "RUNNING"
                 cleanup.locked_at = datetime.now(UTC)
                 claim_token = uuid4()
                 cleanup.claim_token = claim_token
                 cleanup.attempt_count += 1
+                claimed_cleanups.append(
+                    (
+                        cleanup.id,
+                        claim_token,
+                        cleanup.operation,
+                        cleanup.object_key,
+                        cleanup.multipart_id,
+                    )
+                )
+            if claimed_cleanups:
                 await session.commit()
+            for cleanup_id, claim_token, operation, object_key, multipart_id in claimed_cleanups:
                 try:
-                    if cleanup.operation == "DELETE_OBJECT":
+                    if operation == "DELETE_OBJECT":
                         await asyncio.wait_for(
-                            self.storage.delete_object(cleanup.object_key),
+                            self.storage.delete_object(object_key),
                             timeout=self._CLEANUP_EXTERNAL_TIMEOUT_SECONDS,
                         )
-                    elif cleanup.multipart_id is not None:
+                    elif multipart_id is not None:
                         await asyncio.wait_for(
-                            self.storage.abort_multipart(cleanup.object_key, cleanup.multipart_id),
+                            self.storage.abort_multipart(object_key, multipart_id),
                             timeout=self._CLEANUP_EXTERNAL_TIMEOUT_SECONDS,
                         )
                 except Exception:  # noqa: BLE001 -- no provider data enters durable state
                     await session.execute(
                         update(FileStorageCleanup)
                         .where(
-                            FileStorageCleanup.id == cleanup.id,
+                            FileStorageCleanup.id == cleanup_id,
                             FileStorageCleanup.claim_token == claim_token,
                             FileStorageCleanup.state == "RUNNING",
                         )
@@ -860,22 +874,24 @@ class FileLifecycleService:
                             locked_at=None,
                             next_attempt_at=datetime.now(UTC) + timedelta(seconds=30),
                             last_error_code="DELETE_FAILED"
-                            if cleanup.operation == "DELETE_OBJECT"
+                            if operation == "DELETE_OBJECT"
                             else "ABORT_FAILED",
                         )
                     )
                 else:
-                    await session.execute(
+                    claimed_id = await session.scalar(
                         update(FileStorageCleanup)
                         .where(
-                            FileStorageCleanup.id == cleanup.id,
+                            FileStorageCleanup.id == cleanup_id,
                             FileStorageCleanup.claim_token == claim_token,
                             FileStorageCleanup.state == "RUNNING",
                         )
                         .values(
                             state="DONE", claim_token=None, locked_at=None, last_error_code=None
                         )
+                        .returning(FileStorageCleanup.id)
                     )
-                    completed += 1
+                    if claimed_id is not None:
+                        completed += 1
                 await session.commit()
         return completed

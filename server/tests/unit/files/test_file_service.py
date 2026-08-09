@@ -2127,7 +2127,7 @@ async def test_expired_cleanup_lease_takeover_uses_new_token_cas(db_session) -> 
     assert taken_over is not None and taken_over.claim_token not in {None, old_token}
 
     storage.release_first.set()
-    assert await asyncio.wait_for(first, timeout=3) == 1
+    assert await asyncio.wait_for(first, timeout=3) == 0
     db_session.expire_all()
     still_owned = await db_session.scalar(
         select(FileStorageCleanup).where(FileStorageCleanup.id == cleanup_id)
@@ -2698,3 +2698,73 @@ async def test_delete_during_ambiguous_completion_defers_cleanup_until_grace_exp
     )
     assert all(job.state == "DONE" for job in finished)
     assert storage.objects == {} and storage.active == {} and storage.aborted
+
+
+@pytest.mark.asyncio
+async def test_cleanup_batch_claims_all_rows_before_any_external_work(db_session) -> None:
+    """A second worker cannot claim a later row from a live claimed batch."""
+    import asyncio
+    import hashlib
+    from collections import Counter
+
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from superboss.modules.files.models import FileStorageCleanup
+    from superboss.modules.files.service import FileLifecycleService
+
+    class BatchBarrierStorage(InMemoryObjectStorage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[str] = []
+            self.first_entered = asyncio.Event()
+            self.second_entered = asyncio.Event()
+            self.release_first = asyncio.Event()
+            self.release_second = asyncio.Event()
+
+        async def delete_object(self, object_key: str) -> None:
+            self.calls.append(object_key)
+            if object_key.endswith("/first"):
+                self.first_entered.set()
+                await asyncio.wait_for(self.release_first.wait(), timeout=3)
+            else:
+                if self.calls.count(object_key) == 1:
+                    self.second_entered.set()
+                await asyncio.wait_for(self.release_second.wait(), timeout=3)
+            await super().delete_object(object_key)
+
+    keys = ["projects/batch-lease/first", "projects/batch-lease/second"]
+    for key in keys:
+        db_session.add(
+            FileStorageCleanup(
+                operation="DELETE_OBJECT",
+                dedupe_key=hashlib.sha256(key.encode()).hexdigest(),
+                object_key=key,
+            )
+        )
+    await db_session.commit()
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    storage = BatchBarrierStorage()
+
+    first_worker = asyncio.create_task(
+        FileLifecycleService(factory, storage).reconcile_cleanup(limit=2)
+    )
+    await asyncio.wait_for(storage.first_entered.wait(), timeout=3)
+    second_worker = asyncio.create_task(
+        FileLifecycleService(factory, storage).reconcile_cleanup(limit=2)
+    )
+    assert await asyncio.wait_for(second_worker, timeout=3) == 0
+    assert storage.calls == [keys[0]]
+    storage.release_first.set()
+    await asyncio.wait_for(storage.second_entered.wait(), timeout=3)
+    storage.release_second.set()
+    assert await asyncio.wait_for(first_worker, timeout=3) == 2
+
+    db_session.expire_all()
+    jobs = list(
+        await db_session.scalars(
+            select(FileStorageCleanup).where(FileStorageCleanup.object_key.in_(keys))
+        )
+    )
+    assert Counter(storage.calls) == Counter({key: 1 for key in keys})
+    assert all(job.state == "DONE" and job.attempt_count == 1 for job in jobs)
