@@ -15,6 +15,14 @@ from testcontainers.community.postgres import PostgresContainer
 from superboss.core.config import Settings
 from superboss.modules.audit.models import AuditLog
 from superboss.modules.auth.models import AuthSession, OAuthState
+from superboss.modules.devices.models import (
+    DeviceConnection,
+    DevicePairingCode,
+    DevicePairingProject,
+    DeviceProjectGrant,
+    DeviceScopeGrant,
+    DeviceSession,
+)
 from superboss.modules.files.models import (
     File,
     FileLifecycleOutbox,
@@ -58,6 +66,12 @@ async def db_session(postgres_database: str) -> AsyncIterator[AsyncSession]:
     async def clear() -> None:
         async with engine.begin() as connection:
             await connection.execute(delete(AuditLog))
+            await connection.execute(delete(DeviceScopeGrant))
+            await connection.execute(delete(DeviceProjectGrant))
+            await connection.execute(delete(DeviceSession))
+            await connection.execute(delete(DeviceConnection))
+            await connection.execute(delete(DevicePairingProject))
+            await connection.execute(delete(DevicePairingCode))
             await connection.execute(delete(FileLifecycleOutbox))
             await connection.execute(delete(FileStorageCleanup))
             await connection.execute(delete(FileUploadLifecycle))
