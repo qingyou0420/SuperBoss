@@ -916,3 +916,104 @@ async def test_start_enforces_content_type_database_length_boundary(
     else:
         file = await db_session.get(File, response.json()["file_id"])
         assert file is not None and file.content_type == content_type
+
+
+def _i3_body(project_id: object) -> dict[str, object]:
+    return {"project_id": str(project_id), "filename": "private.pdf", "size_bytes": 1, "sha256": "a" * 64, "category": "private", "file_date": "2026-08-09"}
+
+
+@pytest.mark.asyncio
+async def test_authenticated_upload_denials_are_safely_audited(file_client, db_session: AsyncSession) -> None:
+    from uuid import UUID, uuid4
+
+    from sqlalchemy import select
+
+    from superboss.modules.audit.models import AuditLog
+    from superboss.modules.files.models import File, FileState, Upload
+
+    client, storage = file_client
+    target, assigned = Project(name="I3 target"), Project(name="I3 assigned")
+    staff = User(wecom_userid="staff-1", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
+    db_session.add_all([target, assigned, staff]); await db_session.flush()
+    db_session.add(ProjectMember(project_id=assigned.id, user_id=staff.id)); await db_session.commit()
+    _login(client); csrf = str(client.cookies.get("XSRF-TOKEN"))
+    started = client.post("/api/v1/files/uploads", json=_i3_body(target.id), headers={"X-CSRF-Token": csrf, "Idempotency-Key": "i3-existing"})
+    upload = await db_session.get(Upload, started.json()["upload_id"]); assert started.status_code == 201 and upload is not None
+    file = await db_session.get(File, upload.file_id); assert file is not None; file.state = FileState.QUARANTINED; await db_session.commit()
+    missing_id = uuid4()
+    inactive_part = client.post(f"/api/v1/files/uploads/{upload.id}/parts/1", headers={"X-CSRF-Token": csrf, "X-Request-ID": "00000000-0000-4000-8000-000000000001"})
+    inactive_complete = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json={"parts": [{"part_number": 1, "etag": "unsafe-etag"}]}, headers={"X-CSRF-Token": csrf, "X-Request-ID": "00000000-0000-4000-8000-000000000002"})
+    missing_part = client.post(f"/api/v1/files/uploads/{missing_id}/parts/1", headers={"X-CSRF-Token": csrf, "X-Request-ID": "00000000-0000-4000-8000-000000000003"})
+    missing_complete = client.post(f"/api/v1/files/uploads/{missing_id}/complete", json={"parts": [{"part_number": 1, "etag": "unsafe-etag"}]}, headers={"X-CSRF-Token": csrf, "X-Request-ID": "00000000-0000-4000-8000-000000000004"})
+    assert [r.status_code for r in (inactive_part, inactive_complete, missing_part, missing_complete)] == [409, 409, 404, 404]
+    file.state = FileState.UPLOADING; await db_session.commit(); client.cookies.clear()
+    login = client.get("/api/v1/auth/wecom/start")
+    assert client.get("/api/v1/auth/wecom/callback", params={"code": "staff-code", "state": login.json()["state"]}).status_code == 204
+    staff_csrf = str(client.cookies.get("XSRF-TOKEN"))
+    foreign_start = client.post("/api/v1/files/uploads", json=_i3_body(target.id), headers={"X-CSRF-Token": staff_csrf, "Idempotency-Key": "i3-foreign", "X-Request-ID": "00000000-0000-4000-8000-000000000005"})
+    foreign_part = client.post(f"/api/v1/files/uploads/{upload.id}/parts/1", headers={"X-CSRF-Token": staff_csrf, "X-Request-ID": "00000000-0000-4000-8000-000000000006"})
+    foreign_complete = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json={"parts": [{"part_number": 1, "etag": "unsafe-etag"}]}, headers={"X-CSRF-Token": staff_csrf, "X-Request-ID": "00000000-0000-4000-8000-000000000007"})
+    assert [r.status_code for r in (foreign_start, foreign_part, foreign_complete)] == [403, 403, 403]
+    assert storage.expiries == [] and storage.completed == {}
+    denied = [event for event in (await db_session.scalars(select(AuditLog))).all() if event.outcome == "DENIED"]
+    assert len(denied) == 7 and {event.action for event in denied} == {"file.upload.start", "file.upload.part_url", "file.upload.complete"}
+    for event in denied:
+        assert event.actor_kind == "user" and set(event.metadata_json) == {"error_code", "actor_role"}
+        assert not {"filename", "sha256", "content_type", "multipart_id", "object_key", "url", "parts", "etag"} & set(event.metadata_json)
+        assert "private.pdf" not in str(event.metadata_json) and "a" * 64 not in str(event.metadata_json)
+    start_event = next(event for event in denied if event.action == "file.upload.start")
+    assert start_event.object_type == "project" and start_event.object_id == target.id and start_event.project_id == target.id
+    upload_events = [event for event in denied if event.object_type == "upload"]
+    assert {event.object_id for event in upload_events} == {upload.id, missing_id}
+    assert all(event.project_id == target.id for event in upload_events if event.object_id == upload.id)
+    assert all(event.project_id is None for event in upload_events if event.object_id == missing_id)
+    assert {event.request_id for event in denied} == {UUID(f"00000000-0000-4000-8000-00000000000{number}") for number in range(1, 8)}
+
+
+@pytest.mark.asyncio
+async def test_upload_pre_authentication_and_authorized_paths_do_not_audit_denied(file_client, db_session: AsyncSession) -> None:
+    from sqlalchemy import select
+
+    from superboss.modules.audit.models import AuditLog
+
+    client, storage = file_client
+    owner_project, staff_project = Project(name="I3 owner allowed"), Project(name="I3 staff allowed")
+    staff = User(wecom_userid="staff-1", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
+    db_session.add_all([owner_project, staff_project, staff]); await db_session.flush()
+    db_session.add(ProjectMember(project_id=staff_project.id, user_id=staff.id)); await db_session.commit()
+    anonymous = client.post("/api/v1/files/uploads", json=_i3_body(owner_project.id), headers={"Idempotency-Key": "i3-anonymous"})
+    _login(client)
+    csrf = client.post("/api/v1/files/uploads", json=_i3_body(owner_project.id), headers={"Idempotency-Key": "i3-csrf"})
+    owner = client.post("/api/v1/files/uploads", json=_i3_body(owner_project.id), headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "i3-owner"})
+    client.cookies.clear(); login = client.get("/api/v1/auth/wecom/start")
+    assert client.get("/api/v1/auth/wecom/callback", params={"code": "staff-code", "state": login.json()["state"]}).status_code == 204
+    allowed_staff = client.post("/api/v1/files/uploads", json=_i3_body(staff_project.id), headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "i3-staff"})
+    events = list((await db_session.scalars(select(AuditLog))).all())
+    assert [anonymous.status_code, csrf.status_code, owner.status_code, allowed_staff.status_code] == [401, 403, 201, 201]
+    assert storage.active and not [event for event in events if event.outcome == "DENIED"]
+
+
+@pytest.mark.asyncio
+async def test_upload_denied_audit_failure_preserves_domain_responses(file_client, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> None:
+    from uuid import uuid4
+
+    from superboss.modules.files.models import File, FileState, Upload
+
+    class FailingAuditService:
+        def __init__(self, _session_factory: object) -> None: pass
+        async def record(self, _event: object) -> None: raise RuntimeError("audit secret")
+
+    client, storage = file_client; project = Project(name="I3 audit unavailable"); db_session.add(project); await db_session.commit(); _login(client)
+    csrf = str(client.cookies.get("XSRF-TOKEN")); started = client.post("/api/v1/files/uploads", json=_i3_body(project.id), headers={"X-CSRF-Token": csrf, "Idempotency-Key": "i3-audit"})
+    upload = await db_session.get(Upload, started.json()["upload_id"]); assert started.status_code == 201 and upload is not None
+    file = await db_session.get(File, upload.file_id); assert file is not None; file.state = FileState.QUARANTINED
+    assigned = Project(name="I3 audit assigned"); staff = User(wecom_userid="staff-1", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
+    db_session.add_all([assigned, staff]); await db_session.flush(); db_session.add(ProjectMember(project_id=assigned.id, user_id=staff.id)); await db_session.commit()
+    monkeypatch.setattr("superboss.modules.files.router.AuditService", FailingAuditService)
+    missing = client.post(f"/api/v1/files/uploads/{uuid4()}/parts/1", headers={"X-CSRF-Token": csrf})
+    inactive = client.post(f"/api/v1/files/uploads/{upload.id}/parts/1", headers={"X-CSRF-Token": csrf})
+    file.state = FileState.UPLOADING; await db_session.commit(); client.cookies.clear(); login = client.get("/api/v1/auth/wecom/start")
+    assert client.get("/api/v1/auth/wecom/callback", params={"code": "staff-code", "state": login.json()["state"]}).status_code == 204
+    foreign = client.post(f"/api/v1/files/uploads/{upload.id}/parts/1", headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))})
+    assert [response.status_code for response in (missing, inactive, foreign)] == [404, 409, 403]
+    assert storage.expiries == [] and all("audit secret" not in response.text for response in (missing, inactive, foreign))
