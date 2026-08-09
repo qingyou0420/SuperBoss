@@ -88,6 +88,12 @@ async def test_header_only_owner_starts_upload_without_csrf(file_client, db_sess
     _login(client); token = str(client.cookies.get("access_token")); client.cookies.clear()
     response = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers={"Authorization": f"Bearer {token}", "Idempotency-Key": "bearer"})
     assert response.status_code == 201 and len(storage.active) == 1
+
+
+def test_invalid_header_only_start_is_unauthenticated(file_client) -> None:
+    client, storage = file_client
+    response = client.post("/api/v1/files/uploads", json={"project_id": "00000000-0000-0000-0000-000000000001", "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers={"Authorization": "Bearer invalid", "Idempotency-Key": "invalid"})
+    assert response.status_code == 401 and response.json()["error"]["code"] == "AUTHENTICATION_REQUIRED" and storage.active == {}
 from pydantic import ValidationError
 
 
