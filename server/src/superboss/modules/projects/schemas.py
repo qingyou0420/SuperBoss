@@ -6,6 +6,8 @@ from pydantic import BaseModel, ConfigDict, StrictBool, field_validator
 
 from superboss.modules.projects.models import ProjectStatus
 
+PROJECT_EDGE_WHITESPACE = " \t\r\n\u00a0"
+
 
 class ProjectCreate(BaseModel):
     name: str
@@ -14,7 +16,7 @@ class ProjectCreate(BaseModel):
     @field_validator("name")
     @classmethod
     def canonical_name(cls, value: str) -> str:
-        normalized = value.strip()
+        normalized = value.strip(PROJECT_EDGE_WHITESPACE)
         if not 1 <= len(normalized) <= 255:
             raise ValueError("Project name must contain 1 to 255 non-whitespace characters")
         return normalized

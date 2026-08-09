@@ -17,8 +17,11 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.drop_constraint("uq_projects_name", "projects", type_="unique")
-    op.create_check_constraint("ck_projects_name_trimmed", "projects", "name = btrim(name)")
+    op.create_check_constraint(
+        "ck_projects_name_trimmed",
+        "projects",
+        "name = btrim(name, E' \\t\\r\\n' || chr(160))",
+    )
     op.create_check_constraint(
         "ck_projects_name_length", "projects", "char_length(name) BETWEEN 1 AND 255"
     )
@@ -29,5 +32,3 @@ def downgrade() -> None:
     op.execute("DROP INDEX IF EXISTS uq_projects_name_ci")
     op.execute("ALTER TABLE projects DROP CONSTRAINT IF EXISTS ck_projects_name_length")
     op.execute("ALTER TABLE projects DROP CONSTRAINT IF EXISTS ck_projects_name_trimmed")
-    op.execute("ALTER TABLE projects DROP CONSTRAINT IF EXISTS uq_projects_name")
-    op.create_unique_constraint("uq_projects_name", "projects", ["name"])
