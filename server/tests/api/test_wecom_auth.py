@@ -2,13 +2,15 @@
 
 from collections.abc import AsyncIterator
 
+import jwt
 import pytest
 import pytest_asyncio
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core.config import Settings
+from superboss.core.security import hash_token, utcnow
 from superboss.main import create_app
 from superboss.modules.auth.models import AuthSession, OAuthState
 from superboss.modules.users.models import Role, User, UserStatus
@@ -136,6 +138,49 @@ def test_callback_missing_code_clears_state_cookie(api_client: TestClient) -> No
     response = api_client.get("/api/v1/auth/wecom/callback", params={"state": started.json()["state"]})
     assert response.status_code == 400
     assert "Max-Age=0" in response.headers["set-cookie"]
+
+
+@pytest.mark.asyncio
+async def test_disabled_identity_consumes_state_and_cannot_retry(
+    api_client: TestClient, db_session: AsyncSession
+) -> None:
+    """A disabled whitelist identity must not reactivate or reuse its consumed OAuth state."""
+    db_session.add(User(wecom_userid="staff-1", role=Role.STAFF, status=UserStatus.DISABLED, display_name=""))
+    await db_session.commit()
+    started = api_client.get("/api/v1/auth/wecom/start")
+    state, signed = started.json()["state"], api_client.cookies.get("wecom_oauth_state")
+    denied = _callback(api_client, "staff-code", state)
+    assert denied.status_code == 403 and "Max-Age=0" in denied.headers["set-cookie"]
+    api_client.cookies.set("wecom_oauth_state", signed, domain="testserver.local", path="/api/v1/auth/wecom")
+    assert _callback(api_client, "owner-code", state).status_code == 400
+    disabled = await db_session.scalar(select(User).where(User.wecom_userid == "staff-1"))
+    assert disabled is not None and disabled.status == UserStatus.DISABLED
+    assert (await db_session.scalars(select(AuthSession))).all() == []
+
+
+@pytest.mark.asyncio
+async def test_database_expired_state_is_rejected_and_cookie_cleared(
+    api_client: TestClient, db_session: AsyncSession
+) -> None:
+    """Ignoring persisted expiry would let an otherwise valid signed state be replayed."""
+    started = api_client.get("/api/v1/auth/wecom/start")
+    state, signed = started.json()["state"], api_client.cookies.get("wecom_oauth_state")
+    await db_session.execute(update(OAuthState).where(OAuthState.nonce_hash == hash_token(state)).values(expires_at=utcnow()))
+    await db_session.commit()
+    expired = _callback(api_client, "owner-code", state)
+    assert expired.status_code == 400 and "Max-Age=0" in expired.headers["set-cookie"]
+    api_client.cookies.set("wecom_oauth_state", signed, domain="testserver.local", path="/api/v1/auth/wecom")
+    assert _callback(api_client, "owner-code", state).status_code == 400
+
+
+def test_signed_expired_state_is_rejected_and_cookie_cleared(api_client: TestClient, test_settings: Settings) -> None:
+    """JWT expiry is independently enforced even while its database nonce is still live."""
+    started = api_client.get("/api/v1/auth/wecom/start")
+    state = started.json()["state"]
+    expired = jwt.encode({"state": state, "iat": 0, "exp": 1}, test_settings.jwt_secret, algorithm="HS256")
+    api_client.cookies.set("wecom_oauth_state", expired, domain="testserver.local", path="/api/v1/auth/wecom")
+    response = _callback(api_client, "owner-code", state)
+    assert response.status_code == 400 and "Max-Age=0" in response.headers["set-cookie"]
 
 
 def test_logout_revokes_browser_access_and_refresh_tokens(api_client: TestClient) -> None:
