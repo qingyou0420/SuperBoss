@@ -281,7 +281,9 @@ class FileService:
     async def presign_part(self, actor: Actor, upload_id: UUID, part_number: int) -> str:
         if not 1 <= part_number <= 10000:
             raise ValueError("invalid part number")
-        upload = await self.session.get(Upload, upload_id)
+        upload = await self.session.scalar(
+            select(Upload).where(Upload.id == upload_id).with_for_update()
+        )
         if upload is None:
             raise FileUploadNotFoundError()
         file = await self.session.get(File, upload.file_id)
@@ -302,18 +304,11 @@ class FileService:
         upload = await self.session.get(Upload, upload_id)
         if upload is None:
             raise FileUploadNotFoundError()
-        file = await self.session.scalar(
-            select(File).where(File.id == upload.file_id).with_for_update()
-        )
+        file = await self.session.get(File, upload.file_id)
         if file is not None and file.project_id != upload.project_id:
             raise FileUploadProjectMismatchError()
         if file is None:
             raise FileUploadNotActiveError()
-        upload = await self.session.scalar(
-            select(Upload).where(Upload.id == upload_id).with_for_update()
-        )
-        if upload is None:
-            raise FileUploadNotFoundError()
         lifecycle = await self.session.scalar(
             select(FileUploadLifecycle)
             .where(FileUploadLifecycle.upload_id == upload_id)
@@ -381,6 +376,7 @@ class FileService:
         file: File,
         lifecycle: FileUploadLifecycle,
     ) -> File:
+        file_id = file.id
         file.state = FileState.QUARANTINED
         lifecycle.completion_state = "QUARANTINED"
         event_key = lifecycle.completion_event_key
@@ -391,7 +387,7 @@ class FileService:
             await self.session.commit()
         except IntegrityError:
             await self.session.rollback()
-            replayed = await self.session.get(File, file.id)
+            replayed = await self.session.get(File, file_id)
             if replayed is not None and replayed.state == FileState.QUARANTINED:
                 return replayed
             raise
