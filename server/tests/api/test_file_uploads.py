@@ -179,6 +179,19 @@ async def test_start_replays_identical_idempotency_key(file_client, db_session: 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("change", [{"filename": "y.pdf"}, {"category": "合同"}, {"file_date": "2026-08-10"}, {"size_bytes": 2}, {"sha256": "1" * 64}, {"content_type": "image/png"}])
+async def test_start_rejects_changed_metadata_for_same_key(file_client, db_session: AsyncSession, change: dict[str, object]) -> None:
+    from sqlalchemy import func, select
+    from superboss.modules.files.models import File, Upload
+    client, storage = file_client; project = Project(name="HTTP conflict"); db_session.add(project); await db_session.commit(); _login(client)
+    body = {"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09", "content_type": "application/pdf"}; headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "conflict"}
+    assert client.post("/api/v1/files/uploads", json=body, headers=headers).status_code == 201
+    body.update(change); response = client.post("/api/v1/files/uploads", json=body, headers=headers)
+    assert response.status_code == 409 and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and len(storage.active) == 1
+    assert await db_session.scalar(select(func.count()).select_from(File)) == 1 and await db_session.scalar(select(func.count()).select_from(Upload)) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("key", ["x", "!" * 255])
 async def test_start_accepts_idempotency_key_boundaries(file_client, db_session: AsyncSession, key: str) -> None:
     client, storage = file_client; project = Project(name=f"Key {len(key)}"); db_session.add(project); await db_session.commit(); _login(client)
