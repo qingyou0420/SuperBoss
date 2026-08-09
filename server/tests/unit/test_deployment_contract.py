@@ -1,3 +1,7 @@
+import os
+import re
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -5,6 +9,7 @@ import yaml
 
 ROOT = Path(__file__).parents[3]
 COMPOSE_PATH = ROOT / "docker-compose.dev.yml"
+COMPOSE_DEFAULT = re.compile(r"^\$\{([A-Z0-9_]+):-([^}]*)\}$")
 
 
 def _compose() -> dict[str, Any]:
@@ -16,6 +21,15 @@ def _compose() -> dict[str, Any]:
 def _command(service: dict[str, Any]) -> str:
     command = service.get("command", "")
     return " ".join(command) if isinstance(command, list) else str(command)
+
+
+def _isolated_compose_environment(environment: dict[str, object]) -> dict[str, str]:
+    isolated = {key: value for key, value in os.environ.items() if not key.startswith("SUPERBOSS_")}
+    for key, value in environment.items():
+        rendered = str(value)
+        match = COMPOSE_DEFAULT.fullmatch(rendered)
+        isolated[key] = match.group(2) if match is not None else rendered
+    return isolated
 
 
 def test_compose_defines_backend_dependencies_with_health_contracts() -> None:
@@ -116,6 +130,57 @@ def test_workers_and_beat_use_explicit_queues_and_shared_backend_environment() -
     assert "--concurrency=1" in maintenance_command
     assert "--prefetch-multiplier=1" in maintenance_command
     assert "beat" in _command(services["celery-beat"])
+
+
+def test_shared_environment_uses_real_wecom_boundary_and_explicit_pass_through() -> None:
+    shared_environment = _compose()["services"]["api"]["environment"]
+
+    assert shared_environment["SUPERBOSS_ENVIRONMENT"] == "development"
+    assert "SUPERBOSS_WECOM_FAKE" not in shared_environment
+    for name in (
+        "SUPERBOSS_WECOM_CORP_ID",
+        "SUPERBOSS_WECOM_AGENT_ID",
+        "SUPERBOSS_WECOM_CORP_SECRET",
+        "SUPERBOSS_WECOM_REDIRECT_URI",
+        "SUPERBOSS_OWNER_WECOM_USERID",
+    ):
+        assert shared_environment[name] == f"${{{name}:-}}"
+    assert shared_environment["SUPERBOSS_JWT_SECRET"] == (
+        "${SUPERBOSS_JWT_SECRET:-development-only-jwt-secret-change-before-deploy}"
+    )
+
+
+def test_shared_compose_environment_imports_api_and_workers_without_network() -> None:
+    shared_environment = _compose()["services"]["api"]["environment"]
+    script = """
+import socket
+
+def deny_socket(*_args, **_kwargs):
+    raise AssertionError("network connection attempted during import")
+
+socket.socket.connect = deny_socket
+socket.socket.connect_ex = deny_socket
+socket.create_connection = deny_socket
+
+import superboss.main as main
+import superboss.workers.celery_app
+import superboss.workers.schedules
+
+assert main.app.state.settings.environment == "development"
+assert main.app.state.settings.wecom_fake is False
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT / "server",
+        env=_isolated_compose_environment(shared_environment),
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_api_startup_does_not_wait_for_clamav_or_redis() -> None:

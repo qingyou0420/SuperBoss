@@ -95,15 +95,21 @@ class ClamAVScanner:
             raise ClamAVScanError() from None
         finally:
             if writer is not None:
-                writer.close()
                 try:
-                    await asyncio.wait_for(
-                        writer.wait_closed(), timeout=self.io_timeout_seconds
-                    )
+                    writer.close()
                 except asyncio.CancelledError:
                     raise
                 except Exception:  # noqa: BLE001,S110 -- close cannot leak or mask scan outcome
                     pass
+                else:
+                    try:
+                        await asyncio.wait_for(
+                            writer.wait_closed(), timeout=self.io_timeout_seconds
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:  # noqa: BLE001,S110 -- close cannot leak or mask scan outcome
+                        pass
 
     async def _write(self, writer: asyncio.StreamWriter, payload: bytes) -> None:
         writer.write(payload)

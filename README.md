@@ -23,3 +23,9 @@ startup does not: uploads can remain quarantined until scanning capacity is read
 Copy `.env.example` when running backend processes directly on the host. Compose uses
 explicit service-to-service endpoints and development-only credentials declared in
 `docker-compose.dev.yml`; replace all example credentials outside local development.
+Interactive WeCom login requires setting `SUPERBOSS_WECOM_CORP_ID`,
+`SUPERBOSS_WECOM_AGENT_ID`, `SUPERBOSS_WECOM_CORP_SECRET`,
+`SUPERBOSS_WECOM_REDIRECT_URI`, and `SUPERBOSS_OWNER_WECOM_USERID` in the host
+environment or `.env` before starting Compose. The deterministic fake identity
+provider remains restricted to `SUPERBOSS_ENVIRONMENT=test` and is not enabled by the
+development stack.

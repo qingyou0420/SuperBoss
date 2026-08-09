@@ -301,3 +301,56 @@ async def test_cancellation_propagates_and_closes() -> None:
         with pytest.raises(asyncio.CancelledError):
             await task
         await asyncio.wait_for(closed.wait(), timeout=1)
+
+
+class SyncCloseFailureWriter:
+    def write(self, _payload: bytes) -> None:
+        return None
+
+    async def drain(self) -> None:
+        return None
+
+    def close(self) -> None:
+        raise RuntimeError("provider close secret")
+
+    async def wait_closed(self) -> None:
+        raise AssertionError("wait_closed must not run after close failed")
+
+
+class FixedResponseReader:
+    def __init__(self, response: bytes) -> None:
+        self.response = response
+
+    async def readuntil(self, _separator: bytes) -> bytes:
+        return self.response
+
+
+@pytest.mark.asyncio
+async def test_synchronous_close_failure_does_not_break_clean_verdict(monkeypatch) -> None:
+    """A provider close error after an accepted response must not replace CLEAN."""
+
+    async def open_connection(*_args: object, **_kwargs: object) -> tuple[object, object]:
+        return FixedResponseReader(b"stream: OK\0"), SyncCloseFailureWriter()
+
+    monkeypatch.setattr(asyncio, "open_connection", open_connection)
+
+    verdict = await scanner_at(3310).scan(chunks(b"safe"))
+
+    _scanner_type, _error_type, status, _verdict_type = clamav_contract()
+    assert verdict.status == status.CLEAN
+
+
+@pytest.mark.asyncio
+async def test_synchronous_close_failure_does_not_mask_scan_error(monkeypatch) -> None:
+    """A provider close error must not replace the adapter's fixed protocol error."""
+
+    async def open_connection(*_args: object, **_kwargs: object) -> tuple[object, object]:
+        return FixedResponseReader(b"malformed\0"), SyncCloseFailureWriter()
+
+    monkeypatch.setattr(asyncio, "open_connection", open_connection)
+    _scanner_type, error_type, _status, _verdict_type = clamav_contract()
+
+    with pytest.raises(error_type, match="clamav scan failed") as raised:
+        await scanner_at(3310).scan(chunks(b"safe"))
+
+    assert "secret" not in str(raised.value)
