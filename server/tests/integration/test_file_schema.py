@@ -191,7 +191,7 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
             check=True,
         )
         tables, constraints, indexes = asyncio.run(catalog())
-        assert asyncio.run(revision()) == "0014_prepare_delete_fence"
+        assert asyncio.run(revision()) == "0015_discover_unbound_multipart"
         assert "trg_files_snapshot_storage_cleanup" in asyncio.run(trigger_names())
         assert {"files", "uploads", "file_upload_lifecycle", "file_lifecycle_outbox", "file_storage_cleanup"} <= set(tables)
         assert asyncio.run(table_columns("files")) == [
@@ -256,6 +256,9 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
             "ck_file_storage_cleanup_operation", "ck_file_storage_cleanup_state",
             "ck_file_storage_cleanup_attempt_count", "ck_file_storage_cleanup_dedupe_key",
         }
+        assert "DISCOVER_MULTIPART" in definitions[
+            ("file_storage_cleanup", "ck_file_storage_cleanup_operation")
+        ]
         assert "UPLOADING" in definitions[("files", "ck_files_state")] and "FAILED" in definitions[("files", "ck_files_state")]
         size_constraint = definitions[("files", "ck_files_size")]
         assert "size_bytes >= 1" in size_constraint and "size_bytes <= 104857600" in size_constraint
@@ -441,7 +444,7 @@ def test_downgrade_blocks_live_file_lifecycle_without_data_loss(
             env=environment,
             check=True,
         )
-        assert asyncio.run(seed())[0] == "0014_prepare_delete_fence"
+        assert asyncio.run(seed())[0] == "0015_discover_unbound_multipart"
         downgrade = subprocess.run(
             [sys.executable, "-m", "alembic", "downgrade", "0005_file_lifecycle"],
             cwd=SERVER_ROOT,
@@ -454,7 +457,7 @@ def test_downgrade_blocks_live_file_lifecycle_without_data_loss(
         assert downgrade.returncode != 0
         assert "SUPERBOSS_FILE_LIFECYCLE_DOWNGRADE_BLOCKED" in output
         revision, tables, rows = asyncio.run(snapshot())
-        assert revision == "0014_prepare_delete_fence"
+        assert revision == "0015_discover_unbound_multipart"
         assert {
             "file_upload_lifecycle",
             "file_lifecycle_outbox",
@@ -575,6 +578,16 @@ def test_downgrade_guard_covers_each_live_lifecycle_shape(
                     upload_id,
                     "DONE" if shape == "safe" else "PENDING",
                 )
+            if shape == "safe":
+                await connection.execute(
+                    "INSERT INTO file_storage_cleanup "
+                    "(id, operation, dedupe_key, object_key, multipart_id, lifecycle_id, state) "
+                    "VALUES ($1, 'DISCOVER_MULTIPART', $2, $3, NULL, $4, 'DONE')",
+                    uuid4(),
+                    "3" * 64,
+                    object_key,
+                    upload_id,
+                )
         finally:
             await connection.close()
 
@@ -667,7 +680,7 @@ def test_downgrade_guard_covers_each_live_lifecycle_shape(
                 result.stdout + result.stderr
             )
             revision, tables, columns, rows = asyncio.run(head_snapshot())
-            assert revision == "0014_prepare_delete_fence"
+            assert revision == "0015_discover_unbound_multipart"
             assert {
                 "file_upload_lifecycle",
                 "file_lifecycle_outbox",

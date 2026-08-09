@@ -264,7 +264,7 @@ class FileStorageCleanup(Base):
             unique=True,
         ),
         CheckConstraint(
-            "operation IN ('ABORT_MULTIPART','DELETE_OBJECT')",
+            "operation IN ('ABORT_MULTIPART','DELETE_OBJECT','DISCOVER_MULTIPART')",
             name="ck_file_storage_cleanup_operation",
         ),
         CheckConstraint(

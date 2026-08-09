@@ -67,6 +67,7 @@ class FileUploadProjectMismatchError(FileUploadConflictError):
 class FileService:
     _COMPLETION_EXTERNAL_TIMEOUT_SECONDS = 20
     _COMPLETION_AMBIGUITY_GRACE_SECONDS = 120
+    _PROVISION_EXTERNAL_TIMEOUT_SECONDS = 20
     def __init__(
         self,
         session: AsyncSession,
@@ -226,7 +227,10 @@ class FileService:
             await self.session.rollback()
             raise FileProvisioningPendingError()
         try:
-            multipart_ids = await self._storage().list_multipart_uploads(lifecycle.object_key)
+            multipart_ids = await asyncio.wait_for(
+                self._storage().list_multipart_uploads(lifecycle.object_key),
+                timeout=self._PROVISION_EXTERNAL_TIMEOUT_SECONDS,
+            )
         except Exception as error:
             await self.session.rollback()
             raise FileProvisioningPendingError() from error
@@ -238,8 +242,9 @@ class FileService:
         if len(multipart_ids) == 1:
             return await self._bind_multipart(fresh_upload, lifecycle, multipart_ids[0])
         try:
-            multipart_id = await self._storage().create_multipart(
-                lifecycle.object_key, lifecycle.content_type
+            multipart_id = await asyncio.wait_for(
+                self._storage().create_multipart(lifecycle.object_key, lifecycle.content_type),
+                timeout=self._PROVISION_EXTERNAL_TIMEOUT_SECONDS,
             )
         except Exception as error:
             await self.session.rollback()
@@ -778,6 +783,27 @@ class FileLifecycleService:
         """Run bounded compensation jobs; failed providers remain safely retryable."""
         completed = await self.reconcile_cleanup(limit)
         async with self.session_factory() as session:
+            provisioning_ids = list(
+                await session.scalars(
+                    select(FileUploadLifecycle.upload_id)
+                    .where(FileUploadLifecycle.provision_state == "PROVISIONING")
+                    .limit(limit)
+                )
+            )
+        for upload_id in provisioning_ids:
+            async with self.session_factory() as session:
+                upload = await session.get(Upload, upload_id)
+                if upload is None:
+                    continue
+                file = await session.get(File, upload.file_id)
+                if file is None:
+                    continue
+                try:
+                    await FileService(session, self.storage)._provision_upload(upload, file)
+                except FileProvisioningPendingError:
+                    continue
+                completed += 1
+        async with self.session_factory() as session:
             now = datetime.now(UTC)
             lifecycles = list(
                 await session.scalars(
@@ -895,7 +921,11 @@ class FileLifecycleService:
                     select(FileStorageCleanup)
                     .where(*cleanup_filters)
                     .order_by(
-                        case((FileStorageCleanup.operation == "DELETE_OBJECT", 0), else_=1),
+                        case(
+                            (FileStorageCleanup.operation == "ABORT_MULTIPART", 0),
+                            (FileStorageCleanup.operation == "DISCOVER_MULTIPART", 1),
+                            else_=2,
+                        ),
                         FileStorageCleanup.next_attempt_at,
                     )
                     .with_for_update(skip_locked=True)
@@ -927,6 +957,16 @@ class FileLifecycleService:
                             self.storage.delete_object(object_key),
                             timeout=self._CLEANUP_EXTERNAL_TIMEOUT_SECONDS,
                         )
+                    elif operation == "DISCOVER_MULTIPART":
+                        multipart_ids = await asyncio.wait_for(
+                            self.storage.list_multipart_uploads(object_key),
+                            timeout=self._CLEANUP_EXTERNAL_TIMEOUT_SECONDS,
+                        )
+                        for discovered_id in sorted(multipart_ids):
+                            await asyncio.wait_for(
+                                self.storage.abort_multipart(object_key, discovered_id),
+                                timeout=self._CLEANUP_EXTERNAL_TIMEOUT_SECONDS,
+                            )
                     elif multipart_id is not None:
                         await asyncio.wait_for(
                             self.storage.abort_multipart(object_key, multipart_id),
@@ -945,9 +985,13 @@ class FileLifecycleService:
                             claim_token=None,
                             locked_at=None,
                             next_attempt_at=datetime.now(UTC) + timedelta(seconds=30),
-                            last_error_code="DELETE_FAILED"
-                            if operation == "DELETE_OBJECT"
-                            else "ABORT_FAILED",
+                            last_error_code=(
+                                "DELETE_FAILED"
+                                if operation == "DELETE_OBJECT"
+                                else "DISCOVERY_FAILED"
+                                if operation == "DISCOVER_MULTIPART"
+                                else "ABORT_FAILED"
+                            ),
                         )
                     )
                 else:

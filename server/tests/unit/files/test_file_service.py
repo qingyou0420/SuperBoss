@@ -3318,3 +3318,421 @@ async def test_provisioning_create_and_delete_leave_abortable_snapshot(
             await asyncio.wait_for(delete_task, timeout=10)
         if not provision_task.done():
             await asyncio.wait_for(provision_task, timeout=10)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delete_target", ["file", "project"])
+@pytest.mark.parametrize("scenario", ["bind_commit_failure", "response_loss_list_failure"])
+async def test_failed_provisioning_delete_retains_recoverable_multipart_discovery(
+    db_session, active_owner, delete_target: str, scenario: str
+) -> None:
+    """Provider IDs created before a rollback survive deletion as executable cleanup."""
+    import asyncio
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select, text
+    from sqlalchemy.exc import DBAPIError
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from superboss.core.errors import FileProvisioningPendingError
+    from superboss.modules.files.models import File, FileStorageCleanup, FileUploadLifecycle, Upload
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileLifecycleService, FileService
+
+    class FailureStorage(InMemoryObjectStorage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.provider_created = asyncio.Event()
+            self.replay_listing = asyncio.Event()
+            self.release = asyncio.Event()
+            self.fail_replay_listing = True
+
+        async def create_multipart(self, object_key: str, content_type: str) -> str:
+            multipart_id = await super().create_multipart(object_key, content_type)
+            self.provider_created.set()
+            if scenario == "bind_commit_failure":
+                await asyncio.wait_for(self.release.wait(), timeout=5)
+                return multipart_id
+            raise RuntimeError("provider response lost")
+
+        async def list_multipart_uploads(self, object_key: str) -> list[str]:
+            if (
+                scenario == "response_loss_list_failure"
+                and self.list_calls >= 1
+                and self.fail_replay_listing
+            ):
+                self.list_calls += 1
+                self.replay_listing.set()
+                await asyncio.wait_for(self.release.wait(), timeout=5)
+                raise RuntimeError("temporary list failure")
+            return await super().list_multipart_uploads(object_key)
+
+    class FailBindCommitSession(AsyncSession):
+        async def commit(self) -> None:
+            commits = getattr(self, "commits", 0) + 1
+            self.commits = commits
+            if scenario == "bind_commit_failure" and commits == 2:
+                raise RuntimeError("bind commit failure")
+            await super().commit()
+
+    project = Project(name=f"Provision rollback {scenario} {delete_target}")
+    db_session.add(project)
+    await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    storage = FailureStorage()
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    failing_factory = async_sessionmaker(
+        db_session.bind, class_=FailBindCommitSession, expire_on_commit=False
+    )
+    idempotency_key = f"provision-rollback-{scenario}-{delete_target}"
+    command = UploadStart(
+        project_id=project.id,
+        filename="rollback.pdf",
+        category="docs",
+        file_date="2026-08-09",
+        size_bytes=1,
+        sha256="0" * 64,
+    )
+    delete_started = asyncio.Event()
+    delete_pid: list[int] = []
+
+    async def start(session_factory) -> Exception | None:
+        async with session_factory() as session:
+            try:
+                await FileService(session, storage).start_upload(actor, command, idempotency_key)
+            except Exception as error:  # noqa: BLE001 -- test captures the service boundary outcome
+                await session.rollback()
+                return error
+        return None
+
+    if scenario == "response_loss_list_failure":
+        initial_error = await start(factory)
+        assert isinstance(initial_error, FileProvisioningPendingError)
+        provision_task = asyncio.create_task(start(factory))
+        await asyncio.wait_for(storage.replay_listing.wait(), timeout=5)
+    else:
+        provision_task = asyncio.create_task(start(failing_factory))
+        await asyncio.wait_for(storage.provider_created.wait(), timeout=5)
+
+    delete_task: asyncio.Task[Exception | None] | None = None
+    try:
+        upload = await db_session.scalar(
+            select(Upload).where(Upload.idempotency_key == idempotency_key)
+        )
+        assert upload is not None
+        file_id, upload_id = upload.file_id, upload.id
+        lifecycle = await db_session.get(FileUploadLifecycle, upload_id)
+        assert lifecycle is not None
+        assert lifecycle.provision_state == "PROVISIONING" and lifecycle.multipart_id is None
+
+        async def delete() -> Exception | None:
+            async with factory() as session:
+                delete_pid.append(int(await session.scalar(text("SELECT pg_backend_pid()"))))
+                delete_started.set()
+                try:
+                    target = (
+                        await session.get(File, file_id)
+                        if delete_target == "file"
+                        else await session.get(Project, project.id)
+                    )
+                    assert target is not None
+                    await session.delete(target)
+                    await session.commit()
+                except Exception as error:  # noqa: BLE001 -- test captures the database outcome
+                    await session.rollback()
+                    return error
+            return None
+
+        delete_task = asyncio.create_task(delete())
+        await asyncio.wait_for(delete_started.wait(), timeout=5)
+        for _ in range(300):
+            wait_event = await db_session.scalar(
+                text("SELECT wait_event_type FROM pg_stat_activity WHERE pid = :pid"),
+                {"pid": delete_pid[0]},
+            )
+            if wait_event == "Lock":
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("delete did not wait for the provisioning lock")
+
+        storage.release.set()
+        provision_error, delete_error = await asyncio.wait_for(
+            asyncio.gather(provision_task, delete_task), timeout=10
+        )
+        assert isinstance(provision_error, FileProvisioningPendingError)
+        assert not any(isinstance(error, DBAPIError) for error in (provision_error, delete_error))
+
+        db_session.expire_all()
+        jobs = list(
+            await db_session.scalars(
+                select(FileStorageCleanup).where(FileStorageCleanup.lifecycle_id == upload_id)
+            )
+        )
+        for job in jobs:
+            job.next_attempt_at = datetime.now(UTC)
+        await db_session.commit()
+        storage.fail_replay_listing = False
+        await FileLifecycleService(factory, storage).reconcile_cleanup()
+        assert storage.active == {}, {
+            "scenario": scenario,
+            "target": delete_target,
+            "operations": sorted(job.operation for job in jobs),
+            "active_multipart_ids": sorted(storage.active),
+            "aborted_ids": sorted(storage.aborted),
+        }
+    finally:
+        storage.release.set()
+        if delete_task is not None and not delete_task.done():
+            await asyncio.wait_for(delete_task, timeout=10)
+        if not provision_task.done():
+            await asyncio.wait_for(provision_task, timeout=10)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delete_target", ["file", "project"])
+async def test_multiple_discovered_multipart_ids_survive_cleanup_commit_failure_and_delete(
+    db_session, active_owner, delete_target: str
+) -> None:
+    """A failed multi-ID cleanup commit cannot detach any active multipart from recovery."""
+    import asyncio
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select, text
+    from sqlalchemy.exc import DBAPIError
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from superboss.modules.files.models import File, FileStorageCleanup, Upload
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileLifecycleService, FileService
+
+    cleanup_commit_started = asyncio.Event()
+    release_cleanup_failure = asyncio.Event()
+
+    class MultipleActiveStorage(InMemoryObjectStorage):
+        async def list_multipart_uploads(self, object_key: str) -> list[str]:
+            self.list_calls += 1
+            self.active = {"multipart-a": object_key, "multipart-b": object_key}
+            return ["multipart-a", "multipart-b"]
+
+    class FailCleanupCommitSession(AsyncSession):
+        async def commit(self) -> None:
+            commits = getattr(self, "commits", 0) + 1
+            self.commits = commits
+            if commits == 2:
+                cleanup_commit_started.set()
+                await asyncio.wait_for(release_cleanup_failure.wait(), timeout=5)
+                raise RuntimeError("cleanup commit failure")
+            await super().commit()
+
+    project = Project(name=f"Multi cleanup rollback {delete_target}")
+    db_session.add(project)
+    await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    storage = MultipleActiveStorage()
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    failing_factory = async_sessionmaker(
+        db_session.bind, class_=FailCleanupCommitSession, expire_on_commit=False
+    )
+    key = f"multi-cleanup-{delete_target}"
+    command = UploadStart(
+        project_id=project.id,
+        filename="multiple.pdf",
+        category="docs",
+        file_date="2026-08-09",
+        size_bytes=1,
+        sha256="0" * 64,
+    )
+    delete_pid: list[int] = []
+    delete_started = asyncio.Event()
+
+    async def provision() -> Exception | None:
+        async with failing_factory() as session:
+            try:
+                await FileService(session, storage).start_upload(actor, command, key)
+            except Exception as error:  # noqa: BLE001 -- test captures safe provider outcome
+                await session.rollback()
+                return error
+        return None
+
+    provision_task = asyncio.create_task(provision())
+    delete_task: asyncio.Task[Exception | None] | None = None
+    try:
+        await asyncio.wait_for(cleanup_commit_started.wait(), timeout=5)
+        upload = await db_session.scalar(select(Upload).where(Upload.idempotency_key == key))
+        assert upload is not None
+        file_id, upload_id = upload.file_id, upload.id
+
+        async def delete() -> Exception | None:
+            async with factory() as session:
+                delete_pid.append(int(await session.scalar(text("SELECT pg_backend_pid()"))))
+                delete_started.set()
+                try:
+                    target = (
+                        await session.get(File, file_id)
+                        if delete_target == "file"
+                        else await session.get(Project, project.id)
+                    )
+                    assert target is not None
+                    await session.delete(target)
+                    await session.commit()
+                except Exception as error:  # noqa: BLE001 -- test captures the database outcome
+                    await session.rollback()
+                    return error
+            return None
+
+        delete_task = asyncio.create_task(delete())
+        await asyncio.wait_for(delete_started.wait(), timeout=5)
+        for _ in range(300):
+            wait_event = await db_session.scalar(
+                text("SELECT wait_event_type FROM pg_stat_activity WHERE pid = :pid"),
+                {"pid": delete_pid[0]},
+            )
+            if wait_event == "Lock":
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("delete did not wait for failed multi-ID cleanup")
+
+        release_cleanup_failure.set()
+        provision_error, delete_error = await asyncio.wait_for(
+            asyncio.gather(provision_task, delete_task), timeout=10
+        )
+        assert not any(isinstance(error, DBAPIError) for error in (provision_error, delete_error))
+        db_session.expire_all()
+        jobs = list(
+            await db_session.scalars(
+                select(FileStorageCleanup).where(FileStorageCleanup.lifecycle_id == upload_id)
+            )
+        )
+        for job in jobs:
+            job.next_attempt_at = datetime.now(UTC)
+        await db_session.commit()
+        await FileLifecycleService(factory, storage).reconcile_cleanup()
+        assert storage.active == {}, {
+            "target": delete_target,
+            "operations": sorted(job.operation for job in jobs),
+            "active_multipart_ids": sorted(storage.active),
+            "aborted_ids": sorted(storage.aborted),
+        }
+    finally:
+        release_cleanup_failure.set()
+        if delete_task is not None and not delete_task.done():
+            await asyncio.wait_for(delete_task, timeout=10)
+        if not provision_task.done():
+            await asyncio.wait_for(provision_task, timeout=10)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["list", "abort"])
+async def test_discovery_cleanup_retries_without_persisting_provider_errors(
+    db_session, failure: str
+) -> None:
+    """A discovery lease stays retryable until every exact-key multipart is aborted."""
+    import hashlib
+    from datetime import UTC, datetime
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from superboss.modules.files.models import FileStorageCleanup
+    from superboss.modules.files.service import FileLifecycleService
+
+    class FlakyDiscoveryStorage(InMemoryObjectStorage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.abort_calls: list[str] = []
+            self.fail_abort = failure == "abort"
+
+        async def abort_multipart(self, object_key: str, multipart_id: str) -> None:
+            self.abort_calls.append(multipart_id)
+            if self.fail_abort:
+                self.fail_abort = False
+                raise RuntimeError("provider abort secret")
+            await super().abort_multipart(object_key, multipart_id)
+
+    storage = FlakyDiscoveryStorage()
+    object_key = f"projects/discovery/{failure}"
+    storage.active = {"discover-a": object_key, "discover-b": object_key}
+    if failure == "list":
+        storage.list_error = RuntimeError("provider list secret")
+    cleanup = FileStorageCleanup(
+        operation="DISCOVER_MULTIPART",
+        dedupe_key=hashlib.sha256(
+            f"DISCOVER_MULTIPART\x1f{object_key}\x1f".encode()
+        ).hexdigest(),
+        object_key=object_key,
+    )
+    db_session.add(cleanup)
+    await db_session.commit()
+    cleanup_id = cleanup.id
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    service = FileLifecycleService(factory, storage)
+
+    assert await service.reconcile_cleanup() == 0
+    db_session.expire_all()
+    persisted = await db_session.get(FileStorageCleanup, cleanup_id)
+    assert persisted is not None
+    assert persisted.state == "PENDING" and persisted.last_error_code == "DISCOVERY_FAILED"
+    assert "secret" not in str(persisted.last_error_code).lower()
+
+    storage.list_error = None
+    persisted.next_attempt_at = datetime.now(UTC)
+    await db_session.commit()
+    assert await service.reconcile_cleanup() == 1
+    assert storage.active == {} and storage.aborted == {"discover-a", "discover-b"}
+    db_session.expire_all()
+    persisted = await db_session.get(FileStorageCleanup, cleanup_id)
+    assert persisted is not None and persisted.state == "DONE"
+
+
+@pytest.mark.asyncio
+async def test_maintenance_recovers_unbound_multipart_after_bind_commit_failure(
+    db_session, active_owner
+) -> None:
+    """A durable PROVISIONING row recovers without requiring a client replay."""
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from superboss.core.errors import FileProvisioningPendingError
+    from superboss.modules.files.models import FileUploadLifecycle, Upload
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileLifecycleService, FileService
+
+    class FailBindCommitSession(AsyncSession):
+        async def commit(self) -> None:
+            commits = getattr(self, "commits", 0) + 1
+            self.commits = commits
+            if commits == 2:
+                raise RuntimeError("bind commit secret")
+            await super().commit()
+
+    project = Project(name="Maintenance provision recovery")
+    db_session.add(project)
+    await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    storage = InMemoryObjectStorage()
+    failing_factory = async_sessionmaker(
+        db_session.bind, class_=FailBindCommitSession, expire_on_commit=False
+    )
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    command = UploadStart(
+        project_id=project.id,
+        filename="maintenance.pdf",
+        category="docs",
+        file_date="2026-08-09",
+        size_bytes=1,
+        sha256="0" * 64,
+    )
+    async with failing_factory() as session:
+        with pytest.raises(FileProvisioningPendingError):
+            await FileService(session, storage).start_upload(actor, command, "maintenance-bind")
+    upload = await db_session.scalar(select(Upload).where(Upload.idempotency_key == "maintenance-bind"))
+    assert upload is not None
+    upload_id = upload.id
+    assert await FileLifecycleService(factory, storage).reconcile() >= 1
+    db_session.expire_all()
+    lifecycle = await db_session.get(FileUploadLifecycle, upload_id)
+    upload = await db_session.get(Upload, upload_id)
+    assert lifecycle is not None and upload is not None
+    assert lifecycle.provision_state == "READY" and upload.multipart_id in storage.active
+    assert storage.create_calls == 1
