@@ -761,6 +761,7 @@ async def test_concurrent_complete_locks_upload_before_storage_completion(
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from superboss.core.errors import FileCompletionPendingError
     from superboss.modules.files.models import File, FileState
     from superboss.modules.files.schemas import UploadStart
     from superboss.modules.files.service import FileService, FileUploadNotActiveError
@@ -824,7 +825,7 @@ async def test_concurrent_complete_locks_upload_before_storage_completion(
                     )
                     await session.commit()
                     return True
-                except FileUploadNotActiveError:
+                except (FileCompletionPendingError, FileUploadNotActiveError):
                     await session.rollback()
                     return False
 
@@ -833,7 +834,7 @@ async def test_concurrent_complete_locks_upload_before_storage_completion(
         )
         db_session.expire_all()
         file = await db_session.get(File, file_id)
-        assert results == [True, True]
+        assert any(results)
         assert storage.complete_calls == 1
         assert file is not None and file.state == FileState.QUARANTINED
 
@@ -1278,7 +1279,7 @@ async def test_reconciler_finalizes_durable_prepared_object_without_second_compl
     db_session, active_owner
 ) -> None:
     """A crash after provider completion is recoverable without a client replay."""
-    from datetime import UTC, datetime
+    from datetime import UTC, datetime, timedelta
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -1310,7 +1311,7 @@ async def test_reconciler_finalizes_durable_prepared_object_without_second_compl
     lifecycle.parts_digest = "a" * 64
     lifecycle.canonical_parts_json = [{"part_number": 1, "etag": "etag"}]
     lifecycle.completion_event_key = uuid4()
-    lifecycle.prepared_at = datetime.now(UTC)
+    lifecycle.prepared_at = datetime.now(UTC) - timedelta(seconds=121)
     await db_session.commit()
     await storage.complete_multipart(
         lifecycle.object_key, upload.multipart_id, [CompletedPart(1, "etag")]
@@ -2460,9 +2461,10 @@ async def test_global_delivery_drain_skips_future_or_live_scan_lease(
 @pytest.mark.asyncio
 async def test_late_complete_timeout_recovers_from_durable_prepared_state(db_session, active_owner) -> None:
     """A timed-out provider call that completes later is recovered by stat, not compensation."""
-    from datetime import UTC, datetime
+    from datetime import UTC, datetime, timedelta
 
     from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from superboss.core.errors import FileCompletionPendingError
     from superboss.modules.files.models import (
@@ -2472,7 +2474,7 @@ async def test_late_complete_timeout_recovers_from_durable_prepared_state(db_ses
         FileUploadLifecycle,
     )
     from superboss.modules.files.schemas import UploadStart
-    from superboss.modules.files.service import FileService
+    from superboss.modules.files.service import FileLifecycleService, FileService
     from superboss.modules.files.storage import CompletedPart
 
     project = Project(name="Late completion recovery")
@@ -2482,6 +2484,7 @@ async def test_late_complete_timeout_recovers_from_durable_prepared_state(db_ses
     storage = InMemoryObjectStorage(complete_late_success_delay=0.15)
     service = FileService(db_session, storage)
     upload = await service.start_upload(actor, UploadStart(project_id=project.id, filename="late.pdf", category="docs", file_date="2026-08-09", size_bytes=1, sha256="0" * 64), "late-timeout")
+    file_id = upload.file_id
     with pytest.raises(FileCompletionPendingError):
         await service.complete_upload(actor, upload.id, [CompletedPart(1, "etag")])
     file = await db_session.get(File, upload.file_id)
@@ -2490,10 +2493,14 @@ async def test_late_complete_timeout_recovers_from_durable_prepared_state(db_ses
     assert lifecycle is not None and lifecycle.completion_state == "PREPARED" and lifecycle.completion_last_error_code == "COMPLETION_AMBIGUOUS"
     assert list(await db_session.scalars(select(FileStorageCleanup))) == []
     await storage.await_late_completions()
+    lifecycle.prepared_at = datetime.now(UTC) - timedelta(seconds=121)
     lifecycle.completion_next_attempt_at = datetime.now(UTC)
     await db_session.commit()
-    replayed = await service.complete_upload(actor, upload.id, [CompletedPart(1, "etag")])
-    assert replayed.state.value == "QUARANTINED" and len(storage.completed) == 1
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    assert await FileLifecycleService(factory, storage).reconcile() >= 1
+    db_session.expire_all()
+    replayed = await db_session.get(File, file_id)
+    assert replayed is not None and replayed.state.value == "QUARANTINED" and storage.complete_calls == 1
     assert len(list(await db_session.scalars(select(FileLifecycleOutbox)))) == 2
 
 
@@ -2503,11 +2510,12 @@ async def test_ambiguous_completion_grace_never_retries_complete(db_session, act
     from datetime import UTC, datetime
 
     from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from superboss.core.errors import FileCompletionPendingError
     from superboss.modules.files.models import File, FileStorageCleanup, FileUploadLifecycle
     from superboss.modules.files.schemas import UploadStart
-    from superboss.modules.files.service import FileService
+    from superboss.modules.files.service import FileLifecycleService, FileService
     from superboss.modules.files.storage import CompletedPart
 
     project = Project(name="Ambiguous grace")
@@ -2519,16 +2527,174 @@ async def test_ambiguous_completion_grace_never_retries_complete(db_session, act
     parts = [CompletedPart(1, "etag")]
     with pytest.raises(FileCompletionPendingError):
         await service.complete_upload(actor, upload.id, parts)
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
     for _ in range(3):
         lifecycle = await db_session.get(FileUploadLifecycle, upload.id)
         assert lifecycle is not None
         lifecycle.completion_next_attempt_at = datetime.now(UTC)
         await db_session.commit()
-        with pytest.raises(FileCompletionPendingError):
-            await service.complete_upload(actor, upload.id, parts)
+        assert await FileLifecycleService(factory, storage).reconcile() == 0
+        assert storage.complete_calls == 1
     file = await db_session.get(File, upload.file_id)
     lifecycle = await db_session.get(FileUploadLifecycle, upload.id)
     assert storage.complete_calls == 1 and file is not None and file.state.value == "UPLOADING"
     assert lifecycle is not None and lifecycle.completion_state == "PREPARED"
     assert lifecycle.completion_last_error_code == "COMPLETION_AMBIGUOUS" and "secret" not in lifecycle.completion_last_error_code
     assert list(await db_session.scalars(select(FileStorageCleanup))) == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_prepared_wrong_size_compensates_object(db_session, active_owner) -> None:
+    """A recovered PREPARED object with the wrong size is durably compensated."""
+    import hashlib
+    import json
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from superboss.modules.files.models import File, FileStorageCleanup, FileUploadLifecycle
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileLifecycleService, FileService
+    from superboss.modules.files.storage import ObjectMetadata
+
+    project = Project(name="Prepared wrong size")
+    db_session.add(project); await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    storage = InMemoryObjectStorage(complete_size=2)
+    upload = await FileService(db_session, storage).start_upload(actor, UploadStart(project_id=project.id, filename="wrong.pdf", category="docs", file_date="2026-08-09", size_bytes=1, sha256="0" * 64), "prepared-wrong")
+    upload_id = upload.id
+    file_id = upload.file_id
+    lifecycle = await db_session.get(FileUploadLifecycle, upload_id)
+    assert lifecycle is not None
+    parts = [{"part_number": 1, "etag": "etag"}]
+    lifecycle.completion_state = "PREPARED"
+    lifecycle.canonical_parts_json = parts
+    lifecycle.parts_digest = hashlib.sha256(json.dumps(parts, separators=(",", ":")).encode()).hexdigest()
+    lifecycle.completion_actor_kind = "user"
+    lifecycle.completion_actor_id = active_owner.id
+    lifecycle.completion_actor_role = "OWNER"
+    lifecycle.completion_request_id = uuid4()
+    lifecycle.completion_event_key = uuid4()
+    lifecycle.prepared_at = datetime.now(UTC) - timedelta(seconds=121)
+    storage.objects[lifecycle.object_key] = ObjectMetadata(2)
+    await db_session.commit()
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    assert await FileLifecycleService(factory, storage).reconcile() >= 1
+    db_session.expire_all()
+    file = await db_session.get(File, file_id)
+    lifecycle = await db_session.get(FileUploadLifecycle, upload_id)
+    jobs = list(await db_session.scalars(select(FileStorageCleanup)))
+    assert file is not None and file.state.value == "FAILED"
+    assert lifecycle.completion_state == "COMPENSATION_PENDING" and {job.operation for job in jobs} == {"DELETE_OBJECT", "ABORT_MULTIPART"}
+
+
+@pytest.mark.asyncio
+async def test_reconcile_skips_inflight_completion_attempt(db_session, active_owner) -> None:
+    """A durable future completion window prevents maintenance from duplicating S3 complete."""
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileLifecycleService, FileService
+    from superboss.modules.files.storage import CompletedPart, ObjectMetadata
+
+    class BlockingStorage(InMemoryObjectStorage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event(); self.release = asyncio.Event()
+
+        async def complete_multipart(self, object_key: str, multipart_id: str, parts: list[CompletedPart]) -> ObjectMetadata:
+            self.complete_calls += 1; self.entered.set()
+            await asyncio.wait_for(self.release.wait(), timeout=3)
+            self.active.pop(multipart_id)
+            self.completed[multipart_id] = parts
+            metadata = ObjectMetadata(self.complete_size)
+            self.objects[object_key] = metadata
+            return metadata
+
+    project = Project(name="Inflight reconcile")
+    db_session.add(project); await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    storage = BlockingStorage()
+    upload = await FileService(db_session, storage).start_upload(actor, UploadStart(project_id=project.id, filename="inflight.pdf", category="docs", file_date="2026-08-09", size_bytes=1, sha256="0" * 64), "inflight")
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    request = asyncio.create_task(FileService(db_session, storage).complete_upload(actor, upload.id, [CompletedPart(1, "etag")]))
+    await asyncio.wait_for(storage.entered.wait(), timeout=3)
+    assert await FileLifecycleService(factory, storage).reconcile() == 0 and storage.complete_calls == 1
+    storage.release.set(); result = await asyncio.wait_for(request, timeout=3)
+    assert result.state.value == "QUARANTINED" and storage.complete_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_during_ambiguous_completion_defers_cleanup_until_grace_expires(
+    db_session, active_owner
+) -> None:
+    """Deleting a PREPARED upload must not race a provider's late completion."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from superboss.core.errors import FileCompletionPendingError
+    from superboss.modules.files.models import File, FileStorageCleanup
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileLifecycleService, FileService
+    from superboss.modules.files.storage import CompletedPart
+
+    project = Project(name="Delete during completion ambiguity")
+    db_session.add(project)
+    await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    storage = InMemoryObjectStorage(complete_late_success_delay=0.15)
+    service = FileService(db_session, storage)
+    upload = await service.start_upload(
+        actor,
+        UploadStart(
+            project_id=project.id,
+            filename="late-delete.pdf",
+            category="docs",
+            file_date="2026-08-09",
+            size_bytes=1,
+            sha256="0" * 64,
+        ),
+        "late-delete",
+    )
+    file_id, upload_id = upload.file_id, upload.id
+    with pytest.raises(FileCompletionPendingError):
+        await service.complete_upload(actor, upload_id, [CompletedPart(1, "etag")])
+
+    file = await db_session.get(File, file_id)
+    assert file is not None
+    object_key = file.object_key
+    await db_session.delete(file)
+    await db_session.commit()
+    db_session.expire_all()
+    jobs = list(
+        await db_session.scalars(
+            select(FileStorageCleanup).where(FileStorageCleanup.lifecycle_id == upload_id)
+        )
+    )
+    assert {job.operation for job in jobs} == {"DELETE_OBJECT", "ABORT_MULTIPART"}
+    now = datetime.now(UTC)
+    assert all(job.next_attempt_at > now for job in jobs)
+
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    assert await FileLifecycleService(factory, storage).reconcile() == 0
+    assert storage.aborted == set() and storage.deleted == []
+    await storage.await_late_completions()
+    assert object_key in storage.objects
+
+    for job in jobs:
+        job.next_attempt_at = datetime.now(UTC)
+    await db_session.commit()
+    assert await FileLifecycleService(factory, storage).reconcile() == 2
+    db_session.expire_all()
+    finished = list(
+        await db_session.scalars(
+            select(FileStorageCleanup).where(FileStorageCleanup.lifecycle_id == upload_id)
+        )
+    )
+    assert all(job.state == "DONE" for job in finished)
+    assert storage.objects == {} and storage.active == {} and storage.aborted

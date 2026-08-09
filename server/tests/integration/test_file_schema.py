@@ -191,7 +191,7 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
             check=True,
         )
         tables, constraints, indexes = asyncio.run(catalog())
-        assert asyncio.run(revision()) == "0011_completion_ambiguity_retry"
+        assert asyncio.run(revision()) == "0012_defer_delete_cleanup"
         assert "trg_files_snapshot_storage_cleanup" in asyncio.run(trigger_names())
         assert {"files", "uploads", "file_upload_lifecycle", "file_lifecycle_outbox", "file_storage_cleanup"} <= set(tables)
         assert asyncio.run(table_columns("files")) == [

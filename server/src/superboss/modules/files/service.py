@@ -306,6 +306,7 @@ class FileService:
         parts: list[CompletedPart],
         request_id: UUID | None = None,
     ) -> File:
+        just_prepared = False
         upload = await self.session.get(Upload, upload_id)
         if upload is None:
             raise FileUploadNotFoundError()
@@ -351,11 +352,18 @@ class FileService:
             lifecycle.completion_event_key = uuid5(
                 NAMESPACE_URL, f"file-complete:{upload_id}:{digest}"
             )
+            lifecycle.completion_attempt_count = 1
+            lifecycle.completion_next_attempt_at = datetime.now(UTC) + timedelta(
+                seconds=self._COMPLETION_AMBIGUITY_GRACE_SECONDS
+            )
             await self.session.commit()
+            just_prepared = True
         elif lifecycle.parts_digest != digest:
             raise FileUploadConflictError()
         now = datetime.now(UTC)
         if (
+            not just_prepared
+            and
             lifecycle.completion_next_attempt_at is not None
             and lifecycle.completion_next_attempt_at > now
         ):
@@ -367,7 +375,8 @@ class FileService:
         )
         assert lifecycle is not None
         within_ambiguity_grace = (
-            lifecycle.completion_attempt_count > 0
+            not just_prepared
+            and lifecycle.completion_attempt_count > 0
             and lifecycle.prepared_at is not None
             and datetime.now(UTC) - lifecycle.prepared_at
             < timedelta(seconds=self._COMPLETION_AMBIGUITY_GRACE_SECONDS)
@@ -385,6 +394,18 @@ class FileService:
                 await self._mark_completion_ambiguous(lifecycle)
                 raise FileCompletionPendingError()
             try:
+                if not just_prepared:
+                    lifecycle.completion_attempt_count += 1
+                    lifecycle.completion_next_attempt_at = datetime.now(UTC) + timedelta(
+                        seconds=self._COMPLETION_AMBIGUITY_GRACE_SECONDS
+                    )
+                    await self.session.commit()
+                    lifecycle = await self.session.scalar(
+                        select(FileUploadLifecycle)
+                        .where(FileUploadLifecycle.upload_id == upload_id)
+                        .with_for_update()
+                    )
+                    assert lifecycle is not None
                 metadata = await asyncio.wait_for(
                     self._storage().complete_multipart(
                         file.object_key, upload.multipart_id, canonical
@@ -409,7 +430,6 @@ class FileService:
 
     async def _mark_completion_ambiguous(self, lifecycle: FileUploadLifecycle) -> None:
         lifecycle.completion_state = "PREPARED"
-        lifecycle.completion_attempt_count += 1
         lifecycle.completion_last_error_code = "COMPLETION_AMBIGUOUS"
         lifecycle.completion_next_attempt_at = datetime.now(UTC) + timedelta(
             seconds=self._COMPLETION_AMBIGUITY_GRACE_SECONDS
@@ -689,10 +709,17 @@ class FileLifecycleService:
         """Run bounded compensation jobs; failed providers remain safely retryable."""
         completed = await self.reconcile_cleanup(limit)
         async with self.session_factory() as session:
+            now = datetime.now(UTC)
             lifecycles = list(
                 await session.scalars(
                     select(FileUploadLifecycle)
-                    .where(FileUploadLifecycle.completion_state == "PREPARED")
+                    .where(
+                        FileUploadLifecycle.completion_state == "PREPARED",
+                        or_(
+                            FileUploadLifecycle.completion_next_attempt_at.is_(None),
+                            FileUploadLifecycle.completion_next_attempt_at <= now,
+                        ),
+                    )
                     .with_for_update(skip_locked=True)
                     .limit(limit)
                 )
@@ -700,12 +727,43 @@ class FileLifecycleService:
             for lifecycle in lifecycles:
                 if lifecycle.provision_state == "CANCEL_REQUESTED":
                     continue
+                grace_until = (
+                    lifecycle.prepared_at
+                    + timedelta(seconds=FileService._COMPLETION_AMBIGUITY_GRACE_SECONDS)
+                    if lifecycle.prepared_at is not None
+                    else now
+                )
+                if now < grace_until:
+                    lifecycle.completion_next_attempt_at = max(
+                        lifecycle.completion_next_attempt_at or grace_until, grace_until
+                    )
+                    await session.commit()
+                    continue
                 upload = await session.get(Upload, lifecycle.upload_id)
                 file = await session.get(File, lifecycle.file_id)
                 if upload is None or file is None or upload.multipart_id is None:
                     continue
+                lifecycle.completion_attempt_count += 1
+                lifecycle.completion_next_attempt_at = now + timedelta(
+                    seconds=FileService._COMPLETION_AMBIGUITY_GRACE_SECONDS
+                )
+                await session.commit()
+                refreshed_lifecycle = await session.scalar(
+                    select(FileUploadLifecycle)
+                    .where(FileUploadLifecycle.upload_id == lifecycle.upload_id)
+                    .with_for_update()
+                )
+                if (
+                    refreshed_lifecycle is None
+                    or refreshed_lifecycle.completion_state != "PREPARED"
+                ):
+                    continue
+                lifecycle = refreshed_lifecycle
                 try:
-                    metadata = await self.storage.stat_object(lifecycle.object_key)
+                    metadata = await asyncio.wait_for(
+                        self.storage.stat_object(lifecycle.object_key),
+                        timeout=FileService._COMPLETION_EXTERNAL_TIMEOUT_SECONDS,
+                    )
                     if metadata is None:
                         parts: list[CompletedPart] = []
                         for item in lifecycle.canonical_parts_json or []:
@@ -722,13 +780,18 @@ class FileLifecycleService:
                             parts.append(CompletedPart(part_number, etag))
                         if not parts:
                             continue
-                        metadata = await self.storage.complete_multipart(
-                            lifecycle.object_key, upload.multipart_id, parts
+                        metadata = await asyncio.wait_for(
+                            self.storage.complete_multipart(
+                                lifecycle.object_key, upload.multipart_id, parts
+                            ),
+                            timeout=FileService._COMPLETION_EXTERNAL_TIMEOUT_SECONDS,
                         )
                 except Exception:  # noqa: BLE001
-                    await session.rollback()
+                    await FileService(session, self.storage)._mark_completion_ambiguous(lifecycle)
                     continue
                 if metadata.size_bytes != lifecycle.declared_size_bytes:
+                    await FileService(session, self.storage)._fail_upload(file, upload, lifecycle)
+                    completed += 1
                     continue
                 await FileService(session, self.storage)._finalize_completion(file, lifecycle)
                 completed += 1
