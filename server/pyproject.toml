@@ -24,6 +24,7 @@ dev = [
     "mypy",
     "pytest",
     "pytest-asyncio",
+    "pyyaml",
     "ruff",
     "testcontainers[postgres]",
 ]

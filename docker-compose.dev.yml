@@ -1,4 +1,52 @@
+x-backend-build: &backend-build
+  context: ./server
+
+x-backend-environment: &backend-environment
+  SUPERBOSS_ENVIRONMENT: development
+  SUPERBOSS_DATABASE_URL: postgresql+asyncpg://superboss:superboss@postgres:5432/superboss
+  SUPERBOSS_WECOM_FAKE: "true"
+  SUPERBOSS_S3_BUCKET: superboss-files
+  SUPERBOSS_S3_ENDPOINT_URL: http://minio:9000
+  SUPERBOSS_S3_ACCESS_KEY_ID: superboss
+  SUPERBOSS_S3_SECRET_ACCESS_KEY: superboss-dev-only
+  SUPERBOSS_REDIS_URL: redis://redis:6379/0
+  SUPERBOSS_CLAMAV_HOST: clamav
+  SUPERBOSS_CLAMAV_PORT: "3310"
+  SUPERBOSS_CLAMAV_MAX_STREAM_BYTES: "104857600"
+
 services:
+  api:
+    build: *backend-build
+    command:
+      - sh
+      - -c
+      - alembic upgrade head && exec uvicorn superboss.main:app --host 0.0.0.0 --port 8000
+    environment: *backend-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/live', timeout=2)
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks:
+      - backend
+      - edge
+    restart: unless-stopped
+
   postgres:
     image: postgres:17-alpine
     environment:
@@ -7,8 +55,157 @@ services:
       POSTGRES_PASSWORD: superboss
     ports:
       - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U superboss -d superboss"]
       interval: 5s
       timeout: 5s
       retries: 10
+    networks:
+      - backend
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - backend
+    restart: unless-stopped
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-06-13T11-33-47Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: superboss
+      MINIO_ROOT_PASSWORD: superboss-dev-only
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - backend
+      - edge
+    restart: unless-stopped
+
+  minio-init:
+    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        mc alias set local http://minio:9000
+        "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" &&
+        mc mb --ignore-existing "local/$${MINIO_BUCKET}"
+    environment:
+      MINIO_ROOT_USER: superboss
+      MINIO_ROOT_PASSWORD: superboss-dev-only
+      MINIO_BUCKET: superboss-files
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: "no"
+
+  clamav:
+    image: clamav/clamav:1.4
+    volumes:
+      - clamav-database:/var/lib/clamav
+      - ./server/config/clamd.conf:/etc/clamav/clamd.conf:ro
+    networks:
+      - backend
+    restart: unless-stopped
+
+  file-scan-worker:
+    build: *backend-build
+    command:
+      - celery
+      - -A
+      - superboss.workers.celery_app:celery_app
+      - worker
+      - --loglevel=INFO
+      - --queues=file-scan
+      - --concurrency=1
+      - --prefetch-multiplier=1
+    environment: *backend-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      clamav:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+
+  file-maintenance-worker:
+    build: *backend-build
+    command:
+      - celery
+      - -A
+      - superboss.workers.celery_app:celery_app
+      - worker
+      - --loglevel=INFO
+      - --queues=file-maintenance
+      - --concurrency=1
+      - --prefetch-multiplier=1
+    environment: *backend-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+
+  celery-beat:
+    build: *backend-build
+    command:
+      - celery
+      - -A
+      - superboss.workers.celery_app:celery_app
+      - beat
+      - --loglevel=INFO
+      - --pidfile=
+      - --schedule=/var/lib/celery/celerybeat-schedule
+    environment: *backend-environment
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - celery-beat-data:/var/lib/celery
+    networks:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:
+  clamav-database:
+  celery-beat-data:
+
+networks:
+  backend: {}
+  edge: {}
