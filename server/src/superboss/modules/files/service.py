@@ -1,4 +1,5 @@
 import hashlib
+import inspect
 import json
 import re
 from collections.abc import Awaitable, Callable
@@ -20,6 +21,8 @@ from superboss.core.errors import (
     FileUploadSizeMismatchError,
     NotFoundError,
 )
+from superboss.modules.audit.schemas import AuditEventInput
+from superboss.modules.audit.service import AuditService
 from superboss.modules.files.models import (
     File,
     FileLifecycleOutbox,
@@ -30,6 +33,7 @@ from superboss.modules.files.models import (
 )
 from superboss.modules.files.schemas import UploadStart
 from superboss.modules.files.storage import CompletedPart, ObjectStorage
+from superboss.modules.users.models import Role
 
 
 class FileNotReadyError(ConflictError):
@@ -459,10 +463,106 @@ class FileLifecycleService:
     """Claims durable storage compensation work without process-local coordination."""
 
     def __init__(
-        self, session_factory: async_sessionmaker[AsyncSession], storage: ObjectStorage
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        storage: ObjectStorage,
+        enqueue_scan: Callable[[UUID, UUID], Awaitable[None] | None] | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.storage = storage
+        self.enqueue_scan = enqueue_scan
+
+    async def deliver_completion(self, upload_id: UUID) -> bool:
+        """Deliver immutable completion evidence before the idempotent scan job."""
+        for kind in ("completion_audit", "scan_dispatch"):
+            async with self.session_factory() as session:
+                lifecycle = await session.scalar(
+                    select(FileUploadLifecycle)
+                    .where(FileUploadLifecycle.upload_id == upload_id)
+                    .with_for_update(skip_locked=True)
+                )
+                if lifecycle is None or lifecycle.completion_event_key is None:
+                    return False
+                outbox = await session.scalar(
+                    select(FileLifecycleOutbox)
+                    .where(
+                        FileLifecycleOutbox.kind == kind,
+                        FileLifecycleOutbox.dedupe_key == lifecycle.completion_event_key,
+                    )
+                    .with_for_update(skip_locked=True)
+                )
+                if outbox is None:
+                    return False
+                if outbox.state == "DELIVERED":
+                    continue
+                outbox.state = "DELIVERING"
+                await session.commit()
+                try:
+                    if kind == "completion_audit":
+                        await self._record_completion_audit(lifecycle)
+                    else:
+                        await self._enqueue_scan(lifecycle)
+                except Exception:  # noqa: BLE001 -- provider details are never persisted
+                    outbox.state = "PENDING"
+                    outbox.attempt_count += 1
+                    outbox.next_attempt_at = datetime.now(UTC) + timedelta(seconds=30)
+                    outbox.last_error_code = (
+                        "AUDIT_FAILED" if kind == "completion_audit" else "DISPATCH_FAILED"
+                    )
+                    await session.commit()
+                    return False
+                outbox.state = "DELIVERED"
+                outbox.attempt_count += 1
+                outbox.last_error_code = None
+                await session.commit()
+        return True
+
+    async def _record_completion_audit(self, lifecycle: FileUploadLifecycle) -> None:
+        if (
+            lifecycle.completion_actor_id is None
+            or lifecycle.completion_actor_role is None
+            or lifecycle.completion_request_id is None
+            or lifecycle.completion_event_key is None
+        ):
+            raise RuntimeError("completion audit snapshot is incomplete")
+        actor_kind = lifecycle.completion_actor_kind
+        if actor_kind not in {"user", "device", "system"}:
+            raise RuntimeError("completion actor snapshot is invalid")
+        role = Role(lifecycle.completion_actor_role)
+        if actor_kind == "user":
+            actor = Actor("user", lifecycle.completion_actor_id, role, frozenset(), frozenset())
+        elif actor_kind == "device":
+            actor = Actor("device", lifecycle.completion_actor_id, role, frozenset(), frozenset())
+        else:
+            actor = Actor("system", lifecycle.completion_actor_id, role, frozenset(), frozenset())
+        await AuditService(self.session_factory).record(
+            AuditEventInput(
+                actor=actor,
+                action="file.upload.complete",
+                object_type="file",
+                object_id=lifecycle.file_id,
+                project_id=lifecycle.project_id,
+                outcome="SUCCESS",
+                request_id=lifecycle.completion_request_id,
+                event_key=lifecycle.completion_event_key,
+                metadata={"state": "QUARANTINED", "size_bytes": lifecycle.declared_size_bytes},
+            )
+        )
+
+    async def _enqueue_scan(self, lifecycle: FileUploadLifecycle) -> None:
+        if self.enqueue_scan is None or lifecycle.completion_event_key is None:
+            raise RuntimeError("file scan dispatcher is not configured")
+        try:
+            inspect.signature(self.enqueue_scan).bind(
+                lifecycle.file_id, lifecycle.completion_event_key
+            )
+        except TypeError:
+            # Transitional test/runtime adapters accepted one argument before delivery keys.
+            result = self.enqueue_scan(lifecycle.file_id)  # type: ignore[call-arg]
+        else:
+            result = self.enqueue_scan(lifecycle.file_id, lifecycle.completion_event_key)
+        if isinstance(result, Awaitable):
+            await result
 
     async def reconcile(self, limit: int = 100) -> int:
         """Run bounded compensation jobs; failed providers remain safely retryable."""

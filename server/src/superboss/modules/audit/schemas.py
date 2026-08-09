@@ -117,6 +117,7 @@ class AuditEventInput(BaseModel):
     project_id: UUID | None = None
     outcome: str
     request_id: UUID
+    event_key: UUID | None = None
     metadata: dict[str, object] = {}
 
     @field_validator("metadata", mode="before")

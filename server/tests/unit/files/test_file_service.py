@@ -916,3 +916,61 @@ async def test_reconciler_finalizes_durable_prepared_object_without_second_compl
     assert file is not None and file.state == FileState.QUARANTINED
     assert lifecycle is not None and lifecycle.completion_state == "QUARANTINED"
     assert len(storage.completed) == 1
+
+
+@pytest.mark.asyncio
+async def test_completion_delivery_retries_same_durable_scan_key_after_dispatch_failure(
+    db_session, active_owner
+) -> None:
+    """A failed dispatcher leaves audit immutable and retries the same idempotency key."""
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from superboss.modules.audit.models import AuditLog
+    from superboss.modules.files.models import FileLifecycleOutbox
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileLifecycleService, FileService
+    from superboss.modules.files.storage import CompletedPart
+
+    project = Project(name="Delivery retry")
+    db_session.add(project)
+    await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    storage = InMemoryObjectStorage()
+    upload = await FileService(db_session, storage).start_upload(
+        actor,
+        UploadStart(
+            project_id=project.id,
+            filename="delivery.pdf",
+            category="docs",
+            file_date="2026-08-09",
+            size_bytes=1,
+            sha256="0" * 64,
+        ),
+        "delivery-retry",
+    )
+    await FileService(db_session, storage).complete_upload(
+        actor, upload.id, [CompletedPart(1, "etag")], uuid4()
+    )
+    upload_id = upload.id
+    file_id = upload.file_id
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+
+    def fail_dispatch(_file_id: UUID, _delivery_key: UUID) -> None:
+        raise RuntimeError("dispatcher secret")
+
+    assert not await FileLifecycleService(factory, storage, fail_dispatch).deliver_completion(upload_id)
+    db_session.expire_all()
+    jobs = list(await db_session.scalars(select(FileLifecycleOutbox).order_by(FileLifecycleOutbox.kind)))
+    audits = list(await db_session.scalars(select(AuditLog)))
+    assert [job.state for job in jobs] == ["DELIVERED", "PENDING"]
+    assert jobs[1].last_error_code == "DISPATCH_FAILED"
+    assert len(audits) == 1 and "secret" not in str(jobs[1].last_error_code)
+
+    seen: list[tuple[UUID, UUID]] = []
+    assert await FileLifecycleService(factory, storage, lambda file_id, key: seen.append((file_id, key))).deliver_completion(upload_id)
+    db_session.expire_all()
+    jobs = list(await db_session.scalars(select(FileLifecycleOutbox).order_by(FileLifecycleOutbox.kind)))
+    assert [job.state for job in jobs] == ["DELIVERED", "DELIVERED"]
+    assert seen == [(file_id, jobs[1].dedupe_key)]
+    assert len(list(await db_session.scalars(select(AuditLog)))) == 1

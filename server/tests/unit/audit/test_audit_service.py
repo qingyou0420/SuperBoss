@@ -64,6 +64,33 @@ async def test_record_redacts_forbidden_metadata_keys_at_every_depth(
     }
 
 
+@pytest.mark.asyncio
+async def test_record_reuses_identical_event_key_without_second_audit_row(
+    db_session: AsyncSession,
+) -> None:
+    """A durable delivery retry must be append-only and exactly once."""
+    actor = Actor("user", uuid4(), Role.OWNER, frozenset(), frozenset())
+    event_key = uuid4()
+    event = AuditEventInput(
+        actor=actor,
+        action="file.upload.complete",
+        object_type="file",
+        object_id=uuid4(),
+        outcome="SUCCESS",
+        request_id=uuid4(),
+        metadata={"state": "QUARANTINED", "size_bytes": 1},
+        event_key=event_key,
+    )
+    assert db_session.bind is not None
+    service = AuditService(async_sessionmaker(db_session.bind, expire_on_commit=False))
+
+    first = await service.record(event)
+    second = await service.record(event)
+
+    rows = list(await db_session.scalars(select(AuditLog).where(AuditLog.event_key == event_key)))
+    assert first == second and [row.id for row in rows] == [first]
+
+
 def test_audit_metadata_rejects_non_json_objects() -> None:
     """Coercing arbitrary objects can persist opaque, non-portable audit metadata."""
     with pytest.raises(ValidationError, match="invalid audit metadata"):

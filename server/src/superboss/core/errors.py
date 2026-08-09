@@ -58,3 +58,8 @@ class FileProvisioningPendingError(DomainError):
 class FileCompletionPendingError(DomainError):
     def __init__(self) -> None:
         super().__init__("FILE_COMPLETION_PENDING", "File completion is pending", 503)
+
+
+class FileDeliveryPendingError(DomainError):
+    def __init__(self) -> None:
+        super().__init__("FILE_DELIVERY_PENDING", "File delivery is pending", 503)

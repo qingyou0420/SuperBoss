@@ -20,7 +20,7 @@ from superboss.modules.auth.service import AuthService, InvalidSession
 from superboss.modules.users.repository import UserRepository
 
 
-def _unconfigured_file_scan_dispatcher(_file_id: UUID) -> None:
+def _unconfigured_file_scan_dispatcher(_file_id: UUID, _delivery_key: UUID | None = None) -> None:
     raise RuntimeError("file scan dispatcher is not configured")
 
 
