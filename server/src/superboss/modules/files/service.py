@@ -43,8 +43,11 @@ class FileService:
     @staticmethod
     def _segment(value: str, fallback: str) -> str:
         value = value.replace("\\", "/").split("/")[-1]
-        value = "".join(c for c in value if ord(c) >= 32)
-        value = re.sub(r"[^\\w.\-\u4e00-\u9fff]", "_", value, flags=re.UNICODE).strip("._")
+        value = "".join(
+            char if (char.isalnum() or char in {".", "_", "-"}) else "_"
+            for char in value
+            if ord(char) >= 32 and ord(char) != 127
+        ).strip("._")
         return value or fallback
 
     async def start_upload(
