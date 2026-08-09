@@ -408,6 +408,22 @@ class FileService:
         return await self._storage().presign_get(file.object_key, 60)
 
     async def presign_part(self, actor: Actor, upload_id: UUID, part_number: int) -> str:
+        return await self._presign_part(actor, upload_id, part_number, import_device=False)
+
+    async def presign_import_part(
+        self, actor: Actor, upload_id: UUID, part_number: int
+    ) -> str:
+        """Presign one import-owned upload without opening the generic file boundary."""
+        return await self._presign_part(actor, upload_id, part_number, import_device=True)
+
+    async def _presign_part(
+        self,
+        actor: Actor,
+        upload_id: UUID,
+        part_number: int,
+        *,
+        import_device: bool,
+    ) -> str:
         if not 1 <= part_number <= 10000:
             raise ValueError("invalid part number")
         upload = await self.session.scalar(
@@ -420,7 +436,7 @@ class FileService:
             raise FileUploadProjectMismatchError()
         if file is None or file.state != FileState.UPLOADING:
             raise FileUploadNotActiveError()
-        require_project_access(actor, file.project_id)
+        self._authorize_upload_operation(actor, file.project_id, import_device=import_device)
         if upload.multipart_id is None:
             raise FileUploadNotActiveError()
         return await self._storage().presign_upload_part(
@@ -433,6 +449,39 @@ class FileService:
         upload_id: UUID,
         parts: list[CompletedPart],
         request_id: UUID | None = None,
+    ) -> File:
+        return await self._complete_upload(
+            actor,
+            upload_id,
+            parts,
+            request_id,
+            import_device=False,
+        )
+
+    async def complete_import_upload(
+        self,
+        actor: Actor,
+        upload_id: UUID,
+        parts: list[CompletedPart],
+        request_id: UUID | None = None,
+    ) -> File:
+        """Complete one import-owned upload through the existing durable lifecycle."""
+        return await self._complete_upload(
+            actor,
+            upload_id,
+            parts,
+            request_id,
+            import_device=True,
+        )
+
+    async def _complete_upload(
+        self,
+        actor: Actor,
+        upload_id: UUID,
+        parts: list[CompletedPart],
+        request_id: UUID | None,
+        *,
+        import_device: bool,
     ) -> File:
         just_prepared = False
         upload = await self.session.get(Upload, upload_id)
@@ -456,7 +505,7 @@ class FileService:
         )
         if lifecycle is None or lifecycle.provision_state != "READY":
             raise FileUploadNotActiveError()
-        require_project_access(actor, file.project_id)
+        self._authorize_upload_operation(actor, file.project_id, import_device=import_device)
         if upload.multipart_id is None:
             raise FileUploadNotActiveError()
         if len({p.part_number for p in parts}) != len(parts):
@@ -557,6 +606,24 @@ class FileService:
             await self._fail_upload(file, upload, lifecycle)
             raise FileUploadSizeMismatchError()
         return await self._finalize_completion(file, lifecycle)
+
+    @staticmethod
+    def _authorize_upload_operation(
+        actor: Actor,
+        project_id: UUID,
+        *,
+        import_device: bool,
+    ) -> None:
+        if not import_device:
+            require_project_access(actor, project_id)
+            return
+        if (
+            actor.kind != "device"
+            or actor.role is not None
+            or project_id not in actor.project_ids
+            or "imports:upload" not in actor.scopes
+        ):
+            raise ForbiddenError("IMPORT_UPLOAD_FORBIDDEN", "Import upload is not permitted")
 
     async def _fresh_active_completion_context(
         self, upload_id: UUID
@@ -1004,7 +1071,6 @@ class FileLifecycleService:
     async def _record_completion_audit(self, lifecycle: FileUploadLifecycle) -> None:
         if (
             lifecycle.completion_actor_id is None
-            or lifecycle.completion_actor_role is None
             or lifecycle.completion_request_id is None
             or lifecycle.completion_event_key is None
         ):
@@ -1012,13 +1078,36 @@ class FileLifecycleService:
         actor_kind = lifecycle.completion_actor_kind
         if actor_kind not in {"user", "device", "system"}:
             raise RuntimeError("completion actor snapshot is invalid")
-        role = Role(lifecycle.completion_actor_role)
-        if actor_kind == "user":
-            actor = Actor("user", lifecycle.completion_actor_id, role, frozenset(), frozenset())
-        elif actor_kind == "device":
-            actor = Actor("device", lifecycle.completion_actor_id, role, frozenset(), frozenset())
+        if actor_kind == "device":
+            if lifecycle.completion_actor_role is not None:
+                raise RuntimeError("completion device role snapshot is invalid")
+            actor = Actor(
+                "device",
+                lifecycle.completion_actor_id,
+                None,
+                frozenset(),
+                frozenset(),
+            )
         else:
-            actor = Actor("system", lifecycle.completion_actor_id, role, frozenset(), frozenset())
+            if lifecycle.completion_actor_role is None:
+                raise RuntimeError("completion audit snapshot is incomplete")
+            role = Role(lifecycle.completion_actor_role)
+            if actor_kind == "user":
+                actor = Actor(
+                    "user",
+                    lifecycle.completion_actor_id,
+                    role,
+                    frozenset(),
+                    frozenset(),
+                )
+            else:
+                actor = Actor(
+                    "system",
+                    lifecycle.completion_actor_id,
+                    role,
+                    frozenset(),
+                    frozenset(),
+                )
         await AuditService(self.session_factory).record(
             AuditEventInput(
                 actor=actor,

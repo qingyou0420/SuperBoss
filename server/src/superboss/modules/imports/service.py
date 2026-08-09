@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -14,10 +14,10 @@ from superboss.core.errors import DomainError, ForbiddenError
 from superboss.modules.audit.models import AuditLog
 from superboss.modules.audit.schemas import AuditEventInput
 from superboss.modules.audit.service import AuditService
-from superboss.modules.files.models import Upload
+from superboss.modules.files.models import File, Upload
 from superboss.modules.files.schemas import UploadStart
 from superboss.modules.files.service import FileService, FileUploadConflictError
-from superboss.modules.files.storage import ObjectStorage
+from superboss.modules.files.storage import CompletedPart, ObjectStorage
 from superboss.modules.imports.models import (
     AttachmentKind,
     ImportAttachment,
@@ -36,6 +36,11 @@ class ImportIdempotencyConflictError(DomainError):
         )
 
 
+class ImportAttachmentNotFoundError(DomainError):
+    def __init__(self) -> None:
+        super().__init__("IMPORT_ATTACHMENT_NOT_FOUND", "Import attachment not found", 404)
+
+
 @dataclass(frozen=True)
 class ImportAttachmentResult:
     id: UUID
@@ -49,6 +54,12 @@ class ImportJobResult:
     id: UUID
     status: ImportStatus
     attachments: tuple[ImportAttachmentResult, ...]
+
+
+@dataclass(frozen=True)
+class _AttachmentUploadTarget:
+    project_id: UUID
+    upload_id: UUID
 
 
 class ImportService:
@@ -123,6 +134,180 @@ class ImportService:
             manifest_fingerprint,
             uploads,
             request_id,
+        )
+
+    async def presign_part(
+        self,
+        actor: Actor,
+        job_id: UUID,
+        attachment_id: UUID,
+        part_number: int,
+        *,
+        request_id: UUID,
+    ) -> str:
+        target = await self._resolve_attachment_upload(
+            actor,
+            job_id,
+            attachment_id,
+            action="import.attachment.part_url",
+            request_id=request_id,
+        )
+        async with self.session_factory() as file_session:
+            return await FileService(file_session, self.storage).presign_import_part(
+                actor,
+                target.upload_id,
+                part_number,
+            )
+
+    async def complete_attachment(
+        self,
+        actor: Actor,
+        job_id: UUID,
+        attachment_id: UUID,
+        parts: list[CompletedPart],
+        *,
+        request_id: UUID,
+    ) -> File:
+        target = await self._resolve_attachment_upload(
+            actor,
+            job_id,
+            attachment_id,
+            action="import.attachment.complete",
+            request_id=request_id,
+        )
+        async with self.session_factory() as file_session:
+            return await FileService(file_session, self.storage).complete_import_upload(
+                actor,
+                target.upload_id,
+                parts,
+                request_id,
+            )
+
+    async def _resolve_attachment_upload(
+        self,
+        actor: Actor,
+        job_id: UUID,
+        attachment_id: UUID,
+        *,
+        action: str,
+        request_id: UUID,
+    ) -> _AttachmentUploadTarget:
+        if (
+            actor.kind != "device"
+            or actor.role is not None
+            or "imports:upload" not in actor.scopes
+        ):
+            error = ForbiddenError(
+                "IMPORT_UPLOAD_FORBIDDEN",
+                "Import upload is not permitted",
+            )
+            await self._record_attachment_denial(
+                actor,
+                job_id,
+                attachment_id,
+                project_id=None,
+                action=action,
+                request_id=request_id,
+                error=error,
+            )
+            raise error
+
+        async with self.session_factory() as session:
+            row = (
+                await session.execute(
+                    select(
+                        ImportJob.device_id,
+                        ImportJob.project_id,
+                        ImportAttachment.upload_id,
+                    )
+                    .select_from(ImportJob)
+                    .join(
+                        ImportAttachment,
+                        and_(
+                            ImportAttachment.job_id == ImportJob.id,
+                            ImportAttachment.project_id == ImportJob.project_id,
+                        ),
+                    )
+                    .join(
+                        File,
+                        and_(
+                            File.id == ImportAttachment.file_id,
+                            File.project_id == ImportAttachment.project_id,
+                        ),
+                    )
+                    .join(
+                        Upload,
+                        and_(
+                            Upload.id == ImportAttachment.upload_id,
+                            Upload.file_id == ImportAttachment.file_id,
+                            Upload.project_id == ImportAttachment.project_id,
+                        ),
+                    )
+                    .where(
+                        ImportJob.id == job_id,
+                        ImportAttachment.id == attachment_id,
+                    )
+                )
+            ).one_or_none()
+
+        if row is None or row.device_id != actor.subject_id:
+            not_found_error = ImportAttachmentNotFoundError()
+            await self._record_attachment_denial(
+                actor,
+                job_id,
+                attachment_id,
+                project_id=None,
+                action=action,
+                request_id=request_id,
+                error=not_found_error,
+            )
+            raise not_found_error
+        if row.project_id not in actor.project_ids:
+            error = ForbiddenError(
+                "IMPORT_UPLOAD_FORBIDDEN",
+                "Import upload is not permitted",
+            )
+            await self._record_attachment_denial(
+                actor,
+                job_id,
+                attachment_id,
+                project_id=row.project_id,
+                action=action,
+                request_id=request_id,
+                error=error,
+            )
+            raise error
+        return _AttachmentUploadTarget(
+            project_id=row.project_id,
+            upload_id=row.upload_id,
+        )
+
+    async def _record_attachment_denial(
+        self,
+        actor: Actor,
+        job_id: UUID,
+        attachment_id: UUID,
+        *,
+        project_id: UUID | None,
+        action: str,
+        request_id: UUID,
+        error: DomainError,
+    ) -> None:
+        await AuditService(self.session_factory).record(
+            AuditEventInput(
+                actor=actor,
+                action=action,
+                object_type="import_attachment",
+                object_id=attachment_id,
+                project_id=project_id,
+                outcome="DENIED",
+                request_id=request_id,
+                metadata={
+                    "error_code": error.code,
+                    "job_id": str(job_id),
+                    "attachment_id": str(attachment_id),
+                },
+            )
         )
 
     @staticmethod

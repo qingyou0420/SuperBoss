@@ -185,6 +185,130 @@ async def test_import_start_upload_requires_exact_import_create_actor(
 
 
 @pytest.mark.asyncio
+async def test_generic_part_and_completion_remain_closed_to_import_device(
+    db_session, active_owner
+) -> None:
+    """A fully scoped import device still cannot call either generic FileService operation."""
+    from superboss.core.errors import ForbiddenError
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileService
+    from superboss.modules.files.storage import CompletedPart
+
+    project = Project(name="Generic attachment operations remain browser-only")
+    db_session.add(project)
+    await db_session.flush()
+    actor = Actor(
+        "device",
+        uuid4(),
+        None,
+        frozenset({project.id}),
+        frozenset({"imports:create", "imports:upload"}),
+    )
+    storage = InMemoryObjectStorage(complete_size=1)
+    service = FileService(db_session, storage)
+    upload = await service.start_import_upload(
+        actor,
+        UploadStart(
+            project_id=project.id,
+            filename="k3.json",
+            size_bytes=1,
+            sha256="0" * 64,
+            category="kimi-imports",
+            file_date="2026-08-09",
+            content_type="application/json",
+        ),
+        "generic-attachment-device-denied",
+    )
+
+    with pytest.raises(ForbiddenError):
+        await service.presign_part(actor, upload.id, 1)
+    with pytest.raises(ForbiddenError):
+        await service.complete_upload(actor, upload.id, [CompletedPart(1, "private-etag")])
+
+    assert storage.expiries == [] and storage.complete_calls == 0 and storage.completed == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["part", "complete"])
+@pytest.mark.parametrize("actor_case", ["valid", "kind", "role", "project", "scope"])
+async def test_import_attachment_file_entries_require_exact_upload_actor(
+    db_session, active_owner, operation: str, actor_case: str
+) -> None:
+    """Narrow FileService entries authorize imports:upload before sharing Task 7 internals."""
+    from superboss.core.errors import ForbiddenError
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileService
+    from superboss.modules.files.storage import CompletedPart
+
+    project = Project(name=f"Import attachment actor {operation} {actor_case}")
+    db_session.add(project)
+    await db_session.flush()
+    subject_id = uuid4()
+    creator = Actor(
+        "device",
+        subject_id,
+        None,
+        frozenset({project.id}),
+        frozenset({"imports:create", "imports:upload"}),
+    )
+    storage = InMemoryObjectStorage(complete_size=1)
+    service = FileService(db_session, storage)
+    upload = await service.start_import_upload(
+        creator,
+        UploadStart(
+            project_id=project.id,
+            filename="k3.json",
+            size_bytes=1,
+            sha256="0" * 64,
+            category="kimi-imports",
+            file_date="2026-08-09",
+            content_type="application/json",
+        ),
+        f"import-attachment-{operation}-{actor_case}",
+    )
+    actor = Actor(
+        "device",
+        subject_id,
+        None,
+        frozenset({project.id}),
+        frozenset({"imports:upload"}),
+    )
+    if actor_case == "kind":
+        actor = Actor("user", subject_id, None, actor.project_ids, actor.scopes)
+    elif actor_case == "role":
+        actor = Actor("device", subject_id, Role.OWNER, actor.project_ids, actor.scopes)
+    elif actor_case == "project":
+        actor = Actor("device", subject_id, None, frozenset(), actor.scopes)
+    elif actor_case == "scope":
+        actor = Actor(
+            "device", subject_id, None, actor.project_ids, frozenset({"imports:create"})
+        )
+
+    async def invoke() -> object:
+        if operation == "part":
+            return await service.presign_import_part(actor, upload.id, 1)
+        return await service.complete_import_upload(
+            actor,
+            upload.id,
+            [CompletedPart(1, "private-etag")],
+            uuid4(),
+        )
+
+    if actor_case == "valid":
+        result = await invoke()
+        if operation == "part":
+            assert isinstance(result, str) and result.endswith("/1")
+            assert storage.expiries == [900]
+        else:
+            assert result.state.value == "QUARANTINED"
+            assert storage.complete_calls == 1
+    else:
+        with pytest.raises(ForbiddenError):
+            await invoke()
+        assert storage.expiries == [] and storage.complete_calls == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "change",
     [

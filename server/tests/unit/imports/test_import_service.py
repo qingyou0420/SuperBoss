@@ -3,7 +3,7 @@
 import asyncio
 import importlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import ModuleType
 from typing import Any
 from uuid import UUID, uuid4
@@ -21,7 +21,15 @@ from superboss.modules.devices.models import (
     DeviceProjectGrant,
     DeviceScopeGrant,
 )
-from superboss.modules.files.models import File, FileUploadLifecycle, Upload
+from superboss.modules.files.models import (
+    File,
+    FileLifecycleOutbox,
+    FileState,
+    FileUploadLifecycle,
+    Upload,
+)
+from superboss.modules.files.service import FileLifecycleService
+from superboss.modules.files.storage import CompletedPart
 from superboss.modules.projects.models import Project
 from superboss.modules.users.models import Role
 from tests.files.storage import InMemoryObjectStorage
@@ -29,6 +37,42 @@ from tests.files.storage import InMemoryObjectStorage
 ALL_IMPORT_SCOPES = frozenset(
     {"imports:create", "imports:upload", "imports:submit", "imports:read-own"}
 )
+
+
+class ProbeTrackingStorage(InMemoryObjectStorage):
+    """Count every storage call reachable after an import attachment has been provisioned."""
+
+    def __init__(self, *, complete_size: int = 1) -> None:
+        super().__init__(complete_size=complete_size)
+        self.probe_calls: list[str] = []
+
+    async def presign_upload_part(
+        self,
+        object_key: str,
+        multipart_id: str,
+        part_number: int,
+        expires_seconds: int,
+    ) -> str:
+        self.probe_calls.append("presign")
+        return await super().presign_upload_part(
+            object_key,
+            multipart_id,
+            part_number,
+            expires_seconds,
+        )
+
+    async def stat_object(self, object_key: str) -> Any:
+        self.probe_calls.append("stat")
+        return await super().stat_object(object_key)
+
+    async def complete_multipart(
+        self,
+        object_key: str,
+        multipart_id: str,
+        parts: list[CompletedPart],
+    ) -> Any:
+        self.probe_calls.append("complete")
+        return await super().complete_multipart(object_key, multipart_id, parts)
 
 
 def import_contract() -> tuple[ModuleType, ModuleType, ModuleType]:
@@ -621,6 +665,419 @@ async def test_create_requires_an_exact_device_actor_scope_and_current_project(
     ):
         assert forbidden_coordinate not in lowered_denial
     assert storage.create_calls == 0 and storage.expiries == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("part_number", [1, 10_000])
+async def test_attachment_part_presign_reuses_task7_bounds_and_fifteen_minute_expiry(
+    db_session: AsyncSession,
+    active_owner: Any,
+    session_factory: async_sessionmaker[AsyncSession],
+    part_number: int,
+) -> None:
+    """The import boundary resolves its own Upload and delegates Task 7 URL semantics."""
+    project, device, creator = await seed_device_actor(
+        db_session, active_owner, name=f"Import part boundary {part_number}"
+    )
+    storage = ProbeTrackingStorage()
+    service = service_for(session_factory, storage)
+    job = await service.create(
+        creator,
+        command_for(project.id),
+        f"part-boundary-{part_number}",
+        request_id=uuid4(),
+    )
+    attachment = job.attachments[0]
+    upload_actor = Actor(
+        "device", device.id, None, frozenset({project.id}), frozenset({"imports:upload"})
+    )
+    before_audits = await db_session.scalar(select(func.count()).select_from(AuditLog))
+
+    url = await service.presign_part(
+        upload_actor,
+        job.id,
+        attachment.id,
+        part_number,
+        request_id=uuid4(),
+    )
+
+    assert url.endswith(f"/{part_number}")
+    assert storage.expiries == [900] and storage.probe_calls == ["presign"]
+    assert await db_session.scalar(select(func.count()).select_from(AuditLog)) == before_audits
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("part_number", [0, 10_001])
+async def test_attachment_part_presign_rejects_out_of_range_before_storage(
+    db_session: AsyncSession,
+    active_owner: Any,
+    session_factory: async_sessionmaker[AsyncSession],
+    part_number: int,
+) -> None:
+    """The existing 1..10000 multipart range remains the only accepted range."""
+    project, _device, actor = await seed_device_actor(
+        db_session, active_owner, name=f"Invalid import part {part_number}"
+    )
+    storage = ProbeTrackingStorage()
+    service = service_for(session_factory, storage)
+    job = await service.create(
+        actor,
+        command_for(project.id),
+        f"invalid-part-{part_number}",
+        request_id=uuid4(),
+    )
+    attachment = job.attachments[0]
+    checkpoint = list(storage.probe_calls)
+
+    with pytest.raises((ValueError, DomainError)):
+        await service.presign_part(
+            actor,
+            job.id,
+            attachment.id,
+            part_number,
+            request_id=uuid4(),
+        )
+
+    assert storage.probe_calls == checkpoint and storage.expiries == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["part", "complete"])
+@pytest.mark.parametrize(
+    "probe_case",
+    [
+        "browser",
+        "device_role",
+        "scope",
+        "project",
+        "second_device",
+        "other_job",
+        "other_project",
+        "unknown",
+    ],
+)
+async def test_attachment_operations_reject_actor_or_id_mixing_before_storage(
+    db_session: AsyncSession,
+    active_owner: Any,
+    session_factory: async_sessionmaker[AsyncSession],
+    operation: str,
+    probe_case: str,
+) -> None:
+    """A device cannot splice jobs, attachments, devices, or projects into an upload probe."""
+    models, _schemas, _service = import_contract()
+    project, device, actor = await seed_device_actor(
+        db_session, active_owner, name=f"Attachment probe {operation} {probe_case}"
+    )
+    storage = ProbeTrackingStorage(complete_size=128)
+    service = service_for(session_factory, storage)
+    target = await service.create(
+        actor,
+        command_for(project.id),
+        f"probe-target-{operation}-{probe_case}",
+        request_id=uuid4(),
+    )
+    same_project_other = await service.create(
+        actor,
+        command_for(project.id),
+        f"probe-same-project-{operation}-{probe_case}",
+        request_id=uuid4(),
+    )
+
+    other_project = Project(name=f"Other probe project {operation} {probe_case}")
+    db_session.add(other_project)
+    await db_session.flush()
+    db_session.add(DeviceProjectGrant(device_id=device.id, project_id=other_project.id))
+    await db_session.commit()
+    two_project_actor = Actor(
+        "device",
+        device.id,
+        None,
+        frozenset({project.id, other_project.id}),
+        actor.scopes,
+    )
+    other_project_job = await service.create(
+        two_project_actor,
+        command_for(other_project.id),
+        f"probe-other-project-{operation}-{probe_case}",
+        request_id=uuid4(),
+    )
+    _foreign_project, _foreign_device, foreign_actor = await seed_device_actor(
+        db_session, active_owner, name=f"Foreign probe device {operation} {probe_case}"
+    )
+
+    request_actor = actor
+    job_id = target.id
+    attachment_id = target.attachments[0].id
+    if probe_case == "browser":
+        request_actor = Actor(
+            "user", active_owner.id, Role.OWNER, frozenset({project.id}), frozenset()
+        )
+    elif probe_case == "device_role":
+        request_actor = Actor("device", device.id, Role.OWNER, actor.project_ids, actor.scopes)
+    elif probe_case == "scope":
+        request_actor = Actor(
+            "device",
+            device.id,
+            None,
+            actor.project_ids,
+            frozenset(actor.scopes - {"imports:upload"}),
+        )
+    elif probe_case == "project":
+        request_actor = Actor("device", device.id, None, frozenset(), actor.scopes)
+    elif probe_case == "second_device":
+        request_actor = Actor(
+            "device",
+            foreign_actor.subject_id,
+            None,
+            frozenset({project.id}),
+            actor.scopes,
+        )
+    elif probe_case == "other_job":
+        attachment_id = same_project_other.attachments[0].id
+    elif probe_case == "other_project":
+        attachment_id = other_project_job.attachments[0].id
+    else:
+        job_id, attachment_id = uuid4(), uuid4()
+
+    request_id = uuid4()
+    checkpoint = list(storage.probe_calls)
+    if operation == "part":
+        call = service.presign_part(
+            request_actor, job_id, attachment_id, 1, request_id=request_id
+        )
+        expected_action = "import.attachment.part_url"
+    else:
+        call = service.complete_attachment(
+            request_actor,
+            job_id,
+            attachment_id,
+            [CompletedPart(1, "private-etag")],
+            request_id=request_id,
+        )
+        expected_action = "import.attachment.complete"
+
+    with pytest.raises(DomainError) as denied:
+        await call
+
+    if probe_case in {"browser", "device_role", "scope", "project"}:
+        assert denied.value.status_code == 403
+        assert denied.value.code == "IMPORT_UPLOAD_FORBIDDEN"
+    else:
+        assert denied.value.status_code == 404
+        assert denied.value.code == "IMPORT_ATTACHMENT_NOT_FOUND"
+    assert storage.probe_calls == checkpoint
+    async with session_factory() as session:
+        denial = await session.scalar(
+            select(AuditLog).where(
+                AuditLog.request_id == request_id,
+                AuditLog.action == expected_action,
+                AuditLog.outcome == "DENIED",
+            )
+        )
+        object_keys = list(await session.scalars(select(File.object_key)))
+        assert await session.scalar(select(func.count()).select_from(models.ImportJob)) == 3
+    assert denial is not None
+    assert set(denial.metadata_json) <= {
+        "actor_role",
+        "reason",
+        "error_code",
+        "job_id",
+        "attachment_id",
+    }
+    serialized = json.dumps(denial.metadata_json, ensure_ascii=False).casefold()
+    for unsafe in (
+        "private-etag",
+        "authorization",
+        "cookie",
+        "access_token",
+        "refresh_token",
+        "object_key",
+        "multipart_id",
+        *object_keys,
+        *storage.active,
+    ):
+        assert unsafe.casefold() not in serialized
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["part", "complete"])
+async def test_attachment_denial_audit_failure_propagates_before_storage(
+    db_session: AsyncSession,
+    active_owner: Any,
+    session_factory: async_sessionmaker[AsyncSession],
+    operation: str,
+) -> None:
+    """Authenticated denials are mandatory evidence and precede every provider operation."""
+    project, device, creator = await seed_device_actor(
+        db_session, active_owner, name=f"Attachment denial audit {operation}"
+    )
+    storage = ProbeTrackingStorage(complete_size=128)
+    service = service_for(session_factory, storage)
+    job = await service.create(
+        creator,
+        command_for(project.id),
+        f"denial-audit-{operation}",
+        request_id=uuid4(),
+    )
+    attachment = job.attachments[0]
+    denied_actor = Actor(
+        "device", device.id, None, frozenset({project.id}), frozenset({"imports:create"})
+    )
+    expected_action = (
+        "import.attachment.part_url"
+        if operation == "part"
+        else "import.attachment.complete"
+    )
+
+    def fail_denial(_mapper: object, _connection: object, target: AuditLog) -> None:
+        if target.action == expected_action and target.outcome == "DENIED":
+            raise RuntimeError("audit unavailable")
+
+    checkpoint = list(storage.probe_calls)
+    event.listen(AuditLog, "before_insert", fail_denial)
+    try:
+        with pytest.raises(RuntimeError, match="audit unavailable"):
+            if operation == "part":
+                await service.presign_part(
+                    denied_actor, job.id, attachment.id, 1, request_id=uuid4()
+                )
+            else:
+                await service.complete_attachment(
+                    denied_actor,
+                    job.id,
+                    attachment.id,
+                    [CompletedPart(1, "private-etag")],
+                    request_id=uuid4(),
+                )
+    finally:
+        event.remove(AuditLog, "before_insert", fail_denial)
+
+    assert storage.probe_calls == checkpoint
+
+
+@pytest.mark.asyncio
+async def test_attachment_completion_reuses_quarantine_outbox_audit_and_replay(
+    db_session: AsyncSession,
+    active_owner: Any,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """One Task 7 completion yields stable quarantine, outbox, audit, and scan evidence."""
+    project, device, creator = await seed_device_actor(
+        db_session, active_owner, name="Import attachment completion"
+    )
+    storage = ProbeTrackingStorage(complete_size=128)
+    service = service_for(session_factory, storage)
+    job = await service.create(
+        creator,
+        command_for(project.id),
+        "attachment-completion",
+        request_id=uuid4(),
+    )
+    attachment = job.attachments[0]
+    upload_actor = Actor(
+        "device", device.id, None, frozenset({project.id}), frozenset({"imports:upload"})
+    )
+    request_id = uuid4()
+    parts = [CompletedPart(2, "private-etag-2"), CompletedPart(1, "private-etag-1")]
+
+    first = await service.complete_attachment(
+        upload_actor, job.id, attachment.id, parts, request_id=request_id
+    )
+    storage_checkpoint = list(storage.probe_calls)
+    second = await service.complete_attachment(
+        upload_actor,
+        job.id,
+        attachment.id,
+        list(reversed(parts)),
+        request_id=request_id,
+    )
+
+    assert first.id == second.id == attachment.file_id
+    assert first.state == second.state == FileState.QUARANTINED
+    assert storage.complete_calls == 1 and storage.probe_calls == storage_checkpoint
+    async with session_factory() as session:
+        lifecycle = await session.get(FileUploadLifecycle, attachment.upload_id)
+        outboxes = list(
+            await session.scalars(
+                select(FileLifecycleOutbox)
+                .where(FileLifecycleOutbox.file_id == attachment.file_id)
+                .order_by(FileLifecycleOutbox.kind)
+            )
+        )
+    assert lifecycle is not None
+    assert lifecycle.multipart_id is not None
+    assert lifecycle.canonical_parts_json == [
+        {"part_number": 1, "etag": "private-etag-1"},
+        {"part_number": 2, "etag": "private-etag-2"},
+    ]
+    assert [(row.kind, row.state) for row in outboxes] == [
+        ("completion_audit", "PENDING"),
+        ("scan_dispatch", "PENDING"),
+    ]
+
+    def fail_success_audit(_mapper: object, _connection: object, target: AuditLog) -> None:
+        if target.action == "file.upload.complete" and target.outcome == "SUCCESS":
+            raise RuntimeError("audit unavailable")
+
+    dispatched: list[tuple[UUID, UUID]] = []
+    lifecycle_service = FileLifecycleService(
+        session_factory,
+        storage,
+        lambda file_id, event_key: dispatched.append((file_id, event_key)),
+    )
+    event.listen(AuditLog, "before_insert", fail_success_audit)
+    try:
+        assert not await lifecycle_service.deliver_completion(attachment.upload_id)
+    finally:
+        event.remove(AuditLog, "before_insert", fail_success_audit)
+
+    assert storage.probe_calls == storage_checkpoint and dispatched == []
+    async with session_factory() as session, session.begin():
+        file = await session.get(File, attachment.file_id)
+        completion_outbox = await session.scalar(
+            select(FileLifecycleOutbox).where(
+                FileLifecycleOutbox.file_id == attachment.file_id,
+                FileLifecycleOutbox.kind == "completion_audit",
+            )
+        )
+        assert file is not None and file.state == FileState.QUARANTINED
+        assert completion_outbox is not None
+        assert completion_outbox.state == "PENDING"
+        assert completion_outbox.last_error_code == "AUDIT_FAILED"
+        completion_outbox.next_attempt_at = datetime.now(UTC) - timedelta(seconds=1)
+
+    assert await lifecycle_service.deliver_completion(attachment.upload_id)
+    assert await lifecycle_service.deliver_completion(attachment.upload_id)
+    assert storage.probe_calls == storage_checkpoint
+    assert len(dispatched) == 1 and dispatched[0][0] == attachment.file_id
+    async with session_factory() as session:
+        audits = list(
+            await session.scalars(
+                select(AuditLog).where(
+                    AuditLog.action == "file.upload.complete",
+                    AuditLog.object_id == attachment.file_id,
+                )
+            )
+        )
+        delivered_outboxes = list(
+            await session.scalars(
+                select(FileLifecycleOutbox).where(
+                    FileLifecycleOutbox.file_id == attachment.file_id
+                )
+            )
+        )
+    assert len(audits) == 1
+    assert audits[0].actor_kind == "device" and audits[0].actor_id == device.id
+    assert audits[0].metadata_json == {
+        "actor_role": None,
+        "state": "QUARANTINED",
+        "size_bytes": 128,
+    }
+    assert {row.state for row in delivered_outboxes} == {"DELIVERED"}
+    serialized_audit = json.dumps(audits[0].metadata_json, ensure_ascii=False)
+    assert "private-etag" not in serialized_audit
+    assert lifecycle.object_key not in serialized_audit
+    assert lifecycle.multipart_id not in serialized_audit
 
 
 async def set_attachment_states(
