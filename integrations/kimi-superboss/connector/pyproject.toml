@@ -18,6 +18,7 @@ superboss = "superboss_connector.cli:main"
 [dependency-groups]
 dev = [
     "build>=1,<2",
+    "hatchling>=1,<2",
     "mypy>=1.17,<2",
     "pyinstaller>=6,<7",
     "pytest>=8,<10",
