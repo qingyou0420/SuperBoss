@@ -14,6 +14,7 @@ from superboss.core.config import Settings, get_settings
 from superboss.core.errors import DomainError
 from superboss.core.security import TokenError, decode_access_token
 from superboss.infrastructure.wecom import build_wecom_provider
+from superboss.infrastructure.s3 import Boto3ObjectStorage
 from superboss.modules.auth.repository import AuthRepository
 from superboss.modules.auth.service import AuthService, InvalidSession
 from superboss.modules.users.repository import UserRepository
@@ -26,6 +27,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     engine = create_async_engine(active_settings.database_url, pool_pre_ping=True)
     app.state.session_factory = async_sessionmaker(engine, expire_on_commit=False)
     app.state.wecom_provider = build_wecom_provider(active_settings)
+    app.state.object_storage = Boto3ObjectStorage(active_settings.s3_bucket, active_settings.s3_endpoint_url, active_settings.s3_access_key_id, active_settings.s3_secret_access_key)
+    app.state.enqueue_file_scan = lambda _file_id: None
 
     def request_id(request: Request) -> str:
         candidate = request.headers.get("X-Request-ID", "")

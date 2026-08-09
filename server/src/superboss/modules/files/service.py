@@ -22,7 +22,10 @@ class FileService:
   require_project_access(actor,command.project_id)
   if not 1<=len(idempotency_key)<=255: raise ValueError("invalid Idempotency-Key")
   existing=await self.session.scalar(select(Upload).where(Upload.project_id==command.project_id,Upload.uploader_id==actor.subject_id,Upload.idempotency_key==idempotency_key))
-  if existing: return existing
+  if existing:
+   old=await self.session.get(File,existing.file_id)
+   if old is None or (old.filename,old.category,old.file_date,old.size_bytes,old.sha256)!=(command.filename,command.category,command.file_date,command.size_bytes,command.sha256): raise ConflictError()
+   return existing
   file_id=uuid4(); category=self._segment(command.category,"uncategorized"); name=self._segment(command.filename,"file")
   key=f"projects/{command.project_id}/{category}/{command.file_date.isoformat()}/{file_id}/{name}"
   multipart_id=await self.storage.create_multipart(key,command.content_type) # type: ignore[union-attr]

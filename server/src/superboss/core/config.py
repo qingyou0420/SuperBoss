@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     wecom_redirect_uri: str = ""
     wecom_fake: bool = False
     owner_wecom_userid: str = ""
+    s3_bucket: str = "superboss-files"
+    s3_endpoint_url: str = "http://127.0.0.1:9000"
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
 
     model_config = SettingsConfigDict(env_prefix="SUPERBOSS_", extra="forbid", hide_input_in_errors=True)
 

@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator
 import boto3
 from superboss.modules.files.storage import CompletedPart,ObjectMetadata
 class Boto3ObjectStorage:
- def __init__(self,bucket:str,client=None): self.bucket=bucket;self.client=client or boto3.client("s3")
+ def __init__(self,bucket:str,endpoint_url:str|None=None,access_key_id:str|None=None,secret_access_key:str|None=None,client=None): self.bucket=bucket;self.client=client or boto3.client("s3",endpoint_url=endpoint_url,aws_access_key_id=access_key_id or None,aws_secret_access_key=secret_access_key or None)
  async def create_multipart(self,key:str,content_type:str)->str:
   result=await asyncio.to_thread(self.client.create_multipart_upload,Bucket=self.bucket,Key=key,ContentType=content_type); return str(result["UploadId"])
  async def presign_upload_part(self,key:str,multipart_id:str,part_number:int,expires_seconds:int)->str:
