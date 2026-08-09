@@ -48,6 +48,8 @@ async def test_configured_owner_bootstraps_the_only_owner(
     response = _callback(api_client, "owner-code", started.json()["state"])
 
     assert response.status_code == 204
+    assert "wecom_oauth_state=\"\"" in response.headers["set-cookie"]
+    assert api_client.cookies.get("wecom_oauth_state") is None
     users = (await db_session.scalars(select(User))).all()
     assert [(user.wecom_userid, user.role, user.status) for user in users] == [
         ("owner-1", Role.OWNER, UserStatus.ACTIVE)
@@ -88,10 +90,18 @@ def test_callback_rejects_missing_or_mismatched_state(api_client: TestClient) ->
     """Dropping state validation enables login CSRF and must fail this boundary test."""
     started = api_client.get("/api/v1/auth/wecom/start")
 
-    assert _callback(api_client, "owner-code", None).status_code == 400
-    assert (
-        _callback(api_client, "owner-code", f"wrong-{started.json()['state']}").status_code == 400
-    )
+    missing = _callback(api_client, "owner-code", None)
+    assert missing.status_code == 400 and "Max-Age=0" in missing.headers["set-cookie"]
+    api_client.cookies.set("wecom_oauth_state", started.cookies.get("wecom_oauth_state"), domain="testserver.local", path="/api/v1/auth/wecom")
+    mismatch = _callback(api_client, "owner-code", f"wrong-{started.json()['state']}")
+    assert mismatch.status_code == 400 and "Max-Age=0" in mismatch.headers["set-cookie"]
+
+
+def test_missing_state_cookie_still_returns_deletion_instruction(api_client: TestClient) -> None:
+    """Missing cookies still need an explicit deletion response for stale browser paths."""
+    response = _callback(api_client, "owner-code", "some-state")
+    assert response.status_code == 400
+    assert "Max-Age=0" in response.headers["set-cookie"]
 
 
 def test_browser_mutations_require_matching_csrf_token(api_client: TestClient) -> None:
