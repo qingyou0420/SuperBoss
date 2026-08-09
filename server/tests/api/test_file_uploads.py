@@ -428,3 +428,49 @@ def test_upload_complete_canonicalizes_part_order() -> None:
     from superboss.modules.files.schemas import UploadComplete
     complete = UploadComplete(parts=[{"part_number": 2, "etag": "b"}, {"part_number": 1, "etag": "a"}])
     assert [part.part_number for part in complete.parts] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_foreign_staff_cannot_complete_upload(file_client, db_session: AsyncSession) -> None:
+    from sqlalchemy import select
+
+    from superboss.modules.audit.models import AuditLog
+    from superboss.modules.files.models import File, Upload
+
+    client, storage = file_client
+    app = client.app
+    target = Project(name="Complete foreign target")
+    assigned = Project(name="Complete foreign assigned")
+    staff = User(wecom_userid="staff-1", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
+    db_session.add_all([target, assigned, staff])
+    await db_session.flush()
+    db_session.add(ProjectMember(project_id=assigned.id, user_id=staff.id))
+    await db_session.commit()
+
+    _login(client)
+    start_headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "foreign-complete"}
+    started = client.post(
+        "/api/v1/files/uploads",
+        json={"project_id": str(target.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "璧勬枡", "file_date": "2026-08-09"},
+        headers=start_headers,
+    )
+    upload = await db_session.get(Upload, started.json()["upload_id"])
+    assert started.status_code == 201 and upload is not None
+
+    dispatched: list[object] = []
+    app.state.enqueue_file_scan = lambda file_id: dispatched.append(file_id)
+    client.cookies.clear()
+    login = client.get("/api/v1/auth/wecom/start")
+    assert client.get("/api/v1/auth/wecom/callback", params={"code": "staff-code", "state": login.json()["state"]}).status_code == 204
+    response = client.post(
+        f"/api/v1/files/uploads/{upload.id}/complete",
+        json={"parts": [{"part_number": 1, "etag": "etag"}]},
+        headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))},
+    )
+
+    file = await db_session.get(File, upload.file_id)
+    events = list((await db_session.scalars(select(AuditLog))).all())
+    assert response.status_code == 403 and response.json()["error"]["code"] == "PROJECT_FORBIDDEN"
+    assert file is not None and file.state.value == "UPLOADING"
+    assert upload.multipart_id in storage.active and storage.completed == {} and dispatched == []
+    assert not [event for event in events if event.action == "file.upload.complete" and event.outcome == "SUCCESS"]
