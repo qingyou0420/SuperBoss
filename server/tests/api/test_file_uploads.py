@@ -249,6 +249,20 @@ async def test_foreign_staff_cannot_presign_upload_part(file_client, db_session:
     assert response.status_code == 403 and response.json()["error"]["code"] == "PROJECT_FORBIDDEN" and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and storage.expiries == before and file is not None and file.state.value == "UPLOADING"
 
 
+def test_anonymous_part_uses_authentication_error_before_csrf(file_client) -> None:
+    from uuid import uuid4
+    client, storage = file_client; response = client.post(f"/api/v1/files/uploads/{uuid4()}/parts/1")
+    assert response.status_code == 401 and response.json()["error"]["code"] == "AUTHENTICATION_REQUIRED" and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and storage.expiries == []
+
+
+@pytest.mark.parametrize("csrf", [None, "wrong"])
+def test_owner_part_requires_valid_csrf(file_client, csrf: str | None) -> None:
+    from uuid import uuid4
+    client, storage = file_client; _login(client); headers = {} if csrf is None else {"X-CSRF-Token": csrf}
+    response = client.post(f"/api/v1/files/uploads/{uuid4()}/parts/1", headers=headers)
+    assert response.status_code == 403 and response.json()["error"]["code"] == "CSRF_VALIDATION_FAILED" and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and storage.expiries == []
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("key", ["x", "!" * 255])
 async def test_start_accepts_idempotency_key_boundaries(file_client, db_session: AsyncSession, key: str) -> None:
