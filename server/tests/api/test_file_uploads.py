@@ -268,6 +268,7 @@ async def test_complete_dispatches_after_quarantine_commit(file_client, db_sessi
     from uuid import UUID
 
     from sqlalchemy import select
+
     from superboss.modules.audit.models import AuditLog
     from superboss.modules.files.models import File, Upload
     client, storage = file_client; app = client.app; project = Project(name="Complete dispatch"); db_session.add(project); await db_session.commit(); _login(client)
