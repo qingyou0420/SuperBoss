@@ -342,6 +342,7 @@ async def test_database_rejects_oversized_manifest_json_on_insert_and_update(
         ("conflict_control_result", "ck_import_jobs_result_code"),
         ("rejected_overlong_result", None),
         ("submitted_before_created", "ck_import_jobs_time_order"),
+        ("submitted_after_updated", "ck_import_jobs_time_order"),
         ("updated_before_created", "ck_import_jobs_time_order"),
     ],
 )
@@ -378,6 +379,8 @@ async def test_database_rejects_illegal_import_status_result_and_time_combinatio
         values.update(status="REJECTED", submitted_at=now, result_code="R" * 65)
     elif case == "submitted_before_created":
         values.update(status="SCANNING", submitted_at=now - timedelta(seconds=1))
+    elif case == "submitted_after_updated":
+        values.update(status="SCANNING", submitted_at=now + timedelta(seconds=1))
     else:
         values["updated_at"] = now - timedelta(seconds=1)
 

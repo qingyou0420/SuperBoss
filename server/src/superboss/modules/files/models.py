@@ -82,6 +82,7 @@ class File(Base):
 class Upload(Base):
     __tablename__ = "uploads"
     __table_args__ = (
+        UniqueConstraint("id", "file_id", "project_id", name="uq_uploads_id_file_project"),
         ForeignKeyConstraint(
             ["file_id", "project_id"],
             ["files.id", "files.project_id"],

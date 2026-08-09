@@ -1,6 +1,7 @@
 """Strict request contracts for minimal K3 result packages."""
 
 import importlib
+import json
 from copy import deepcopy
 from datetime import UTC, datetime
 from types import ModuleType
@@ -370,3 +371,40 @@ def test_original_is_optional_only_when_no_base_sha256_is_declared() -> None:
     assert manifest.k3_result.processed_at.astimezone(UTC).isoformat() == (
         "2026-08-09T04:34:56+00:00"
     )
+
+
+def test_manifest_size_guard_accounts_for_postgresql_jsonb_text_spacing() -> None:
+    """A compact-fit manifest must not reach a stricter JSONB text constraint after uploads."""
+    schemas = schemas_contract()
+    payload = valid_payload()
+    k3_result = payload["k3_result"]
+    assert isinstance(k3_result, dict)
+    maximum_item = "\u754c" * schemas.K3_TEXT_MAX_CHARS
+    k3_result["modification_details"] = [maximum_item for _ in range(5)]
+
+    compact_without_filler = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    filler_length = schemas.MANIFEST_MAX_UTF8_BYTES - len(compact_without_filler) - 3
+    assert 1 <= filler_length <= schemas.K3_TEXT_MAX_CHARS
+    k3_result["modification_details"].append("x" * filler_length)
+    compact = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    postgres_style = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(", ", ": "),
+    ).encode("utf-8")
+    assert len(compact) == schemas.MANIFEST_MAX_UTF8_BYTES
+    assert len(postgres_style) > schemas.MANIFEST_MAX_UTF8_BYTES
+
+    with pytest.raises(ValidationError):
+        schemas.ImportJobCreate.model_validate(payload)
