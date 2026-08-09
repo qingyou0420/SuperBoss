@@ -35,6 +35,19 @@ class Boto3ObjectStorage:
         )
         return str(result["UploadId"])
 
+    async def list_multipart_uploads(self, object_key: str) -> list[str]:
+        result = await asyncio.to_thread(
+            self.client.list_multipart_uploads,
+            Bucket=self.bucket,
+            Prefix=object_key,
+        )
+        uploads = result.get("Uploads", [])
+        return sorted(
+            str(upload["UploadId"])
+            for upload in uploads
+            if upload.get("Key") == object_key and upload.get("UploadId") is not None
+        )
+
     async def presign_upload_part(
         self, object_key: str, multipart_id: str, part_number: int, expires_seconds: int
     ) -> str:

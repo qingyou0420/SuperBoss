@@ -48,3 +48,8 @@ class FileUploadSizeMismatchError(DomainError):
 class FileStorageFailureError(DomainError):
     def __init__(self) -> None:
         super().__init__("FILE_STORAGE_FAILURE", "File storage operation failed", 502)
+
+
+class FileProvisioningPendingError(DomainError):
+    def __init__(self) -> None:
+        super().__init__("FILE_PROVISIONING_PENDING", "File upload provisioning is pending", 503)

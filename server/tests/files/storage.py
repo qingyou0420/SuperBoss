@@ -19,13 +19,26 @@ class InMemoryObjectStorage:
     abort_error: Exception | None = None
     created_multipart_id: str | None = None
     create_barrier: asyncio.Barrier | None = None
+    create_error_after_create: Exception | None = None
+    list_error: Exception | None = None
+    create_calls: int = 0
+    list_calls: int = 0
 
     async def create_multipart(self, object_key: str, content_type: str) -> str:
+        self.create_calls += 1
         upload_id = self.created_multipart_id if self.created_multipart_id is not None else str(uuid4())
         self.active[upload_id] = object_key
         if self.create_barrier is not None:
             await self.create_barrier.wait()
+        if self.create_error_after_create is not None:
+            raise self.create_error_after_create
         return upload_id
+
+    async def list_multipart_uploads(self, object_key: str) -> list[str]:
+        self.list_calls += 1
+        if self.list_error is not None:
+            raise self.list_error
+        return sorted(upload_id for upload_id, key in self.active.items() if key == object_key)
 
     async def presign_upload_part(self, object_key: str, multipart_id: str, part_number: int, expires_seconds: int) -> str:
         self.expiries.append(expires_seconds)

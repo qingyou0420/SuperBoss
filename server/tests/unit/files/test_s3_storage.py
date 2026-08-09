@@ -42,6 +42,15 @@ class RecordingS3Client:
         self._record("abort_multipart_upload", **kwargs)
         return {}
 
+    def list_multipart_uploads(self, **kwargs: Any) -> dict[str, object]:
+        self._record("list_multipart_uploads", **kwargs)
+        return {
+            "Uploads": [
+                {"Key": "projects/p/x.pdf", "UploadId": "upload-a"},
+                {"Key": "projects/p/x.pdf.bak", "UploadId": "must-not-adopt"},
+            ]
+        }
+
 
 @dataclass
 class StreamingBody:
@@ -104,10 +113,28 @@ async def test_boto3_adapter_maps_multipart_operations_and_runs_blocking_client_
     assert client.thread_ids and all(thread_id != main_thread for thread_id in client.thread_ids)
 
 
+@pytest.mark.asyncio
+async def test_boto3_adapter_lists_only_exact_key_multipart_ids_off_loop() -> None:
+    """Prefix-neighbor uploads must never be adopted during provisioning recovery."""
+    client = RecordingS3Client()
+    storage = Boto3ObjectStorage(bucket="files-bucket", client=client)  # type: ignore[arg-type]
+    main_thread = threading.get_ident()
+
+    assert await storage.list_multipart_uploads("projects/p/x.pdf") == ["upload-a"]
+    assert client.calls == [
+        (
+            "list_multipart_uploads",
+            {"Bucket": "files-bucket", "Prefix": "projects/p/x.pdf"},
+        )
+    ]
+    assert client.thread_ids and all(thread_id != main_thread for thread_id in client.thread_ids)
+
+
 @pytest.mark.parametrize(
     ("method", "parameters"),
     [
         ("create_multipart", ("object_key", "content_type")),
+        ("list_multipart_uploads", ("object_key",)),
         ("presign_upload_part", ("object_key", "multipart_id", "part_number", "expires_seconds")),
         ("complete_multipart", ("object_key", "multipart_id", "parts")),
         ("abort_multipart", ("object_key", "multipart_id")),

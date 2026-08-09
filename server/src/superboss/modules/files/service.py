@@ -12,11 +12,18 @@ from superboss.core.errors import (
     ConflictError,
     DomainError,
     FileNotFoundError,
+    FileProvisioningPendingError,
     FileStorageFailureError,
     FileUploadSizeMismatchError,
     NotFoundError,
 )
-from superboss.modules.files.models import File, FileState, Upload
+from superboss.modules.files.models import (
+    File,
+    FileState,
+    FileStorageCleanup,
+    FileUploadLifecycle,
+    Upload,
+)
 from superboss.modules.files.schemas import UploadStart
 from superboss.modules.files.storage import CompletedPart, ObjectStorage
 
@@ -94,16 +101,16 @@ class FileService:
                 Upload.idempotency_key == idempotency_key,
             )
         )
-        if existing:
-            old = await self.session.get(File, existing.file_id)
-            if old is None or existing.metadata_fingerprint != self._fingerprint(command):
+        if existing is not None:
+            file = await self.session.get(File, existing.file_id)
+            if file is None or existing.metadata_fingerprint != self._fingerprint(command):
                 raise FileUploadConflictError()
-            return existing
+            return await self._provision_upload(existing, file)
         file_id = uuid4()
+        upload_id = uuid4()
         category = self._segment(command.category, "uncategorized")
         name = self._segment(command.filename, "file")
         key = f"projects/{command.project_id}/{category}/{command.file_date.isoformat()}/{file_id}/{name}"
-        multipart_id = await self._storage().create_multipart(key, command.content_type)
         file = File(
             id=file_id,
             project_id=command.project_id,
@@ -118,24 +125,32 @@ class FileService:
             content_type=command.content_type,
         )
         upload = Upload(
+            id=upload_id,
             file_id=file_id,
             project_id=command.project_id,
             uploader_id=actor.subject_id,
             uploader_kind=actor.kind,
             metadata_fingerprint=self._fingerprint(command),
             idempotency_key=idempotency_key,
-            multipart_id=multipart_id,
+            multipart_id=None,
         )
-        self.session.add_all([file, upload])
+        lifecycle = FileUploadLifecycle(
+            upload_id=upload_id,
+            file_id=file_id,
+            project_id=command.project_id,
+            object_key=key,
+            multipart_id=None,
+            content_type=command.content_type,
+            declared_size_bytes=command.size_bytes,
+            provision_state="PROVISIONING",
+            completion_state="NONE",
+        )
+        self.session.add_all([file, upload, lifecycle])
         try:
             await self.session.flush()
         except IntegrityError as error:
             is_idempotency = self._is_idempotency_conflict(error)
             await self.session.rollback()
-            try:
-                await self._storage().abort_multipart(key, multipart_id)
-            except Exception:  # noqa: BLE001 -- preserve canonical database outcome
-                file.scan_result = "orphaned_multipart"
             if not is_idempotency:
                 raise
             winner = await self.session.scalar(
@@ -147,9 +162,86 @@ class FileService:
                 )
             )
             if winner is not None and winner.metadata_fingerprint == self._fingerprint(command):
-                return winner
+                winner_file = await self.session.get(File, winner.file_id)
+                if winner_file is not None:
+                    return await self._provision_upload(winner, winner_file)
             raise FileUploadConflictError() from error
+        await self.session.commit()
+        return await self._provision_upload(upload, file)
+
+    async def _provision_upload(self, upload: Upload, file: File) -> Upload:
+        lifecycle = await self.session.scalar(
+            select(FileUploadLifecycle)
+            .where(FileUploadLifecycle.upload_id == upload.id)
+            .with_for_update()
+        )
+        if lifecycle is None:
+            raise FileProvisioningPendingError()
+        if lifecycle.provision_state == "READY":
+            if upload.multipart_id is not None and lifecycle.multipart_id == upload.multipart_id:
+                return upload
+            raise FileProvisioningPendingError()
+        if lifecycle.provision_state != "PROVISIONING":
+            raise FileProvisioningPendingError()
+        try:
+            multipart_ids = await self._storage().list_multipart_uploads(lifecycle.object_key)
+        except Exception as error:
+            await self.session.rollback()
+            raise FileProvisioningPendingError() from error
+        if len(multipart_ids) > 1:
+            for multipart_id in multipart_ids:
+                await self._record_multipart_cleanup(lifecycle, multipart_id)
+            await self.session.commit()
+            raise FileProvisioningPendingError()
+        if len(multipart_ids) == 1:
+            return await self._bind_multipart(upload, lifecycle, multipart_ids[0])
+        try:
+            multipart_id = await self._storage().create_multipart(
+                lifecycle.object_key, lifecycle.content_type
+            )
+        except Exception as error:
+            await self.session.rollback()
+            raise FileProvisioningPendingError() from error
+        return await self._bind_multipart(upload, lifecycle, multipart_id)
+
+    async def _bind_multipart(
+        self, upload: Upload, lifecycle: FileUploadLifecycle, multipart_id: str
+    ) -> Upload:
+        if not multipart_id:
+            await self.session.rollback()
+            raise FileProvisioningPendingError()
+        upload.multipart_id = multipart_id
+        lifecycle.multipart_id = multipart_id
+        lifecycle.provision_state = "READY"
+        try:
+            await self.session.commit()
+        except Exception as error:
+            await self.session.rollback()
+            raise FileProvisioningPendingError() from error
         return upload
+
+    async def _record_multipart_cleanup(
+        self, lifecycle: FileUploadLifecycle, multipart_id: str
+    ) -> None:
+        dedupe_key = hashlib.sha256(
+            f"ABORT_MULTIPART\x1f{lifecycle.object_key}\x1f{multipart_id}".encode()
+        ).hexdigest()
+        existing = await self.session.scalar(
+            select(FileStorageCleanup).where(
+                FileStorageCleanup.operation == "ABORT_MULTIPART",
+                FileStorageCleanup.dedupe_key == dedupe_key,
+            )
+        )
+        if existing is None:
+            self.session.add(
+                FileStorageCleanup(
+                    operation="ABORT_MULTIPART",
+                    dedupe_key=dedupe_key,
+                    object_key=lifecycle.object_key,
+                    multipart_id=multipart_id,
+                    lifecycle_id=lifecycle.upload_id,
+                )
+            )
 
     @staticmethod
     def _is_idempotency_conflict(error: IntegrityError) -> bool:

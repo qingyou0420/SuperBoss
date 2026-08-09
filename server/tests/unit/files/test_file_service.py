@@ -316,7 +316,8 @@ async def test_download_rejects_unsupported_actor_shapes(db_session, active_owne
 
 
 @pytest.mark.asyncio
-async def test_concurrent_same_metadata_reuses_winner_and_aborts_loser(db_session, active_owner) -> None:
+@pytest.mark.parametrize("round_number", range(3))
+async def test_concurrent_same_metadata_reuses_winner_without_loser_multipart(db_session, active_owner, round_number: int) -> None:
     import asyncio
 
     from sqlalchemy import func, select
@@ -326,26 +327,29 @@ async def test_concurrent_same_metadata_reuses_winner_and_aborts_loser(db_sessio
     from superboss.modules.files.schemas import UploadStart
     from superboss.modules.files.service import FileService
 
-    project = Project(name="Concurrent upload")
+    project = Project(name=f"Concurrent upload {round_number}")
     db_session.add(project)
     await db_session.commit()
     actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
     command = UploadStart(project_id=project.id, filename="x.pdf", size_bytes=1, sha256="0" * 64, category="资料", file_date="2026-08-09")
-    storage = InMemoryObjectStorage(create_barrier=asyncio.Barrier(2))
+    storage = InMemoryObjectStorage()
     factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    barrier = asyncio.Barrier(2)
     async def create() -> tuple[UUID, UUID]:
         async with factory() as session:
-            upload = await FileService(session, storage).start_upload(actor, command, "race")
+            await barrier.wait()
+            upload = await FileService(session, storage).start_upload(actor, command, f"race-{round_number}")
             await session.commit()
             return upload.id, upload.file_id
     first, second = await asyncio.wait_for(asyncio.gather(create(), create()), timeout=10)
-    assert first == second and len(storage.active) == 1 and len(storage.aborted) == 1
+    assert first == second and len(storage.active) == 1 and storage.create_calls == 1 and storage.aborted == set()
     assert await db_session.scalar(select(func.count()).select_from(Upload)) == 1
     assert await db_session.scalar(select(func.count()).select_from(File)) == 1
 
 
 @pytest.mark.asyncio
-async def test_concurrent_different_metadata_conflicts_and_aborts_loser(db_session, active_owner) -> None:
+@pytest.mark.parametrize("round_number", range(3))
+async def test_concurrent_different_metadata_conflicts_without_loser_multipart(db_session, active_owner, round_number: int) -> None:
     import asyncio
 
     from sqlalchemy import func, select
@@ -356,48 +360,50 @@ async def test_concurrent_different_metadata_conflicts_and_aborts_loser(db_sessi
     from superboss.modules.files.schemas import UploadStart
     from superboss.modules.files.service import FileService
 
-    project = Project(name="Concurrent conflict")
+    project = Project(name=f"Concurrent conflict {round_number}")
     db_session.add(project)
     await db_session.commit()
     actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
     first = UploadStart(project_id=project.id, filename="x.pdf", size_bytes=1, sha256="0" * 64, category="资料", file_date="2026-08-09", content_type="application/pdf")
     second = first.model_copy(update={"content_type": "image/png"})
-    storage = InMemoryObjectStorage(create_barrier=asyncio.Barrier(2))
+    storage = InMemoryObjectStorage()
     factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    barrier = asyncio.Barrier(2)
     async def create(command: UploadStart):
         async with factory() as session:
             try:
-                upload = await FileService(session, storage).start_upload(actor, command, "race-conflict")
+                await barrier.wait()
+                upload = await FileService(session, storage).start_upload(actor, command, f"race-conflict-{round_number}")
                 await session.commit()
                 return upload
             except ConflictError:
                 return None
     results = await asyncio.wait_for(asyncio.gather(create(first), create(second)), timeout=10)
     winner = next(item for item in results if item is not None)
-    assert sum(item is not None for item in results) == 1 and len(storage.active) == 1 and len(storage.aborted) == 1
+    assert sum(item is not None for item in results) == 1 and len(storage.active) == 1 and storage.create_calls == 1 and storage.aborted == set()
     saved = await db_session.get(Upload, winner.id)
     assert saved is not None and await db_session.scalar(select(func.count()).select_from(Upload)) == 1
 
 
 @pytest.mark.asyncio
-async def test_non_idempotency_integrity_error_is_not_translated(db_session, active_owner) -> None:
-    from sqlalchemy import func, select
-    from sqlalchemy.exc import IntegrityError
+async def test_empty_multipart_response_leaves_safe_durable_provisioning(db_session, active_owner) -> None:
+    from sqlalchemy import select
 
-    from superboss.core.errors import ConflictError
-    from superboss.modules.files.models import File, Upload
+    from superboss.core.errors import DomainError
+    from superboss.modules.files.models import FileUploadLifecycle, Upload
     from superboss.modules.files.schemas import UploadStart
     from superboss.modules.files.service import FileService
-    project = Project(name="Constraint")
+    project = Project(name="Empty multipart response")
     db_session.add(project); await db_session.flush()
     storage = InMemoryObjectStorage(created_multipart_id="")
     actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
-    with pytest.raises(IntegrityError) as error:
+    with pytest.raises(DomainError) as error:
         await FileService(db_session, storage).start_upload(actor, UploadStart(project_id=project.id, filename="x.pdf", size_bytes=1, sha256="0" * 64, category="资料", file_date="2026-08-09"), "constraint")
-    assert not isinstance(error.value, ConflictError) and "uq_upload_idempotency" not in str(error.value)
-    assert "" in storage.aborted
-    assert await db_session.scalar(select(func.count()).select_from(File)) == 0
-    assert await db_session.scalar(select(func.count()).select_from(Upload)) == 0
+    assert error.value.code == "FILE_PROVISIONING_PENDING" and "secret" not in str(error.value).lower()
+    upload = await db_session.scalar(select(Upload))
+    lifecycle = await db_session.scalar(select(FileUploadLifecycle))
+    assert upload is not None and lifecycle is not None and upload.multipart_id is None
+    assert lifecycle.provision_state == "PROVISIONING" and "" in storage.active
 
 
 @pytest.mark.asyncio
@@ -548,3 +554,169 @@ async def test_corrupt_cross_project_upload_fails_before_part_or_completion_stor
             await service.complete_upload(actor, upload_id, [CompletedPart(1, "etag")])
         await db_session.rollback()
     assert storage.expiries == [] and storage.completed == {}
+
+
+@pytest.mark.asyncio
+async def test_start_commits_provisioning_intent_before_creating_multipart(
+    db_session, active_owner
+) -> None:
+    """Moving the database commit below create_multipart loses crash recovery intent."""
+    from sqlalchemy import func, select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from superboss.modules.files.models import File, FileUploadLifecycle, Upload
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileService
+
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+
+    class ObservingStorage(InMemoryObjectStorage):
+        observed: tuple[int, int, int, str | None, str | None] | None = None
+
+        async def create_multipart(self, object_key: str, content_type: str) -> str:
+            async with factory() as reader:
+                upload = await reader.scalar(select(Upload))
+                lifecycle = await reader.scalar(select(FileUploadLifecycle))
+                self.observed = (
+                    await reader.scalar(select(func.count()).select_from(File)) or 0,
+                    await reader.scalar(select(func.count()).select_from(Upload)) or 0,
+                    await reader.scalar(select(func.count()).select_from(FileUploadLifecycle)) or 0,
+                    upload.multipart_id if upload is not None else None,
+                    lifecycle.provision_state if lifecycle is not None else None,
+                )
+            return await super().create_multipart(object_key, content_type)
+
+    project = Project(name="Provision intent")
+    db_session.add(project)
+    await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    storage = ObservingStorage()
+    upload = await FileService(db_session, storage).start_upload(
+        actor,
+        UploadStart(project_id=project.id, filename="x.pdf", size_bytes=1, sha256="0" * 64, category="docs", file_date="2026-08-09"),
+        "provision-intent",
+    )
+
+    assert storage.observed == (1, 1, 1, None, "PROVISIONING")
+    lifecycle = await db_session.get(FileUploadLifecycle, upload.id)
+    assert lifecycle is not None and lifecycle.provision_state == "READY"
+    assert upload.multipart_id is not None and lifecycle.multipart_id == upload.multipart_id
+
+
+@pytest.mark.asyncio
+async def test_start_replay_recovers_multipart_after_create_response_is_lost(
+    db_session, active_owner
+) -> None:
+    """A created multipart whose response is lost must be discovered, not created again."""
+    from sqlalchemy import select
+
+    from superboss.core.errors import DomainError
+    from superboss.modules.files.models import FileUploadLifecycle, Upload
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileService
+
+    class ResponseLostStorage(InMemoryObjectStorage):
+        response_lost = False
+
+        async def create_multipart(self, object_key: str, content_type: str) -> str:
+            multipart_id = await super().create_multipart(object_key, content_type)
+            if not self.response_lost:
+                self.response_lost = True
+                raise RuntimeError("provider response secret")
+            return multipart_id
+
+        async def list_multipart_uploads(self, object_key: str) -> list[str]:
+            return sorted(upload_id for upload_id, key in self.active.items() if key == object_key)
+
+    project = Project(name="Provision recovery")
+    db_session.add(project)
+    await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    command = UploadStart(project_id=project.id, filename="x.pdf", size_bytes=1, sha256="0" * 64, category="docs", file_date="2026-08-09")
+    storage = ResponseLostStorage()
+    service = FileService(db_session, storage)
+
+    with pytest.raises(DomainError) as pending:
+        await service.start_upload(actor, command, "response-lost")
+    assert pending.value.code == "FILE_PROVISIONING_PENDING"
+    lifecycle = await db_session.scalar(select(FileUploadLifecycle))
+    upload = await db_session.scalar(select(Upload))
+    assert lifecycle is not None and upload is not None
+    assert lifecycle.provision_state == "PROVISIONING" and upload.multipart_id is None
+    assert "secret" not in str(pending.value).lower() and len(storage.active) == 1
+
+    recovered = await service.start_upload(actor, command, "response-lost")
+    assert recovered.id == upload.id and recovered.multipart_id in storage.active
+    assert storage.create_calls == 1
+    await db_session.refresh(lifecycle)
+    assert lifecycle.provision_state == "READY" and lifecycle.multipart_id == recovered.multipart_id
+
+
+@pytest.mark.asyncio
+async def test_start_records_cleanup_for_multiple_exact_key_multiparts(
+    db_session, active_owner
+) -> None:
+    """Choosing one of several active uploads silently would orphan the others."""
+    from sqlalchemy import select
+
+    from superboss.core.errors import DomainError
+    from superboss.modules.files.models import FileStorageCleanup, FileUploadLifecycle, Upload
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileService
+
+    class MultipleActiveStorage(InMemoryObjectStorage):
+        async def list_multipart_uploads(self, object_key: str) -> list[str]:
+            return ["multipart-a", "multipart-b"]
+
+        async def create_multipart(self, object_key: str, content_type: str) -> str:
+            raise AssertionError("exact-key discovery must run before create")
+
+    project = Project(name="Provision duplicates")
+    db_session.add(project)
+    await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    command = UploadStart(project_id=project.id, filename="x.pdf", size_bytes=1, sha256="0" * 64, category="docs", file_date="2026-08-09")
+
+    with pytest.raises(DomainError) as pending:
+        await FileService(db_session, MultipleActiveStorage()).start_upload(actor, command, "duplicates")
+    assert pending.value.code == "FILE_PROVISIONING_PENDING"
+    lifecycle = await db_session.scalar(select(FileUploadLifecycle))
+    upload = await db_session.scalar(select(Upload))
+    cleanup = list((await db_session.scalars(select(FileStorageCleanup))).all())
+    assert lifecycle is not None and upload is not None and lifecycle.provision_state == "PROVISIONING"
+    assert upload.multipart_id is None
+    assert {item.multipart_id for item in cleanup} == {"multipart-a", "multipart-b"}
+    assert all(item.operation == "ABORT_MULTIPART" and item.last_error_code is None for item in cleanup)
+
+
+@pytest.mark.asyncio
+async def test_start_replay_recovers_after_exact_key_listing_failure(db_session, active_owner) -> None:
+    """A transient list failure must retain the durable intent for the identical replay."""
+    from sqlalchemy import select
+
+    from superboss.core.errors import DomainError
+    from superboss.modules.files.models import FileUploadLifecycle, Upload
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileService
+
+    project = Project(name="Provision list retry")
+    db_session.add(project)
+    await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    command = UploadStart(project_id=project.id, filename="x.pdf", size_bytes=1, sha256="0" * 64, category="docs", file_date="2026-08-09")
+    storage = InMemoryObjectStorage(list_error=RuntimeError("provider list secret"))
+    service = FileService(db_session, storage)
+
+    with pytest.raises(DomainError) as pending:
+        await service.start_upload(actor, command, "list-retry")
+    assert pending.value.code == "FILE_PROVISIONING_PENDING"
+    upload = await db_session.scalar(select(Upload))
+    lifecycle = await db_session.scalar(select(FileUploadLifecycle))
+    assert upload is not None and lifecycle is not None
+    assert upload.multipart_id is None and lifecycle.provision_state == "PROVISIONING"
+    assert storage.active == {} and "secret" not in str(pending.value).lower()
+
+    storage.list_error = None
+    recovered = await service.start_upload(actor, command, "list-retry")
+    assert recovered.id == upload.id and recovered.multipart_id is not None
+    assert storage.create_calls == 1 and storage.list_calls == 2

@@ -1017,3 +1017,33 @@ async def test_upload_denied_audit_failure_preserves_domain_responses(file_clien
     foreign = client.post(f"/api/v1/files/uploads/{upload.id}/parts/1", headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))})
     assert [response.status_code for response in (missing, inactive, foreign)] == [404, 409, 403]
     assert storage.expiries == [] and all("audit secret" not in response.text for response in (missing, inactive, foreign))
+
+
+@pytest.mark.asyncio
+async def test_start_provisioning_failure_is_safe_and_durable(file_client, db_session: AsyncSession) -> None:
+    """An S3 create response failure must retain recoverable provisioning state and return 503."""
+    from sqlalchemy import select
+
+    from superboss.modules.files.models import File, FileUploadLifecycle, Upload
+
+    client, storage = file_client
+    project = Project(name="HTTP provisioning pending")
+    db_session.add(project)
+    await db_session.commit()
+    storage.create_error_after_create = RuntimeError("provider create secret")
+    _login(client)
+    request_id = "bba39a39-47ba-4ac5-9250-ccdba1d7f25e"
+    response = client.post(
+        "/api/v1/files/uploads",
+        json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "docs", "file_date": "2026-08-09"},
+        headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "http-pending", "X-Request-ID": request_id},
+    )
+
+    file = await db_session.scalar(select(File))
+    upload = await db_session.scalar(select(Upload))
+    lifecycle = await db_session.scalar(select(FileUploadLifecycle))
+    assert response.status_code == 503 and response.json()["error"]["code"] == "FILE_PROVISIONING_PENDING"
+    assert response.headers["X-Request-ID"] == response.json()["error"]["request_id"] == request_id
+    assert "provider create secret" not in response.text
+    assert file is not None and upload is not None and lifecycle is not None
+    assert upload.multipart_id is None and lifecycle.provision_state == "PROVISIONING" and len(storage.active) == 1
