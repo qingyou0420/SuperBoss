@@ -220,4 +220,3 @@ def downgrade() -> None:
     op.drop_index("ix_device_pairing_codes_expires_at", table_name="device_pairing_codes")
     op.drop_index("ix_device_pairing_codes_owner_created", table_name="device_pairing_codes")
     op.drop_table("device_pairing_codes")
-
