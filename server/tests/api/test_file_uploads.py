@@ -48,3 +48,15 @@ def test_upload_rejects_control_or_blank_file_metadata(value: str) -> None:
             category="资料",
             file_date="2026-08-09",
         )
+
+
+@pytest.mark.parametrize("part", [0, 10_001])
+def test_completed_part_rejects_s3_outside_range(part: int) -> None:
+    from superboss.modules.files.schemas import PartComplete
+    with pytest.raises(ValidationError): PartComplete(part_number=part, etag="etag")
+
+
+@pytest.mark.parametrize("etag", [" ", "x\r\ny", "x\x00y"])
+def test_completed_part_rejects_unsafe_etag(etag: str) -> None:
+    from superboss.modules.files.schemas import PartComplete
+    with pytest.raises(ValidationError): PartComplete(part_number=1, etag=etag)
