@@ -3186,3 +3186,135 @@ async def test_reconcile_due_prepared_and_delete_share_a_safe_lock_order(
             await asyncio.wait_for(delete_task, timeout=10)
         if not reconcile_task.done():
             await asyncio.wait_for(reconcile_task, timeout=10)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delete_target", ["file", "project"])
+async def test_provisioning_create_and_delete_leave_abortable_snapshot(
+    db_session, active_owner, delete_target: str
+) -> None:
+    """A delete racing a provider-created multipart must retain abort coordinates."""
+    import asyncio
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select, text
+    from sqlalchemy.exc import DBAPIError
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from superboss.modules.files.models import File, FileStorageCleanup, FileUploadLifecycle, Upload
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileLifecycleService, FileService
+
+    class BlockingCreateStorage(InMemoryObjectStorage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.created = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def create_multipart(self, object_key: str, content_type: str) -> str:
+            multipart_id = await super().create_multipart(object_key, content_type)
+            self.created.set()
+            await asyncio.wait_for(self.release.wait(), timeout=5)
+            return multipart_id
+
+    project = Project(name=f"Provision delete {delete_target}")
+    db_session.add(project)
+    await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    storage = BlockingCreateStorage()
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    idempotency_key = f"provision-delete-{delete_target}"
+    command = UploadStart(
+        project_id=project.id,
+        filename="provisioning.pdf",
+        category="docs",
+        file_date="2026-08-09",
+        size_bytes=1,
+        sha256="0" * 64,
+    )
+    delete_started = asyncio.Event()
+    delete_pid: list[int] = []
+
+    async def provision() -> Exception | None:
+        async with factory() as session:
+            try:
+                await FileService(session, storage).start_upload(actor, command, idempotency_key)
+            except Exception as error:  # noqa: BLE001 -- the race may safely reject provisioning
+                await session.rollback()
+                return error
+        return None
+
+    provision_task = asyncio.create_task(provision())
+    delete_task: asyncio.Task[Exception | None] | None = None
+    try:
+        await asyncio.wait_for(storage.created.wait(), timeout=5)
+        upload = await db_session.scalar(
+            select(Upload).where(Upload.idempotency_key == idempotency_key)
+        )
+        assert upload is not None
+        file_id, upload_id = upload.file_id, upload.id
+        lifecycle = await db_session.get(FileUploadLifecycle, upload_id)
+        assert lifecycle is not None
+        assert lifecycle.provision_state == "PROVISIONING" and lifecycle.multipart_id is None
+
+        async def delete() -> Exception | None:
+            async with factory() as session:
+                delete_pid.append(int(await session.scalar(text("SELECT pg_backend_pid()"))))
+                delete_started.set()
+                try:
+                    target = (
+                        await session.get(File, file_id)
+                        if delete_target == "file"
+                        else await session.get(Project, project.id)
+                    )
+                    assert target is not None
+                    await session.delete(target)
+                    await session.commit()
+                except Exception as error:  # noqa: BLE001 -- test observes database outcome
+                    await session.rollback()
+                    return error
+            return None
+
+        delete_task = asyncio.create_task(delete())
+        await asyncio.wait_for(delete_started.wait(), timeout=5)
+        for _ in range(300):
+            wait_event = await db_session.scalar(
+                text("SELECT wait_event_type FROM pg_stat_activity WHERE pid = :pid"),
+                {"pid": delete_pid[0]},
+            )
+            if wait_event == "Lock":
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("delete did not wait for the provisioning lifecycle lock")
+
+        storage.release.set()
+        provision_error, delete_error = await asyncio.wait_for(
+            asyncio.gather(provision_task, delete_task), timeout=10
+        )
+        assert not any(isinstance(error, DBAPIError) for error in (provision_error, delete_error))
+
+        db_session.expire_all()
+        jobs = list(
+            await db_session.scalars(
+                select(FileStorageCleanup).where(FileStorageCleanup.lifecycle_id == upload_id)
+            )
+        )
+        operations = {job.operation for job in jobs}
+        assert operations == {"DELETE_OBJECT", "ABORT_MULTIPART"}, {
+            "operations": sorted(operations),
+            "active_multipart_ids": sorted(storage.active),
+            "provision_outcome": type(provision_error).__name__ if provision_error else "returned",
+            "delete_outcome": type(delete_error).__name__ if delete_error else "returned",
+        }
+        for job in jobs:
+            job.next_attempt_at = datetime.now(UTC)
+        await db_session.commit()
+        assert await FileLifecycleService(factory, storage).reconcile_cleanup() == 2
+        assert storage.active == {}
+    finally:
+        storage.release.set()
+        if delete_task is not None and not delete_task.done():
+            await asyncio.wait_for(delete_task, timeout=10)
+        if not provision_task.done():
+            await asyncio.wait_for(provision_task, timeout=10)

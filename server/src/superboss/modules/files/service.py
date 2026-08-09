@@ -179,18 +179,51 @@ class FileService:
         return await self._provision_upload(upload, file)
 
     async def _provision_upload(self, upload: Upload, file: File) -> Upload:
+        fresh_file = await self.session.scalar(
+            select(File)
+            .where(File.id == upload.file_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if (
+            fresh_file is None
+            or fresh_file.state != FileState.UPLOADING
+            or fresh_file.project_id != upload.project_id
+        ):
+            await self.session.rollback()
+            raise FileProvisioningPendingError()
+        fresh_upload = await self.session.get(Upload, upload.id, populate_existing=True)
+        if (
+            fresh_upload is None
+            or fresh_upload.file_id != fresh_file.id
+            or fresh_upload.project_id != fresh_file.project_id
+        ):
+            await self.session.rollback()
+            raise FileProvisioningPendingError()
         lifecycle = await self.session.scalar(
             select(FileUploadLifecycle)
-            .where(FileUploadLifecycle.upload_id == upload.id)
+            .where(FileUploadLifecycle.upload_id == fresh_upload.id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
-        if lifecycle is None:
+        if (
+            lifecycle is None
+            or lifecycle.file_id != fresh_file.id
+            or lifecycle.project_id != fresh_file.project_id
+            or lifecycle.object_key != fresh_file.object_key
+        ):
+            await self.session.rollback()
             raise FileProvisioningPendingError()
         if lifecycle.provision_state == "READY":
-            if upload.multipart_id is not None and lifecycle.multipart_id == upload.multipart_id:
-                return upload
+            if (
+                fresh_upload.multipart_id is not None
+                and lifecycle.multipart_id == fresh_upload.multipart_id
+            ):
+                return fresh_upload
+            await self.session.rollback()
             raise FileProvisioningPendingError()
         if lifecycle.provision_state != "PROVISIONING":
+            await self.session.rollback()
             raise FileProvisioningPendingError()
         try:
             multipart_ids = await self._storage().list_multipart_uploads(lifecycle.object_key)
@@ -203,7 +236,7 @@ class FileService:
             await self.session.commit()
             raise FileProvisioningPendingError()
         if len(multipart_ids) == 1:
-            return await self._bind_multipart(upload, lifecycle, multipart_ids[0])
+            return await self._bind_multipart(fresh_upload, lifecycle, multipart_ids[0])
         try:
             multipart_id = await self._storage().create_multipart(
                 lifecycle.object_key, lifecycle.content_type
@@ -211,7 +244,7 @@ class FileService:
         except Exception as error:
             await self.session.rollback()
             raise FileProvisioningPendingError() from error
-        return await self._bind_multipart(upload, lifecycle, multipart_id)
+        return await self._bind_multipart(fresh_upload, lifecycle, multipart_id)
 
     async def _bind_multipart(
         self, upload: Upload, lifecycle: FileUploadLifecycle, multipart_id: str
