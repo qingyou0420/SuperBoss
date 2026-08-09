@@ -556,6 +556,64 @@ class FileLifecycleService:
                 await session.commit()
         return True
 
+    async def deliver_due(self, limit: int = 100) -> int:
+        """Drain due completion deliveries; the return value counts fully delivered files."""
+        now = datetime.now(UTC)
+        expired = now - timedelta(seconds=30)
+        async with self.session_factory() as session:
+            outboxes = list(
+                await session.scalars(
+                    select(FileLifecycleOutbox)
+                    .where(
+                        or_(
+                            and_(
+                                FileLifecycleOutbox.state == "PENDING",
+                                FileLifecycleOutbox.next_attempt_at <= now,
+                            ),
+                            and_(
+                                FileLifecycleOutbox.state == "DELIVERING",
+                                FileLifecycleOutbox.locked_at.is_not(None),
+                                FileLifecycleOutbox.locked_at <= expired,
+                            ),
+                        )
+                    )
+                    .order_by(
+                        case((FileLifecycleOutbox.kind == "completion_audit", 0), else_=1),
+                        FileLifecycleOutbox.next_attempt_at,
+                    )
+                    .limit(limit)
+                )
+            )
+            candidates = [(outbox.file_id, outbox.dedupe_key) for outbox in outboxes]
+
+        delivered = 0
+        seen_files: set[UUID] = set()
+        for file_id, event_key in candidates:
+            if file_id in seen_files:
+                continue
+            seen_files.add(file_id)
+            async with self.session_factory() as session:
+                lifecycle = await session.scalar(
+                    select(FileUploadLifecycle).where(
+                        FileUploadLifecycle.file_id == file_id,
+                        FileUploadLifecycle.completion_event_key == event_key,
+                    )
+                )
+                if lifecycle is None:
+                    continue
+                audit = await session.scalar(
+                    select(FileLifecycleOutbox).where(
+                        FileLifecycleOutbox.kind == "completion_audit",
+                        FileLifecycleOutbox.dedupe_key == event_key,
+                    )
+                )
+                if audit is None or audit.state not in {"PENDING", "DELIVERED"}:
+                    continue
+                upload_id = lifecycle.upload_id
+            if await self.deliver_completion(upload_id):
+                delivered += 1
+        return delivered
+
     async def _record_completion_audit(self, lifecycle: FileUploadLifecycle) -> None:
         if (
             lifecycle.completion_actor_id is None
@@ -650,6 +708,7 @@ class FileLifecycleService:
                     continue
                 await FileService(session, self.storage)._finalize_completion(file, lifecycle)
                 completed += 1
+        completed += await self.deliver_due(limit)
         return completed
 
     async def reconcile_cleanup(self, limit: int = 100, lifecycle_id: UUID | None = None) -> int:
