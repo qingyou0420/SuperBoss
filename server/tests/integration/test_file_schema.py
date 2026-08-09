@@ -27,7 +27,11 @@ _DEVICE_TABLES = {
     "device_project_grants",
     "device_scope_grants",
 }
-_IMPORT_TABLES = {"import_jobs", "import_attachments"}
+_IMPORT_TABLES = {
+    "import_idempotency_claims",
+    "import_jobs",
+    "import_attachments",
+}
 _CatalogFingerprint = tuple[
     tuple[tuple[str, str, str, str, int], ...],
     tuple[tuple[str, str, str, str], ...],

@@ -25,7 +25,11 @@ from superboss.modules.projects.models import Project
 from superboss.modules.users.models import User
 
 SERVER_ROOT = Path(__file__).resolve().parents[2]
-IMPORT_TABLES = {"import_jobs", "import_attachments"}
+IMPORT_TABLES = {
+    "import_idempotency_claims",
+    "import_jobs",
+    "import_attachments",
+}
 
 
 def import_models() -> ModuleType:
@@ -67,6 +71,12 @@ _IMPORT_JOB_INSERT = text(
     "VALUES (:id, :device_id, :project_id, :idempotency_key, :local_task_id, "
     "NULL, NULL, CAST(:manifest AS jsonb), :fingerprint, :status, :result_code, "
     ":submitted_at, :created_at, :updated_at)"
+)
+
+_IMPORT_CLAIM_INSERT = text(
+    "INSERT INTO import_idempotency_claims "
+    "(device_id, idempotency_key, manifest_fingerprint) "
+    "VALUES (:device_id, :idempotency_key, :manifest_fingerprint)"
 )
 
 
@@ -118,6 +128,115 @@ def test_import_models_are_registered_and_alembic_has_no_metadata_drift(
 
     assert check.returncode == 0, check.stdout + check.stderr
     assert "No new upgrade operations detected" in check.stdout + check.stderr
+
+
+@pytest.mark.asyncio
+async def test_import_claim_model_and_database_accept_only_bounded_device_keys(
+    db_session: AsyncSession,
+    active_owner: User,
+) -> None:
+    """The durable pre-I/O claim stores only one printable key/fingerprint per device."""
+    models = import_models()
+    _project, device = await _seed_import_parent(
+        db_session,
+        active_owner,
+        name="Import claim contract",
+    )
+    claim_table = models.ImportIdempotencyClaim.__table__
+    assert list(claim_table.primary_key.columns.keys()) == [
+        "device_id",
+        "idempotency_key",
+    ]
+    assert claim_table.primary_key.name == "pk_import_idempotency_claims"
+    assert set(claim_table.columns.keys()) == {
+        "device_id",
+        "idempotency_key",
+        "manifest_fingerprint",
+        "created_at",
+    }
+
+    await db_session.execute(
+        _IMPORT_CLAIM_INSERT,
+        {
+            "device_id": device.id,
+            "idempotency_key": "Printable-claim_key!",
+            "manifest_fingerprint": "a" * 64,
+        },
+    )
+    await db_session.commit()
+    saved = await db_session.get(
+        models.ImportIdempotencyClaim,
+        (device.id, "Printable-claim_key!"),
+    )
+    assert saved is not None
+    assert saved.manifest_fingerprint == "a" * 64
+    assert saved.created_at.tzinfo is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("idempotency_key", "manifest_fingerprint", "constraint_name"),
+    (
+        ("", "a" * 64, "ck_import_idempotency_claims_key"),
+        (" ", "a" * 64, "ck_import_idempotency_claims_key"),
+        ("line\nbreak", "a" * 64, "ck_import_idempotency_claims_key"),
+        ("delete\x7f", "a" * 64, "ck_import_idempotency_claims_key"),
+        ("x" * 256, "a" * 64, None),
+        ("valid-key", "A" * 64, "ck_import_idempotency_claims_fingerprint"),
+        ("valid-key", "a" * 63, "ck_import_idempotency_claims_fingerprint"),
+        ("valid-key", "g" * 64, "ck_import_idempotency_claims_fingerprint"),
+    ),
+)
+async def test_database_rejects_invalid_import_claim_key_or_fingerprint(
+    db_session: AsyncSession,
+    active_owner: User,
+    idempotency_key: str,
+    manifest_fingerprint: str,
+    constraint_name: str | None,
+) -> None:
+    """Direct writers cannot bypass the printable key and lowercase SHA-256 grammar."""
+    _models = import_models()
+    _project, device = await _seed_import_parent(
+        db_session,
+        active_owner,
+        name=f"Invalid import claim {uuid4().hex}",
+    )
+
+    with pytest.raises(DBAPIError) as rejected:
+        await db_session.execute(
+            _IMPORT_CLAIM_INSERT,
+            {
+                "device_id": device.id,
+                "idempotency_key": idempotency_key,
+                "manifest_fingerprint": manifest_fingerprint,
+            },
+        )
+        await db_session.commit()
+    if constraint_name is not None:
+        assert _constraint_name(rejected.value) == constraint_name
+    else:
+        assert getattr(rejected.value.orig, "sqlstate", None) == "22001"
+    await db_session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_database_rejects_import_claim_for_unknown_device(
+    db_session: AsyncSession,
+) -> None:
+    """A durable claim cannot outlive or invent its owning device identity."""
+    import_models()
+    with pytest.raises(IntegrityError) as rejected:
+        await db_session.execute(
+            _IMPORT_CLAIM_INSERT,
+            {
+                "device_id": uuid4(),
+                "idempotency_key": "unknown-device",
+                "manifest_fingerprint": "a" * 64,
+            },
+        )
+        await db_session.commit()
+    assert _constraint_name(rejected.value) == "fk_import_idempotency_claims_device"
+    await db_session.rollback()
 
 
 @pytest.mark.asyncio
@@ -570,6 +689,7 @@ def test_0017_round_trip_and_populated_downgrade_guard_are_atomic(
         tuple[tuple[object, ...], ...],
         tuple[tuple[object, ...], ...],
         tuple[tuple[object, ...], ...],
+        tuple[tuple[object, ...], ...],
     ]:
         connection = await asyncpg.connect(pg_url)
         try:
@@ -605,7 +725,16 @@ def test_0017_round_trip_and_populated_downgrade_guard_are_atomic(
             )
             jobs = ()
             attachments = ()
+            claims = ()
             if IMPORT_TABLES <= tables:
+                claims = tuple(
+                    tuple(row)
+                    for row in await connection.fetch(
+                        "SELECT device_id::text, idempotency_key, manifest_fingerprint, "
+                        "created_at FROM import_idempotency_claims "
+                        "ORDER BY device_id, idempotency_key"
+                    )
+                )
                 jobs = tuple(
                     tuple(row)
                     for row in await connection.fetch(
@@ -630,6 +759,7 @@ def test_0017_round_trip_and_populated_downgrade_guard_are_atomic(
                 tuple(tuple(row) for row in columns),
                 tuple(tuple(row) for row in constraints),
                 tuple(tuple(row) for row in indexes),
+                claims,
                 jobs,
                 attachments,
             )
@@ -694,6 +824,13 @@ def test_0017_round_trip_and_populated_downgrade_guard_are_atomic(
                 "c" * 64,
             )
             await connection.execute(
+                "INSERT INTO import_idempotency_claims "
+                "(device_id, idempotency_key, manifest_fingerprint) "
+                "VALUES ($1, 'import-key', $2)",
+                device_id,
+                "d" * 64,
+            )
+            await connection.execute(
                 "INSERT INTO import_jobs "
                 "(id, device_id, project_id, idempotency_key, local_task_id, "
                 "external_document_reference, base_sha256, canonical_manifest_json, "
@@ -715,6 +852,48 @@ def test_0017_round_trip_and_populated_downgrade_guard_are_atomic(
                 project_id,
                 file_id,
                 upload_id,
+            )
+        finally:
+            await connection.close()
+
+    async def seed_claim_only() -> None:
+        connection = await asyncpg.connect(pg_url)
+        owner_id, device_id = uuid4(), uuid4()
+        try:
+            await connection.execute(
+                "INSERT INTO users (id, wecom_userid, display_name, role, status) "
+                "VALUES ($1, $2, 'Claim Owner', 'OWNER', 'ACTIVE')",
+                owner_id,
+                f"claim-owner-{owner_id}",
+            )
+            await connection.execute(
+                "INSERT INTO device_connections (id, owner_id, name) VALUES ($1, $2, $3)",
+                device_id,
+                owner_id,
+                f"Claim device {device_id}",
+            )
+            await connection.execute(
+                "INSERT INTO import_idempotency_claims "
+                "(device_id, idempotency_key, manifest_fingerprint) "
+                "VALUES ($1, 'claim-only-key', $2)",
+                device_id,
+                "e" * 64,
+            )
+        finally:
+            await connection.close()
+
+    async def clear_claim_only_state() -> None:
+        connection = await asyncpg.connect(pg_url)
+        try:
+            await connection.execute(
+                "DELETE FROM import_idempotency_claims "
+                "WHERE idempotency_key = 'claim-only-key'"
+            )
+            await connection.execute(
+                "DELETE FROM device_connections WHERE name LIKE 'Claim device %'"
+            )
+            await connection.execute(
+                "DELETE FROM users WHERE wecom_userid LIKE 'claim-owner-%'"
             )
         finally:
             await connection.close()
@@ -767,6 +946,16 @@ def test_0017_round_trip_and_populated_downgrade_guard_are_atomic(
             "uq_import_attachments_job_kind",
             "uq_import_attachments_upload",
         } <= {name for table, name in definitions if table == "import_attachments"}
+        assert {
+            "ck_import_idempotency_claims_fingerprint",
+            "ck_import_idempotency_claims_key",
+            "fk_import_idempotency_claims_device",
+            "pk_import_idempotency_claims",
+        } <= {
+            name
+            for table, name in definitions
+            if table == "import_idempotency_claims"
+        }
         assert "uq_uploads_id_file_project" in {
             name for table, name in definitions if table == "uploads"
         }
@@ -774,6 +963,13 @@ def test_0017_round_trip_and_populated_downgrade_guard_are_atomic(
             ("import_jobs", "uq_import_jobs_device_idempotency")
         ].replace(" ", "")
         assert "UNIQUE(device_id,idempotency_key)" in normalized_job_unique
+        normalized_claim_primary_key = definitions[
+            ("import_idempotency_claims", "pk_import_idempotency_claims")
+        ].replace(" ", "")
+        assert "PRIMARYKEY(device_id,idempotency_key)" in normalized_claim_primary_key
+        assert definitions[
+            ("import_idempotency_claims", "fk_import_idempotency_claims_device")
+        ] == "FOREIGN KEY (device_id) REFERENCES device_connections(id) ON DELETE RESTRICT"
         status_definition = definitions[("import_jobs", "ck_import_jobs_status")]
         assert all(
             status in status_definition
@@ -783,6 +979,8 @@ def test_0017_round_trip_and_populated_downgrade_guard_are_atomic(
             ("import_attachments", "ck_import_attachments_kind")
         ]
         assert asyncio.run(column_limit("import_jobs", "result_code")) == 64
+        assert asyncio.run(column_limit("import_idempotency_claims", "idempotency_key")) == 255
+        assert asyncio.run(column_limit("import_idempotency_claims", "manifest_fingerprint")) == 64
 
         subprocess.run(
             [sys.executable, "-m", "alembic", "downgrade", "0016_device_connections"],
@@ -797,6 +995,23 @@ def test_0017_round_trip_and_populated_downgrade_guard_are_atomic(
             env=environment,
             check=True,
         )
+
+        asyncio.run(seed_claim_only())
+        claim_only_before = asyncio.run(snapshot())
+        claim_only_downgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "downgrade", "0016_device_connections"],
+            cwd=SERVER_ROOT,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert claim_only_downgrade.returncode != 0
+        assert "SUPERBOSS_IMPORT_DOWNGRADE_BLOCKED" in (
+            claim_only_downgrade.stdout + claim_only_downgrade.stderr
+        )
+        assert asyncio.run(snapshot()) == claim_only_before
+        asyncio.run(clear_claim_only_state())
 
         asyncio.run(seed_import())
         before = asyncio.run(snapshot())

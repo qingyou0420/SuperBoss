@@ -11,6 +11,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    PrimaryKeyConstraint,
     String,
     UniqueConstraint,
     func,
@@ -35,6 +36,42 @@ class AttachmentKind(StrEnum):
     ORIGINAL = "ORIGINAL"
     REVISED = "REVISED"
     K3_RAW = "K3_RAW"
+
+
+class ImportIdempotencyClaim(Base):
+    """Permanent manifest binding established before any import child side effect."""
+
+    __tablename__ = "import_idempotency_claims"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "device_id",
+            "idempotency_key",
+            name="pk_import_idempotency_claims",
+        ),
+        CheckConstraint(
+            "idempotency_key ~ '^[!-~]{1,255}$'",
+            name="ck_import_idempotency_claims_key",
+        ),
+        CheckConstraint(
+            "manifest_fingerprint ~ '^[0-9a-f]{64}$'",
+            name="ck_import_idempotency_claims_fingerprint",
+        ),
+    )
+
+    device_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey(
+            "device_connections.id",
+            name="fk_import_idempotency_claims_device",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    manifest_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
 
 
 class ImportJob(Base):

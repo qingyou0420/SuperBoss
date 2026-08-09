@@ -23,6 +23,37 @@ def upgrade() -> None:
         ["id", "file_id", "project_id"],
     )
     op.create_table(
+        "import_idempotency_claims",
+        sa.Column("device_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("idempotency_key", sa.String(length=255), nullable=False),
+        sa.Column("manifest_fingerprint", sa.String(length=64), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.CheckConstraint(
+            "idempotency_key ~ '^[!-~]{1,255}$'",
+            name="ck_import_idempotency_claims_key",
+        ),
+        sa.CheckConstraint(
+            "manifest_fingerprint ~ '^[0-9a-f]{64}$'",
+            name="ck_import_idempotency_claims_fingerprint",
+        ),
+        sa.ForeignKeyConstraint(
+            ["device_id"],
+            ["device_connections.id"],
+            name="fk_import_idempotency_claims_device",
+            ondelete="RESTRICT",
+        ),
+        sa.PrimaryKeyConstraint(
+            "device_id",
+            "idempotency_key",
+            name="pk_import_idempotency_claims",
+        ),
+    )
+    op.create_table(
         "import_jobs",
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("device_id", postgresql.UUID(as_uuid=True), nullable=False),
@@ -202,12 +233,13 @@ def _guard_downgrade() -> None:
         """
         DO $$
         BEGIN
-            IF EXISTS (SELECT 1 FROM import_attachments)
+            IF EXISTS (SELECT 1 FROM import_idempotency_claims)
+                OR EXISTS (SELECT 1 FROM import_attachments)
                 OR EXISTS (SELECT 1 FROM import_jobs)
             THEN
                 RAISE EXCEPTION USING
                     MESSAGE = 'SUPERBOSS_IMPORT_DOWNGRADE_BLOCKED',
-                    DETAIL = 'Import job or attachment state exists.',
+                    DETAIL = 'Import idempotency, job, or attachment state exists.',
                     HINT = 'Purge import state through an approved maintenance flow.';
             END IF;
         END;
@@ -223,4 +255,5 @@ def downgrade() -> None:
     op.drop_index("ix_import_jobs_device_created", table_name="import_jobs")
     op.drop_index("ix_import_jobs_project_created", table_name="import_jobs")
     op.drop_table("import_jobs")
+    op.drop_table("import_idempotency_claims")
     op.drop_constraint("uq_uploads_id_file_project", "uploads", type_="unique")

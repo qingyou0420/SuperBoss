@@ -1,12 +1,14 @@
 """Creation and idempotent provisioning of normalized K3 import jobs."""
 
 import hashlib
+import hmac
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -22,6 +24,7 @@ from superboss.modules.files.storage import CompletedPart, ObjectStorage
 from superboss.modules.imports.models import (
     AttachmentKind,
     ImportAttachment,
+    ImportIdempotencyClaim,
     ImportJob,
     ImportStatus,
 )
@@ -168,16 +171,14 @@ class ImportService:
         manifest_bytes = canonical_manifest_bytes(command)
         manifest_fingerprint = hashlib.sha256(manifest_bytes).hexdigest()
         canonical_manifest = command.model_dump(mode="json")
-        async with self.session_factory() as guard_session, guard_session.begin():
-            await guard_session.execute(
-                select(
-                    func.pg_advisory_xact_lock(
-                        self._create_lock_key(actor.subject_id, idempotency_key)
-                    )
-                )
-            )
+        await self._bind_claim(
+            actor.subject_id,
+            idempotency_key,
+            manifest_fingerprint,
+        )
+        async with self.session_factory() as existing_session:
             existing = await self._existing_result(
-                guard_session,
+                existing_session,
                 actor.subject_id,
                 idempotency_key,
                 manifest_fingerprint,
@@ -185,37 +186,38 @@ class ImportService:
             if existing is not None:
                 return existing
 
-            uploads: list[Upload] = []
-            for declaration in command.attachments:
-                upload_command = UploadStart(
-                    project_id=command.project_id,
-                    filename=declaration.filename,
-                    size_bytes=declaration.size_bytes,
-                    sha256=declaration.sha256,
-                    category="kimi-imports",
-                    file_date=command.k3_result.processed_at.date(),
-                    content_type=declaration.content_type,
-                )
-                try:
-                    async with self.session_factory() as file_session:
-                        upload = await FileService(
-                            file_session,
-                            self.storage,
-                        ).start_import_upload(
-                            actor,
-                            upload_command,
-                            self._child_idempotency_key(
-                                actor.subject_id,
-                                idempotency_key,
-                                declaration.kind,
-                            ),
-                        )
-                except FileUploadConflictError as error:
-                    raise ImportIdempotencyConflictError() from error
-                uploads.append(upload)
+        uploads: list[Upload] = []
+        for declaration in command.attachments:
+            upload_command = UploadStart(
+                project_id=command.project_id,
+                filename=declaration.filename,
+                size_bytes=declaration.size_bytes,
+                sha256=declaration.sha256,
+                category="kimi-imports",
+                file_date=command.k3_result.processed_at.date(),
+                content_type=declaration.content_type,
+            )
+            try:
+                async with self.session_factory() as file_session:
+                    upload = await FileService(
+                        file_session,
+                        self.storage,
+                    ).start_import_upload(
+                        actor,
+                        upload_command,
+                        self._child_idempotency_key(
+                            actor.subject_id,
+                            idempotency_key,
+                            declaration.kind,
+                        ),
+                    )
+            except FileUploadConflictError as error:
+                raise ImportIdempotencyConflictError() from error
+            uploads.append(upload)
 
+        async with self.session_factory() as persist_session, persist_session.begin():
             return await self._persist_job(
-                guard_session,
+                persist_session,
                 actor,
                 command,
                 idempotency_key,
@@ -1054,6 +1056,39 @@ class ImportService:
             return None
         return await self._matching_result(session, existing, manifest_fingerprint)
 
+    async def _bind_claim(
+        self,
+        device_id: UUID,
+        idempotency_key: str,
+        manifest_fingerprint: str,
+    ) -> None:
+        """Commit the permanent parent fingerprint before provisioning any child."""
+        async with self.session_factory() as session, session.begin():
+            await session.execute(
+                pg_insert(ImportIdempotencyClaim)
+                .values(
+                    device_id=device_id,
+                    idempotency_key=idempotency_key,
+                    manifest_fingerprint=manifest_fingerprint,
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        ImportIdempotencyClaim.device_id,
+                        ImportIdempotencyClaim.idempotency_key,
+                    ]
+                )
+            )
+            claimed_fingerprint = await session.scalar(
+                select(ImportIdempotencyClaim.manifest_fingerprint).where(
+                    ImportIdempotencyClaim.device_id == device_id,
+                    ImportIdempotencyClaim.idempotency_key == idempotency_key,
+                )
+            )
+            if claimed_fingerprint is None:
+                raise RuntimeError("import idempotency claim disappeared")
+            if not hmac.compare_digest(claimed_fingerprint, manifest_fingerprint):
+                raise ImportIdempotencyConflictError()
+
     async def _persist_job(
         self,
         session: AsyncSession,
@@ -1190,15 +1225,6 @@ class ImportService:
     ) -> str:
         material = f"{device_id}\x1f{idempotency_key}\x1f{kind.value}".encode()
         return f"import-{hashlib.sha256(material).hexdigest()}"
-
-    @staticmethod
-    def _create_lock_key(device_id: UUID, idempotency_key: str) -> int:
-        material = f"{device_id}\x1f{idempotency_key}".encode()
-        return int.from_bytes(
-            hashlib.sha256(material).digest()[:8],
-            byteorder="big",
-            signed=True,
-        )
 
     @staticmethod
     def _constraint_name(error: IntegrityError) -> str | None:

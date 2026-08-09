@@ -67,13 +67,16 @@ async def db_session(postgres_database: str) -> AsyncIterator[AsyncSession]:
         async with engine.begin() as connection:
             await connection.execute(delete(AuditLog))
             try:
-                from superboss.modules.imports.models import ImportAttachment, ImportJob
+                from superboss.modules.imports import models as import_models
             except ModuleNotFoundError:
                 # Stage-1 RED intentionally runs before Task 10 production modules exist.
                 pass
             else:
-                await connection.execute(delete(ImportAttachment))
-                await connection.execute(delete(ImportJob))
+                await connection.execute(delete(import_models.ImportAttachment))
+                await connection.execute(delete(import_models.ImportJob))
+                claim_model = getattr(import_models, "ImportIdempotencyClaim", None)
+                if claim_model is not None:
+                    await connection.execute(delete(claim_model))
             await connection.execute(delete(DeviceScopeGrant))
             await connection.execute(delete(DeviceProjectGrant))
             await connection.execute(delete(DeviceSession))

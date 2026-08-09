@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import ValidationError
 from sqlalchemy import event, func, select, text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from superboss.core.actors import Actor
 from superboss.core.errors import DomainError
@@ -28,7 +28,7 @@ from superboss.modules.files.models import (
     FileUploadLifecycle,
     Upload,
 )
-from superboss.modules.files.service import FileLifecycleService
+from superboss.modules.files.service import FileLifecycleService, FileService
 from superboss.modules.files.storage import CompletedPart
 from superboss.modules.projects.models import Project
 from superboss.modules.users.models import Role
@@ -110,6 +110,22 @@ async def wait_for_advisory_lock_contender(
         if waiting:
             return
         await asyncio.sleep(0.01)
+
+
+async def advisory_lock_count(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> int:
+    """Count database-scoped advisory locks after a failed create unwinds."""
+    async with session_factory() as session:
+        count = await session.scalar(
+            text(
+                "SELECT count(*) FROM pg_locks "
+                "WHERE locktype = 'advisory' "
+                "AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
+            )
+        )
+    assert count is not None
+    return count
 
 
 def import_contract() -> tuple[ModuleType, ModuleType, ModuleType]:
@@ -477,7 +493,7 @@ async def test_concurrent_changed_manifest_has_no_losing_upload_set(
         )
         try:
             ready, _pending = await asyncio.wait(
-                {provider_contender, advisory_contender},
+                {second_task, provider_contender, advisory_contender},
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if provider_contender in ready:
@@ -531,6 +547,493 @@ async def test_concurrent_changed_manifest_has_no_losing_upload_set(
     assert {row.upload_id for row in attachments} == {row.id for row in uploads}
     assert {row.multipart_id for row in uploads} == set(storage.active)
     assert storage.create_calls == expected_children
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_mode", ("cancel", "exception"))
+@pytest.mark.parametrize(
+    "variant",
+    ("different_projects", "same_project_different_kinds"),
+)
+async def test_changed_manifest_cannot_take_key_after_provider_before_parent_failure(
+    db_session: AsyncSession,
+    active_owner: Any,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    variant: str,
+    failure_mode: str,
+) -> None:
+    """A durable fingerprint must survive cancellation/crash after child provisioning."""
+    models, _schemas, _service = import_contract()
+    first_project, device, actor = await seed_device_actor(
+        db_session,
+        active_owner,
+        name=f"Durable claim {variant} {failure_mode}",
+    )
+    if variant == "different_projects":
+        changed_project = Project(name=f"Durable claim changed {failure_mode}")
+        db_session.add(changed_project)
+        await db_session.flush()
+        db_session.add(
+            DeviceProjectGrant(device_id=device.id, project_id=changed_project.id)
+        )
+        await db_session.commit()
+        actor = Actor(
+            "device",
+            device.id,
+            None,
+            frozenset({first_project.id, changed_project.id}),
+            ALL_IMPORT_SCOPES,
+        )
+        original_command = command_for(first_project.id)
+        changed_command = command_for(changed_project.id)
+    else:
+        original_command = command_for(first_project.id, two_attachments=True)
+        changed_command = command_for(first_project.id)
+
+    storage = InMemoryObjectStorage()
+    first_service = service_for(session_factory, storage)
+    original_persist = first_service._persist_job
+    before_parent = asyncio.Event()
+    release_parent = asyncio.Event()
+
+    async def pause_before_parent(*args: Any, **kwargs: Any) -> Any:
+        before_parent.set()
+        await release_parent.wait()
+        if failure_mode == "exception":
+            raise RuntimeError("post-provider pre-parent failure")
+        return await original_persist(*args, **kwargs)
+
+    monkeypatch.setattr(first_service, "_persist_job", pause_before_parent)
+    key = f"durable-claim-{variant}-{failure_mode}"
+    first_task = asyncio.create_task(
+        first_service.create(actor, original_command, key, request_id=uuid4())
+    )
+    changed_task: asyncio.Task[Any] | None = None
+    advisory_contender: asyncio.Task[None] | None = None
+    try:
+        await asyncio.wait_for(before_parent.wait(), timeout=5)
+        expected_children = len(original_command.attachments)
+        async with session_factory() as session:
+            assert await session.scalar(select(func.count()).select_from(models.ImportJob)) == 0
+            assert await session.scalar(
+                select(func.count()).select_from(models.ImportAttachment)
+            ) == 0
+            assert await session.scalar(select(func.count()).select_from(File)) == expected_children
+            assert await session.scalar(select(func.count()).select_from(Upload)) == expected_children
+            assert await session.scalar(
+                select(func.count()).select_from(FileUploadLifecycle)
+            ) == expected_children
+            claims = list(
+                await session.scalars(select(models.ImportIdempotencyClaim))
+            )
+            assert len(claims) == 1
+            assert claims[0].device_id == device.id
+            assert claims[0].idempotency_key == key
+        assert storage.create_calls == expected_children
+
+        changed_task = asyncio.create_task(
+            service_for(session_factory, storage).create(
+                actor,
+                changed_command,
+                key,
+                request_id=uuid4(),
+            )
+        )
+        advisory_contender = asyncio.create_task(
+            wait_for_advisory_lock_contender(session_factory)
+        )
+        ready, _pending = await asyncio.wait(
+            {changed_task, advisory_contender},
+            timeout=5,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        assert ready, "changed create neither rejected a durable claim nor reached the old lock"
+
+        if failure_mode == "cancel":
+            first_task.cancel()
+        else:
+            release_parent.set()
+        first_result = (await asyncio.gather(first_task, return_exceptions=True))[0]
+        changed_result = (
+            await asyncio.wait_for(
+                asyncio.gather(changed_task, return_exceptions=True),
+                timeout=5,
+            )
+        )[0]
+    finally:
+        release_parent.set()
+        if not first_task.done():
+            first_task.cancel()
+        if changed_task is not None and not changed_task.done():
+            changed_task.cancel()
+        if advisory_contender is not None:
+            advisory_contender.cancel()
+        await asyncio.gather(
+            *(task for task in (first_task, changed_task, advisory_contender) if task is not None),
+            return_exceptions=True,
+        )
+
+    if failure_mode == "cancel":
+        assert isinstance(first_result, asyncio.CancelledError)
+    else:
+        assert isinstance(first_result, RuntimeError)
+        assert str(first_result) == "post-provider pre-parent failure"
+    assert isinstance(changed_result, DomainError)
+    assert changed_result.status_code == 409
+    assert changed_result.code == "IMPORT_IDEMPOTENCY_CONFLICT"
+
+    identical = await service_for(session_factory, storage).create(
+        actor,
+        original_command,
+        key,
+        request_id=uuid4(),
+    )
+    expected_children = len(original_command.attachments)
+    async with session_factory() as session:
+        jobs = list(await session.scalars(select(models.ImportJob)))
+        attachments = list(await session.scalars(select(models.ImportAttachment)))
+        files = list(await session.scalars(select(File)))
+        uploads = list(await session.scalars(select(Upload)))
+        lifecycles = list(await session.scalars(select(FileUploadLifecycle)))
+        audits = list(
+            await session.scalars(
+                select(AuditLog).where(AuditLog.action == "import.create")
+            )
+        )
+        claims = list(await session.scalars(select(models.ImportIdempotencyClaim)))
+    assert len(jobs) == len(audits) == 1 and jobs[0].id == identical.id
+    assert len(claims) == 1 and claims[0].idempotency_key == key
+    assert len(attachments) == len(identical.attachments) == expected_children
+    assert len(files) == len(uploads) == len(lifecycles) == expected_children
+    assert {row.file_id for row in attachments} == {row.id for row in files}
+    assert {row.upload_id for row in attachments} == {row.id for row in uploads}
+    assert {row.project_id for row in files} == {first_project.id}
+    assert {row.multipart_id for row in uploads} == set(storage.active)
+    assert storage.create_calls == expected_children
+
+
+@pytest.mark.asyncio
+async def test_distinct_keys_do_not_starve_two_connection_pool_at_child_boundary(
+    db_session: AsyncSession,
+    active_owner: Any,
+    session_factory: async_sessionmaker[AsyncSession],
+    postgres_database: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claiming two keys may not reserve both connections before child DB work."""
+    models, _schemas, _service = import_contract()
+    project, _device, actor = await seed_device_actor(
+        db_session,
+        active_owner,
+        name="Two connection distinct keys",
+    )
+    storage = InMemoryObjectStorage()
+    child_boundary = asyncio.Barrier(2)
+    original_start = FileService.start_import_upload
+
+    async def synchronize_child_db(
+        file_service: FileService,
+        child_actor: Actor,
+        child_command: Any,
+        child_key: str,
+    ) -> Upload:
+        await child_boundary.wait()
+        return await original_start(
+            file_service,
+            child_actor,
+            child_command,
+            child_key,
+        )
+
+    monkeypatch.setattr(FileService, "start_import_upload", synchronize_child_db)
+    limited_engine = create_async_engine(
+        postgres_database,
+        pool_size=2,
+        max_overflow=0,
+        pool_timeout=0.25,
+    )
+    limited_factory = async_sessionmaker(limited_engine, expire_on_commit=False)
+    try:
+        service = service_for(limited_factory, storage)
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                service.create(actor, command_for(project.id), "pool-distinct-a", request_id=uuid4()),
+                service.create(actor, command_for(project.id), "pool-distinct-b", request_id=uuid4()),
+                return_exceptions=True,
+            ),
+            timeout=5,
+        )
+        checked_out = limited_engine.pool.checkedout()
+    finally:
+        await limited_engine.dispose()
+
+    assert not [result for result in results if isinstance(result, BaseException)]
+    first, second = results
+    assert first.id != second.id
+    assert checked_out == 0
+    async with session_factory() as session:
+        counts = (
+            await session.scalar(select(func.count()).select_from(models.ImportJob)),
+            await session.scalar(select(func.count()).select_from(models.ImportAttachment)),
+            await session.scalar(select(func.count()).select_from(File)),
+            await session.scalar(select(func.count()).select_from(Upload)),
+            await session.scalar(select(func.count()).select_from(FileUploadLifecycle)),
+        )
+    assert counts == (2, 2, 2, 2, 2)
+    assert storage.create_calls == 2 and len(storage.active) == 2
+
+
+@pytest.mark.asyncio
+async def test_identical_same_key_waiter_does_not_starve_winners_child_connection(
+    db_session: AsyncSession,
+    active_owner: Any,
+    session_factory: async_sessionmaker[AsyncSession],
+    postgres_database: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A same-key waiter must not occupy the connection its winner needs for FileService."""
+    project, _device, actor = await seed_device_actor(
+        db_session,
+        active_owner,
+        name="Two connection same key",
+    )
+    command = command_for(project.id)
+    storage = InMemoryObjectStorage()
+    first_child = asyncio.Event()
+    second_child = asyncio.Event()
+    release_children = asyncio.Event()
+    child_calls = 0
+    original_start = FileService.start_import_upload
+
+    async def synchronize_same_key_children(
+        file_service: FileService,
+        child_actor: Actor,
+        child_command: Any,
+        child_key: str,
+    ) -> Upload:
+        nonlocal child_calls
+        child_calls += 1
+        if child_calls == 1:
+            first_child.set()
+            await release_children.wait()
+        else:
+            second_child.set()
+            release_children.set()
+        return await original_start(
+            file_service,
+            child_actor,
+            child_command,
+            child_key,
+        )
+
+    monkeypatch.setattr(
+        FileService,
+        "start_import_upload",
+        synchronize_same_key_children,
+    )
+    limited_engine = create_async_engine(
+        postgres_database,
+        pool_size=2,
+        max_overflow=0,
+        pool_timeout=0.25,
+    )
+    limited_factory = async_sessionmaker(limited_engine, expire_on_commit=False)
+    first_task: asyncio.Task[Any] | None = None
+    second_task: asyncio.Task[Any] | None = None
+    second_child_observer: asyncio.Task[bool] | None = None
+    old_lock_observer: asyncio.Task[None] | None = None
+    try:
+        service = service_for(limited_factory, storage)
+        first_task = asyncio.create_task(
+            service.create(actor, command, "pool-identical", request_id=uuid4())
+        )
+        await asyncio.wait_for(first_child.wait(), timeout=2)
+        second_task = asyncio.create_task(
+            service.create(actor, command, "pool-identical", request_id=uuid4())
+        )
+        old_lock_observer = asyncio.create_task(
+            wait_for_advisory_lock_contender(session_factory)
+        )
+        second_child_observer = asyncio.create_task(second_child.wait())
+        ready, _pending = await asyncio.wait(
+            {
+                second_child_observer,
+                old_lock_observer,
+            },
+            timeout=2,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        assert ready, "waiter reached neither durable replay nor the old advisory wait"
+        release_children.set()
+        results = await asyncio.wait_for(
+            asyncio.gather(first_task, second_task, return_exceptions=True),
+            timeout=5,
+        )
+        checked_out = limited_engine.pool.checkedout()
+    finally:
+        release_children.set()
+        for task in (
+            first_task,
+            second_task,
+            second_child_observer,
+            old_lock_observer,
+        ):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(
+                task
+                for task in (
+                    first_task,
+                    second_task,
+                    second_child_observer,
+                    old_lock_observer,
+                )
+                if task is not None
+            ),
+            return_exceptions=True,
+        )
+        await limited_engine.dispose()
+
+    assert not [result for result in results if isinstance(result, BaseException)]
+    first, second = results
+    assert first.id == second.id
+    assert returned_attachment_ids(first) == returned_attachment_ids(second)
+    assert checked_out == 0
+    assert storage.create_calls == 1 and len(storage.active) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_mode", ("cancel", "provider", "audit"))
+async def test_failed_create_releases_small_pool_and_lock_ownership_for_retry(
+    db_session: AsyncSession,
+    active_owner: Any,
+    session_factory: async_sessionmaker[AsyncSession],
+    postgres_database: str,
+    failure_mode: str,
+) -> None:
+    """Cancellation/provider/audit faults retain only durable reusable state, never resources."""
+    models, _schemas, _service = import_contract()
+
+    class FirstCreateFaultStorage(InMemoryObjectStorage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.provider_created = asyncio.Event()
+            self.release_provider = asyncio.Event()
+            self.faulted = False
+
+        async def create_multipart(self, object_key: str, content_type: str) -> str:
+            multipart_id = await super().create_multipart(object_key, content_type)
+            if not self.faulted:
+                self.faulted = True
+                self.provider_created.set()
+                if failure_mode == "cancel":
+                    await self.release_provider.wait()
+                elif failure_mode == "provider":
+                    raise RuntimeError("provider response failed")
+            return multipart_id
+
+    project, _device, actor = await seed_device_actor(
+        db_session,
+        active_owner,
+        name=f"Two connection fault {failure_mode}",
+    )
+    command = command_for(project.id)
+    storage = FirstCreateFaultStorage()
+    limited_engine = create_async_engine(
+        postgres_database,
+        pool_size=2,
+        max_overflow=0,
+        pool_timeout=0.25,
+    )
+    limited_factory = async_sessionmaker(limited_engine, expire_on_commit=False)
+    audit_listener_installed = False
+
+    def fail_success_audit(
+        _mapper: object,
+        _connection: object,
+        target: AuditLog,
+    ) -> None:
+        if target.action == "import.create":
+            raise RuntimeError("audit insert failed")
+
+    try:
+        service = service_for(limited_factory, storage)
+        if failure_mode == "audit":
+            event.listen(AuditLog, "before_insert", fail_success_audit)
+            audit_listener_installed = True
+        create_task = asyncio.create_task(
+            service.create(
+                actor,
+                command,
+                f"pool-fault-{failure_mode}",
+                request_id=uuid4(),
+            )
+        )
+        if failure_mode == "cancel":
+            await asyncio.wait_for(storage.provider_created.wait(), timeout=2)
+            create_task.cancel()
+            storage.release_provider.set()
+        first_result = (
+            await asyncio.wait_for(
+                asyncio.gather(create_task, return_exceptions=True),
+                timeout=5,
+            )
+        )[0]
+        if audit_listener_installed:
+            event.remove(AuditLog, "before_insert", fail_success_audit)
+            audit_listener_installed = False
+
+        assert limited_engine.pool.checkedout() == 0
+        assert await advisory_lock_count(session_factory) == 0
+        async with session_factory() as session:
+            claims_after_failure = await session.scalar(
+                select(func.count()).select_from(models.ImportIdempotencyClaim)
+            )
+        assert claims_after_failure == 1
+        if failure_mode == "cancel":
+            assert isinstance(first_result, asyncio.CancelledError)
+        elif failure_mode == "provider":
+            assert isinstance(first_result, DomainError)
+            assert first_result.code == "FILE_PROVISIONING_PENDING"
+        else:
+            assert isinstance(first_result, RuntimeError)
+            assert str(first_result) == "audit insert failed"
+
+        recovered = await service.create(
+            actor,
+            command,
+            f"pool-fault-{failure_mode}",
+            request_id=uuid4(),
+        )
+        assert limited_engine.pool.checkedout() == 0
+        assert await advisory_lock_count(session_factory) == 0
+    finally:
+        storage.release_provider.set()
+        if audit_listener_installed:
+            event.remove(AuditLog, "before_insert", fail_success_audit)
+        await limited_engine.dispose()
+
+    async with session_factory() as session:
+        counts = (
+            await session.scalar(select(func.count()).select_from(models.ImportJob)),
+            await session.scalar(select(func.count()).select_from(models.ImportAttachment)),
+            await session.scalar(select(func.count()).select_from(File)),
+            await session.scalar(select(func.count()).select_from(Upload)),
+            await session.scalar(select(func.count()).select_from(FileUploadLifecycle)),
+            await session.scalar(
+                select(func.count()).select_from(AuditLog).where(
+                    AuditLog.action == "import.create"
+                )
+            ),
+            await session.scalar(
+                select(func.count()).select_from(models.ImportIdempotencyClaim)
+            ),
+        )
+    assert recovered.id is not None
+    assert counts == (1, 1, 1, 1, 1, 1, 1)
+    assert storage.create_calls == 1 and len(storage.active) == 1
 
 
 @pytest.mark.asyncio
