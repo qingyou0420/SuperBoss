@@ -34,13 +34,23 @@ from .outbox import (
 app = typer.Typer(add_completion=False, no_args_is_help=True, pretty_exceptions_enable=False)
 
 
+def _safe_echo(message: object, *, err: bool = False) -> None:
+    try:
+        typer.echo(message, err=err)
+    except (OSError, UnicodeError) as error:
+        raise ConnectorError(2, OUTBOX_INVALID) from error
+
+
 def _command[**P, R](function: Callable[P, R]) -> Callable[P, R]:
     @wraps(function)
     def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
         try:
             return function(*args, **kwargs)
         except ConnectorError as error:
-            typer.echo(error.message, err=True)
+            try:
+                _safe_echo(error.message, err=True)
+            except ConnectorError:
+                pass
             raise typer.Exit(error.exit_code) from None
 
     return wrapped
@@ -64,7 +74,7 @@ def _print_result(result: SubmitResponse | EvidenceState) -> None:
     fields = [str(identifier), result.status]
     if result.result_code is not None:
         fields.append(result.result_code)
-    typer.echo(" ".join(fields))
+    _safe_echo(" ".join(fields))
 
 
 def _print_result_and_delete(
@@ -72,18 +82,29 @@ def _print_result_and_delete(
     store: OutboxStore,
     path: Path,
 ) -> None:
-    try:
-        _print_result(result)
-    except (OSError, UnicodeError) as error:
-        raise ConnectorError(2, OUTBOX_INVALID) from error
+    _print_result(result)
     store.delete(path)
 
 
 def _report_replacement() -> None:
-    try:
-        typer.echo("Device paired. Old operation abandoned; create a new manifest and UUID.")
-    except (OSError, UnicodeError) as error:
-        raise ConnectorError(2, OUTBOX_INVALID) from error
+    _safe_echo("Device paired. Old operation abandoned; create a new manifest and UUID.")
+
+
+def _refresh_fingerprint(value: str | None) -> str | None:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest() if value is not None else None
+
+
+def _credential_was_replaced(
+    old_credential_state: str,
+    old_refresh_sha256: str | None,
+    current_refresh: str | None,
+) -> bool:
+    current_fingerprint = _refresh_fingerprint(current_refresh)
+    return (old_credential_state == "MISSING" and current_refresh is not None) or (
+        old_credential_state == "PRESENT"
+        and current_refresh is not None
+        and current_fingerprint != old_refresh_sha256
+    )
 
 
 def _recover_replacement(
@@ -97,17 +118,10 @@ def _recover_replacement(
         return False
     old_outbox_path = store.marker_outbox_path(marker)
     current_refresh = credentials.load_refresh_optional()
-    current_fingerprint = (
-        hashlib.sha256(current_refresh.encode("utf-8")).hexdigest()
-        if current_refresh is not None
-        else None
-    )
-    replacement_is_durable = (
-        marker.old_credential_state == "MISSING" and current_refresh is not None
-    ) or (
-        marker.old_credential_state == "PRESENT"
-        and current_refresh is not None
-        and current_fingerprint != marker.old_refresh_sha256
+    replacement_is_durable = _credential_was_replaced(
+        marker.old_credential_state,
+        marker.old_refresh_sha256,
+        current_refresh,
     )
     if replacement_is_durable and old_outbox_path.exists():
         store.delete(old_outbox_path)
@@ -115,6 +129,21 @@ def _recover_replacement(
         return True
     store.delete_replacement_marker()
     return replacement_is_durable
+
+
+def _recover_initial_pair(store: OutboxStore, credentials: CredentialStore) -> bool:
+    marker = store.load_pair_completion_marker()
+    if marker is None:
+        return False
+    current_refresh = credentials.load_refresh_optional()
+    if _credential_was_replaced(
+        marker.old_credential_state,
+        marker.old_refresh_sha256,
+        current_refresh,
+    ):
+        return True
+    store.delete_pair_completion_marker()
+    return False
 
 
 def _prepared_for_retry(entry: OutboxEntry) -> PreparedManifest:
@@ -311,6 +340,10 @@ def pair(
             _report_replacement()
             store.delete_replacement_marker()
             return
+        if _recover_initial_pair(store, credentials):
+            _safe_echo("Device paired.")
+            store.delete_pair_completion_marker()
+            return
         existing = store.load_optional()
         if existing is not None and existing[1].phase == Phase.EVIDENCE:
             raise ConnectorError(2, OUTBOX_CONFLICT)
@@ -324,6 +357,11 @@ def pair(
                 ),
                 old_outbox_path=existing[0],
             )
+        else:
+            old_refresh = credentials.load_refresh_optional()
+            store.save_pair_completion_marker(
+                old_refresh_sha256=_refresh_fingerprint(old_refresh),
+            )
         with ApiClient(origin) as client:
             client.pair(code, name, credentials)
         if existing is not None:
@@ -331,7 +369,8 @@ def pair(
             _report_replacement()
             store.delete_replacement_marker()
         else:
-            typer.echo("Device paired.")
+            _safe_echo("Device paired.")
+            store.delete_pair_completion_marker()
 
 
 @app.command("submit")
@@ -379,7 +418,7 @@ def status(
         fields = [str(result.id), result.status]
         if result.result_code is not None:
             fields.append(result.result_code)
-        typer.echo(" ".join(fields))
+        _safe_echo(" ".join(fields))
 
 
 @app.command("retry")

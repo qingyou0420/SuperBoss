@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Windows-safe transport for Kimi result packages"
 requires-python = ">=3.13,<3.14"
 dependencies = [
+    "httpcore>=1,<2",
     "httpx>=0.28,<1",
     "keyring>=25,<26",
     "platformdirs>=4,<5",

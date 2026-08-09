@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import queue
 import re
 import socket
+import threading
 from datetime import datetime
 from typing import Annotated, Any, Literal, Self
 from urllib.parse import urlsplit
@@ -24,12 +26,14 @@ from pydantic import (
 from .config import (
     ETAG_MAX_CHARS,
     HTTP_TIMEOUT_SECONDS,
+    RESOLVER_TIMEOUT_SECONDS,
     RESPONSE_MAX_BYTES,
     TOKEN_MAX_CHARS,
 )
 from .credentials import CredentialStore
 from .errors import CREDENTIAL_ERROR, SERVER_REJECTED, TEMPORARY_FAILURE, ConnectorError
 from .manifest import AttachmentKind, K3Result, ServerManifest, server_payload
+from .pinned import PinnedHTTPTransport
 
 _STRICT = ConfigDict(extra="forbid", hide_input_in_errors=True)
 ResultCode = Annotated[str, Field(pattern=r"^[A-Z][A-Z0-9_]{0,63}$")]
@@ -182,15 +186,9 @@ class ApiClient:
             timeout=httpx.Timeout(HTTP_TIMEOUT_SECONDS),
             headers={"Accept-Encoding": "identity"},
         )
-        self._upload_client = httpx.Client(
-            follow_redirects=False,
-            trust_env=False,
-            timeout=httpx.Timeout(HTTP_TIMEOUT_SECONDS),
-        )
 
     def close(self) -> None:
         self._client.close()
-        self._upload_client.close()
 
     def __enter__(self) -> Self:
         return self
@@ -342,20 +340,70 @@ class ApiClient:
         return parsed.url
 
     @staticmethod
-    def _validate_upload_destination(url: str) -> None:
+    def _resolve_upload_host(host: str, port: int) -> list[tuple[Any, ...]]:
+        outcomes: queue.Queue[list[tuple[Any, ...]] | Exception] = queue.Queue(maxsize=1)
+
+        def resolve() -> None:
+            try:
+                records = socket.getaddrinfo(
+                    host,
+                    port,
+                    family=socket.AF_UNSPEC,
+                    type=socket.SOCK_STREAM,
+                    proto=socket.IPPROTO_TCP,
+                )
+                outcomes.put(records)
+            except Exception as error:  # noqa: BLE001 - crossed through a bounded thread boundary
+                outcomes.put(error)
+
+        thread = threading.Thread(
+            target=resolve,
+            name="superboss-presigned-resolver",
+            daemon=True,
+        )
+        thread.start()
+        thread.join(timeout=RESOLVER_TIMEOUT_SECONDS)
+        if thread.is_alive():
+            raise ConnectorError(6, TEMPORARY_FAILURE)
+        try:
+            outcome = outcomes.get_nowait()
+        except queue.Empty as error:
+            raise ConnectorError(6, TEMPORARY_FAILURE) from error
+        if isinstance(outcome, Exception):
+            raise ConnectorError(6, TEMPORARY_FAILURE) from outcome
+        return outcome
+
+    @classmethod
+    def _validate_upload_destination(
+        cls,
+        url: str,
+    ) -> tuple[str, tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...]]:
         try:
             parsed = urlsplit(url)
             host = parsed.hostname
             port = parsed.port or 443
-            if host is None or host.lower() == "localhost":
+            if (
+                parsed.scheme != "https"
+                or host is None
+                or host.lower() == "localhost"
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.fragment
+            ):
                 raise ValueError("unsafe destination")
             try:
                 addresses = [ipaddress.ip_address(host)]
             except ValueError:
                 if re.fullmatch(r"[0-9.]+", host) is not None:
                     raise ValueError("noncanonical numeric destination")
-                records = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+                try:
+                    ascii_host = host.encode("idna").decode("ascii").lower()
+                except UnicodeError as error:
+                    raise ValueError("unsafe destination") from error
+                records = cls._resolve_upload_host(ascii_host, port)
                 addresses = [ipaddress.ip_address(record[4][0]) for record in records]
+                host = ascii_host
+            addresses = list(dict.fromkeys(addresses))
             if not addresses or any(
                 not address.is_global
                 or address.is_loopback
@@ -373,12 +421,21 @@ class ApiClient:
             raise ConnectorError(6, TEMPORARY_FAILURE) from error
         except (TypeError, ValueError) as error:
             raise ConnectorError(5, SERVER_REJECTED) from error
+        return host, tuple(addresses)
 
     def put_part(self, url: str, content: bytes) -> str:
-        self._validate_upload_destination(url)
-        self._upload_client.cookies.clear()
+        host, addresses = self._validate_upload_destination(url)
         try:
-            with self._upload_client.stream("PUT", url, content=content) as response:
+            transport = PinnedHTTPTransport(host, addresses)
+            with (
+                httpx.Client(
+                    follow_redirects=False,
+                    trust_env=False,
+                    timeout=httpx.Timeout(HTTP_TIMEOUT_SECONDS),
+                    transport=transport,
+                ) as upload_client,
+                upload_client.stream("PUT", url, content=content) as response,
+            ):
                 if response.status_code == 429 or response.status_code >= 500:
                     raise ConnectorError(6, TEMPORARY_FAILURE)
                 if not 200 <= response.status_code < 300:

@@ -56,6 +56,19 @@ def _marker_document(
     return markers[0], document
 
 
+def _initial_pair_marker_document(state_dir: Path) -> dict[str, Any]:
+    markers = list(state_dir.rglob("pair-completion.marker"))
+    assert len(markers) == 1
+    document = json.loads(markers[0].read_text(encoding="utf-8"))
+    serialized = markers[0].read_text(encoding="utf-8").lower()
+    for secret in ("initial-code", "initial-access", "initial-refresh"):
+        assert secret not in serialized
+    assert document["normalized_origin"] == ORIGIN
+    assert document["old_credential_state"] == "MISSING"
+    assert document["old_refresh_sha256"] is None
+    return document
+
+
 def _install_old_submit(
     *,
     tmp_path: Path,
@@ -129,6 +142,158 @@ def _configure_new_submit(
         idempotency_key=f"kimi-{uuid4()}",
     )
     return manifest
+
+
+@pytest.mark.parametrize("output_error", [BrokenPipeError, OSError])
+def test_initial_pair_output_failure_is_durable_and_replays_without_remote_pair(
+    output_error: type[OSError],
+    runner: CliRunner,
+    capsys: pytest.CaptureFixture[str],
+    memory_keyring: MemoryKeyring,
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    respx_mock: respx.MockRouter,
+) -> None:
+    app = load_app(monkeypatch, state_dir)
+    cli_module = importlib.import_module("superboss_connector.cli")
+    pair_route = respx_mock.post(f"{ORIGIN}/api/v1/device-auth/pair").mock(
+        return_value=httpx.Response(
+            200,
+            json=token_payload(access="initial-access", refresh="initial-refresh"),
+        )
+    )
+    real_echo = cli_module.typer.echo
+    failed_once = False
+
+    def fail_success_once(message: object = None, **kwargs: object) -> None:
+        nonlocal failed_once
+        if not failed_once and str(message) == "Device paired.":
+            failed_once = True
+            raise output_error("initial-output-private-detail")
+        real_echo(message, **kwargs)
+
+    monkeypatch.setattr(cli_module.typer, "echo", fail_success_once)
+    arguments = [
+        "pair",
+        "--server",
+        ORIGIN,
+        "--code",
+        "initial-code",
+        "--name",
+        "Initial-PC",
+    ]
+
+    with pytest.raises(typer.Exit) as interrupted:
+        cli_module.pair(
+            server=ORIGIN,
+            code="initial-code",
+            name="Initial-PC",
+        )
+
+    assert interrupted.value.exit_code == 2
+    assert failed_once
+    assert pair_route.call_count == 1
+    assert memory_keyring.values[(SERVICE, USERNAME)] == "initial-refresh"
+    _initial_pair_marker_document(state_dir)
+    captured_output = capsys.readouterr()
+    combined = f"{captured_output.out}\n{captured_output.err}"
+    for secret in (
+        "initial-output-private-detail",
+        "initial-code",
+        "initial-access",
+        "initial-refresh",
+        "Traceback",
+        "Another operation is active",
+    ):
+        assert secret not in combined
+
+    recovered = runner.invoke(app, arguments)
+
+    assert recovered.exit_code == 0
+    assert pair_route.call_count == 1
+    assert "Device paired." in recovered.stdout
+    assert not list(state_dir.rglob("pair-completion.marker"))
+
+
+@pytest.mark.parametrize("output_error", [BrokenPipeError, OSError])
+def test_status_output_failure_is_stable_2_and_secret_safe(
+    output_error: type[OSError],
+    capsys: pytest.CaptureFixture[str],
+    memory_keyring: MemoryKeyring,
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    respx_mock: respx.MockRouter,
+) -> None:
+    load_app(monkeypatch, state_dir)
+    cli_module = importlib.import_module("superboss_connector.cli")
+    job_id = uuid4()
+    memory_keyring.values[(SERVICE, USERNAME)] = "status-output-refresh"
+    respx_mock.post(f"{ORIGIN}/api/v1/device-auth/refresh").mock(
+        return_value=httpx.Response(
+            200,
+            json=token_payload(
+                access="status-output-access",
+                refresh="status-output-rotated",
+            ),
+        )
+    )
+    response = job_payload(
+        {
+            "project_id": str(uuid4()),
+            "local_task_id": "status-output",
+            "external_document_reference": None,
+            "base_sha256": None,
+            "k3_result": {
+                "model_label": "K3",
+                "processed_at": "2026-08-10T09:54:00Z",
+                "modification_details": [],
+                "knowledge_points": [],
+                "risks": [],
+                "suggested_title": None,
+                "suggested_tags": [],
+            },
+        },
+        job_id=job_id,
+        attachment_id=uuid4(),
+        file_id=uuid4(),
+        upload_id=uuid4(),
+        status="SCANNING",
+    )
+    status_route = respx_mock.get(f"{ORIGIN}/api/v1/device/import-jobs/{job_id}").mock(
+        return_value=httpx.Response(200, json=response)
+    )
+    real_echo = cli_module.typer.echo
+    failed_once = False
+
+    def fail_status_once(message: object = None, **kwargs: object) -> None:
+        nonlocal failed_once
+        if not failed_once and str(message).startswith(str(job_id)):
+            failed_once = True
+            raise output_error("status-output-private-detail")
+        real_echo(message, **kwargs)
+
+    monkeypatch.setattr(cli_module.typer, "echo", fail_status_once)
+
+    with pytest.raises(typer.Exit) as result:
+        cli_module.status(server=ORIGIN, job_id=job_id)
+
+    assert result.value.exit_code == 2
+    assert failed_once
+    assert status_route.call_count == 1
+    assert memory_keyring.values[(SERVICE, USERNAME)] == "status-output-rotated"
+    assert not list(state_dir.rglob("*.marker"))
+    assert not list(state_dir.rglob("*.json"))
+    captured_output = capsys.readouterr()
+    combined = f"{captured_output.out}\n{captured_output.err}"
+    for secret in (
+        "status-output-private-detail",
+        "status-output-access",
+        "status-output-refresh",
+        "status-output-rotated",
+        "Traceback",
+        "Another operation is active",
+    ):
+        assert secret not in combined
 
 
 def test_successful_repair_abandons_old_job_and_new_key_can_reach_create(

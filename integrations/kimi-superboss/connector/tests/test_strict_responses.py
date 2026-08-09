@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import socket
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,6 +23,10 @@ from conftest import (
     write_manifest,
 )
 from typer.testing import CliRunner
+
+from superboss_connector.client import ApiClient
+from superboss_connector.errors import ConnectorError
+from superboss_connector.outbox import OutboxStore
 
 
 @dataclass
@@ -634,3 +640,131 @@ def test_presigned_dns_failure_is_temporary_and_does_not_leak_host(
     combined = f"{result.stdout}\n{result.stderr}"
     assert "resolver-private-name" not in combined
     assert "resolver-private-detail" not in combined
+
+
+def test_presigned_transport_never_re_resolves_validated_host_to_private_socket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.settimeout(4.0)
+    port = int(listener.getsockname()[1])
+    private_accepted = threading.Event()
+    received = bytearray()
+
+    def private_listener() -> None:
+        try:
+            connection, _address = listener.accept()
+        except OSError:
+            return
+        with connection:
+            private_accepted.set()
+            connection.settimeout(1.0)
+            try:
+                received.extend(connection.recv(65_536))
+            except OSError:
+                pass
+
+    thread = threading.Thread(target=private_listener, daemon=True)
+    thread.start()
+    resolution_calls = 0
+
+    def rebinding_resolution(
+        _host: str,
+        requested_port: int,
+        *_args: object,
+        **_kwargs: object,
+    ) -> list[tuple[int, int, int, str, tuple[str, int]]]:
+        nonlocal resolution_calls
+        resolution_calls += 1
+        address = "93.184.216.34" if resolution_calls == 1 else "127.0.0.1"
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                (address, requested_port),
+            )
+        ]
+
+    real_connect = socket.socket.connect
+
+    def guarded_connect(sock: socket.socket, address: tuple[Any, ...]) -> None:
+        if str(address[0]) == "93.184.216.34":
+            raise ConnectionRefusedError("blocked-external-probe")
+        real_connect(sock, address)
+
+    monkeypatch.setattr(socket, "getaddrinfo", rebinding_resolution)
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
+    approved_body = b"approved-body-must-not-reach-private"
+
+    try:
+        with ApiClient(ORIGIN) as client, pytest.raises(ConnectorError) as captured:
+            client.put_part(
+                f"https://rebind-storage.example:{port}/upload",
+                approved_body,
+            )
+    finally:
+        listener.close()
+        thread.join(timeout=1.0)
+
+    assert captured.value.exit_code == 6
+    assert resolution_calls == 1
+    assert not private_accepted.is_set()
+    assert approved_body not in received
+    assert "rebind-storage" not in captured.value.message
+    assert "blocked-external-probe" not in captured.value.message
+
+
+def test_presigned_resolver_stall_is_bounded_and_releases_origin_lock(
+    tmp_path: Path,
+    runner: CliRunner,
+    memory_keyring: MemoryKeyring,
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    respx_mock: respx.MockRouter,
+) -> None:
+    app = load_app(monkeypatch, state_dir)
+    flow = _single_part_flow(
+        tmp_path / "dns-stall",
+        memory_keyring,
+        respx_mock,
+        put_response=httpx.Response(200, headers={"ETag": "unused"}),
+    )
+    url = "https://stalled-resolver-private.example/upload"
+    flow.part_route.mock(return_value=httpx.Response(200, json={"url": url}))
+    destination = respx_mock.put(url).mock(
+        return_value=httpx.Response(200, headers={"ETag": "must-not-leave"})
+    )
+    resolver_started = threading.Event()
+    release_resolver = threading.Event()
+
+    def stalled_resolution(*_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
+        resolver_started.set()
+        release_resolver.wait(timeout=6.0)
+        raise socket.gaierror("resolver-stall-private-detail")
+
+    monkeypatch.setattr(socket, "getaddrinfo", stalled_resolution)
+    started = time.monotonic()
+    try:
+        result = runner.invoke(
+            app,
+            ["submit", "--server", ORIGIN, "--manifest", str(flow.manifest)],
+        )
+        elapsed = time.monotonic() - started
+    finally:
+        release_resolver.set()
+
+    assert resolver_started.is_set()
+    assert result.exit_code == 6
+    assert elapsed < 3.5
+    assert destination.call_count == 0
+    assert not flow.complete_route.called and not flow.submit_route.called
+    combined = f"{result.stdout}\n{result.stderr}"
+    assert "stalled-resolver-private" not in combined
+    assert "resolver-stall-private-detail" not in combined
+    with OutboxStore(ORIGIN).lock():
+        pass

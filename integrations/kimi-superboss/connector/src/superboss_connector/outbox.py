@@ -232,6 +232,28 @@ class ReplacementMarker(BaseModel):
         return self
 
 
+class PairCompletionMarker(BaseModel):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    version: Literal[1] = 1
+    normalized_origin: Annotated[str, Field(min_length=1, max_length=4_096)]
+    old_credential_state: Literal["PRESENT", "MISSING"]
+    old_refresh_sha256: str | None
+
+    @field_validator("old_refresh_sha256")
+    @classmethod
+    def safe_digest(cls, value: str | None) -> str | None:
+        if value is not None and re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise ValueError("invalid credential fingerprint")
+        return value
+
+    @model_validator(mode="after")
+    def consistent_credential_state(self) -> Self:
+        if (self.old_credential_state == "PRESENT") != (self.old_refresh_sha256 is not None):
+            raise ValueError("invalid credential state")
+        return self
+
+
 def initial_entry(origin: str, manifest: PreparedManifest) -> OutboxEntry:
     return OutboxEntry(
         normalized_origin=origin,
@@ -264,6 +286,7 @@ class OutboxStore:
         self.origin_dir = self.root / origin_hash
         self.lock_path = self.origin_dir / "operation.lock"
         self.marker_path = self.origin_dir / "replacement.marker"
+        self.pair_completion_path = self.origin_dir / "pair-completion.marker"
 
     @contextmanager
     def lock(self) -> Iterator[None]:
@@ -413,6 +436,39 @@ class OutboxStore:
 
     def delete_replacement_marker(self) -> None:
         self.delete(self.marker_path)
+
+    def save_pair_completion_marker(self, *, old_refresh_sha256: str | None) -> None:
+        try:
+            marker = PairCompletionMarker(
+                normalized_origin=self.origin,
+                old_credential_state=("PRESENT" if old_refresh_sha256 is not None else "MISSING"),
+                old_refresh_sha256=old_refresh_sha256,
+            )
+            serialized = json.dumps(
+                marker.model_dump(mode="json"),
+                ensure_ascii=True,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (ValidationError, ValueError) as error:
+            raise ConnectorError(2, OUTBOX_INVALID) from error
+        self._atomic_write(self.pair_completion_path, serialized)
+
+    def load_pair_completion_marker(self) -> PairCompletionMarker | None:
+        if not self.pair_completion_path.exists():
+            return None
+        try:
+            raw = self._read_json(self.pair_completion_path)
+            marker = PairCompletionMarker.model_validate(raw)
+        except ValidationError as error:
+            raise ConnectorError(2, OUTBOX_INVALID) from error
+        if marker.normalized_origin != self.origin:
+            raise ConnectorError(2, OUTBOX_INVALID)
+        return marker
+
+    def delete_pair_completion_marker(self) -> None:
+        self.delete(self.pair_completion_path)
 
     def load_optional(self) -> tuple[Path, OutboxEntry] | None:
         documents = self._all_documents()

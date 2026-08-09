@@ -638,6 +638,7 @@ name = "superboss-kimi-connector"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "httpcore" },
     { name = "httpx" },
     { name = "keyring" },
     { name = "platformdirs" },
@@ -659,6 +660,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "httpcore", specifier = ">=1,<2" },
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "keyring", specifier = ">=25,<26" },
     { name = "platformdirs", specifier = ">=4,<5" },
