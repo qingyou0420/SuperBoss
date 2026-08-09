@@ -1264,12 +1264,22 @@ Expected: FAIL because whitelist services and routes do not exist.
 - [ ] **Step 4: Write the failing OWNER users-page test**
 
 ```ts
-test('creates a STAFF whitelist account without a role selector', async () => {
-  render(UsersPage)
+test('creates and displays a STAFF whitelist account without a role selector', async () => {
+  server.use(
+    http.post('/api/v1/owner/users', async ({ request }) => {
+      const body = await request.json()
+      return HttpResponse.json(
+        { id: 'staff-1', role: 'STAFF', status: 'ACTIVE', ...body },
+        { status: 201 },
+      )
+    }),
+  )
+  renderUsersPageWithRealApiClient()
   expect(screen.queryByLabelText('角色')).not.toBeInTheDocument()
   await userEvent.type(screen.getByLabelText('企业微信 UserID'), 'staff-acceptance')
   await userEvent.click(screen.getByRole('button', { name: '添加员工' }))
-  expect(mockCreateStaff).toHaveBeenCalledWith(expect.objectContaining({ wecom_userid: 'staff-acceptance' }))
+  expect(await screen.findByText('staff-acceptance')).toBeInTheDocument()
+  expect(screen.getByText('STAFF')).toBeInTheDocument()
 })
 ```
 
