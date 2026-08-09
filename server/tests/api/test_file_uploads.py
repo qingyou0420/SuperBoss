@@ -69,6 +69,16 @@ def test_anonymous_start_uses_authentication_error_before_csrf(file_client) -> N
     response = client.post("/api/v1/files/uploads", json={"project_id": "00000000-0000-0000-0000-000000000001", "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers={"Idempotency-Key": "anonymous"})
     assert response.status_code == 401 and response.json()["error"]["code"] == "AUTHENTICATION_REQUIRED"
     assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and storage.active == {}
+
+
+@pytest.mark.parametrize("csrf", [None, "wrong"])
+def test_browser_start_requires_valid_csrf(file_client, csrf: str | None) -> None:
+    client, storage = file_client
+    _login(client)
+    headers = {"Idempotency-Key": "csrf"}
+    if csrf is not None: headers["X-CSRF-Token"] = csrf
+    response = client.post("/api/v1/files/uploads", json={"project_id": "00000000-0000-0000-0000-000000000001", "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers)
+    assert response.status_code == 403 and response.json()["error"]["code"] == "CSRF_VALIDATION_FAILED" and storage.active == {}
 from pydantic import ValidationError
 
 
