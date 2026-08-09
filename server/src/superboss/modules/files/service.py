@@ -112,7 +112,7 @@ class FileService:
             try:
                 await self._storage().abort_multipart(key, multipart_id)
             except Exception:  # noqa: BLE001 -- preserve canonical database outcome
-                pass
+                file.scan_result = "orphaned_multipart"
             winner = await self.session.scalar(
                 select(Upload).where(
                     Upload.project_id == command.project_id,

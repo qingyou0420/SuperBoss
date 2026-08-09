@@ -318,8 +318,10 @@ async def test_download_rejects_unsupported_actor_shapes(db_session, active_owne
 @pytest.mark.asyncio
 async def test_concurrent_same_metadata_reuses_winner_and_aborts_loser(db_session, active_owner) -> None:
     import asyncio
+
     from sqlalchemy import func, select
     from sqlalchemy.ext.asyncio import async_sessionmaker
+
     from superboss.modules.files.models import File, Upload
     from superboss.modules.files.schemas import UploadStart
     from superboss.modules.files.service import FileService
