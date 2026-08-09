@@ -1,8 +1,10 @@
 """Audit behavior exposed through real project HTTP requests."""
 
+import asyncio
 from collections.abc import AsyncIterator
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 import pytest_asyncio
 from fastapi import Depends, Request
@@ -17,12 +19,15 @@ from superboss.modules.audit.models import AuditLog
 from superboss.modules.audit.schemas import AuditEventInput
 from superboss.modules.audit.service import AuditService
 from superboss.modules.auth.models import AuthSession, OAuthState
+from superboss.modules.auth.repository import AuthRepository
+from superboss.modules.auth.service import AuthService
 from superboss.modules.projects.models import Project, ProjectMember
 from superboss.modules.projects.repository import ProjectRepository
 from superboss.modules.projects.router import get_service, get_session
 from superboss.modules.projects.schemas import ProjectCreate
 from superboss.modules.projects.service import ProjectService
 from superboss.modules.users.models import Role, User, UserStatus
+from superboss.modules.users.repository import UserRepository
 
 
 @pytest_asyncio.fixture
@@ -262,3 +267,68 @@ async def test_audit_write_failure_is_not_returned_as_project_success(
         assert not list((await db_session.scalars(select(AuditLog).where(AuditLog.request_id == request_id))).all())
     finally:
         app.dependency_overrides.pop(get_service, None)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_request_ids_keep_audit_actors_isolated(
+    db_session: AsyncSession, test_settings: Settings
+) -> None:
+    """Concurrent clients must never exchange request IDs or actor identities in durable audit rows."""
+    owner = User(wecom_userid="owner-1", display_name="Owner", role=Role.OWNER, status=UserStatus.ACTIVE)
+    staff = User(wecom_userid="staff-1", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
+    db_session.add_all([owner, staff, Project(name="Assigned")])
+    await db_session.flush()
+    assigned = await db_session.scalar(select(Project).where(Project.name == "Assigned"))
+    assert assigned is not None
+    db_session.add(ProjectMember(project_id=assigned.id, user_id=staff.id))
+    service = AuthService(
+        db_session, AuthRepository(db_session), UserRepository(db_session), None, test_settings
+    )
+    tokens: list[tuple[UUID, str, UUID, str]] = []
+    for index in range(10):
+        user = owner if index % 2 == 0 else staff
+        pair = await service.issue_session(user)
+        tokens.append((UUID(f"00000000-0000-4000-8000-{index + 1:012d}"), pair.access_token, user.id, user.role.value))
+    await db_session.commit()
+    app = create_app(test_settings)
+    ready = 0
+    ready_lock = asyncio.Lock()
+    start = asyncio.Event()
+
+    async def request_one(request_id: UUID, token: str, actor_id: UUID, role: str) -> tuple[UUID, UUID, str, httpx.Response]:
+        nonlocal ready
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="https://testserver", cookies={"access_token": token}
+        ) as async_client:
+            async with ready_lock:
+                ready += 1
+                if ready == len(tokens):
+                    start.set()
+            await start.wait()
+            response = await async_client.get("/api/v1/projects", headers={"X-Request-ID": str(request_id)})
+            return request_id, actor_id, role, response
+
+    try:
+        results = await asyncio.gather(*(request_one(*item) for item in tokens))
+        for request_id, actor_id, role, response in results:
+            assert response.status_code == 200
+            assert response.headers["X-Request-ID"] == str(request_id)
+            events = list((await db_session.scalars(select(AuditLog).where(AuditLog.request_id == request_id))).all())
+            assert len(events) == 1
+            event = events[0]
+            assert (event.actor_kind, event.actor_id, event.action, event.outcome) == (
+                "user", actor_id, "project.list", "SUCCESS"
+            )
+            assert event.object_id is None and event.project_id is None
+            assert event.metadata_json["actor_role"] == role
+    finally:
+        await db_session.rollback()
+        await db_session.execute(delete(AuditLog))
+        await db_session.execute(delete(ProjectMember))
+        await db_session.execute(delete(Project))
+        await db_session.execute(delete(AuthSession))
+        await db_session.execute(delete(User))
+        await db_session.commit()
+        assert await db_session.scalar(select(AuditLog)) is None
+        assert await db_session.scalar(select(Project)) is None
+        assert await db_session.scalar(select(User)) is None
