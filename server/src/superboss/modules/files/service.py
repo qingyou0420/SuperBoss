@@ -299,16 +299,21 @@ class FileService:
     async def complete_upload(
         self, actor: Actor, upload_id: UUID, parts: list[CompletedPart], request_id: UUID | None = None
     ) -> File:
+        upload = await self.session.get(Upload, upload_id)
+        if upload is None:
+            raise FileUploadNotFoundError()
+        file = await self.session.scalar(
+            select(File).where(File.id == upload.file_id).with_for_update()
+        )
+        if file is not None and file.project_id != upload.project_id:
+            raise FileUploadProjectMismatchError()
+        if file is None:
+            raise FileUploadNotActiveError()
         upload = await self.session.scalar(
             select(Upload).where(Upload.id == upload_id).with_for_update()
         )
         if upload is None:
             raise FileUploadNotFoundError()
-        file = await self.session.get(File, upload.file_id)
-        if file is not None and file.project_id != upload.project_id:
-            raise FileUploadProjectMismatchError()
-        if file is None:
-            raise FileUploadNotActiveError()
         lifecycle = await self.session.scalar(
             select(FileUploadLifecycle)
             .where(FileUploadLifecycle.upload_id == upload_id)

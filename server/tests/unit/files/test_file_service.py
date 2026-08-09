@@ -1010,6 +1010,7 @@ async def test_database_file_delete_snapshots_cleanup_before_cascade(db_session,
     await db_session.delete(file)
     await db_session.commit()
     db_session.expire_all()
+    db_session.expire_all()
 
     jobs = list(await db_session.scalars(select(FileStorageCleanup).order_by(FileStorageCleanup.operation)))
     assert [job.operation for job in jobs] == ["ABORT_MULTIPART", "DELETE_OBJECT"]
@@ -1121,3 +1122,66 @@ async def test_file_delete_rollback_leaves_no_cleanup_snapshot(db_session, activ
     assert await db_session.get(Upload, upload_id) is not None
     assert list(await db_session.scalars(select(FileStorageCleanup))) == []
     assert storage.active
+
+
+@pytest.mark.asyncio
+async def test_cancel_requested_lifecycle_never_provisions_or_completes(db_session, active_owner) -> None:
+    """A retained legacy cancellation record is fail-closed at every lifecycle entry point."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from superboss.core.errors import DomainError
+    from superboss.modules.files.models import FileUploadLifecycle
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileLifecycleService, FileService
+    from superboss.modules.files.storage import CompletedPart
+
+    project = Project(name="Cancelled lifecycle")
+    db_session.add(project)
+    await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    storage = InMemoryObjectStorage()
+    upload = await FileService(db_session, storage).start_upload(
+        actor,
+        UploadStart(project_id=project.id, filename="cancelled.pdf", category="docs", file_date="2026-08-09", size_bytes=1, sha256="0" * 64),
+        "cancelled",
+    )
+    lifecycle = await db_session.get(FileUploadLifecycle, upload.id)
+    assert lifecycle is not None
+    lifecycle.provision_state = "CANCEL_REQUESTED"
+    await db_session.commit()
+    with pytest.raises(DomainError):
+        await FileService(db_session, storage).complete_upload(actor, upload.id, [CompletedPart(1, "etag")])
+    assert storage.completed == {}
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    assert await FileLifecycleService(factory, storage).reconcile() == 0
+    assert storage.completed == {}
+
+
+@pytest.mark.asyncio
+async def test_delete_winner_blocks_later_completion_from_touching_storage(db_session, active_owner) -> None:
+    """Once deletion commits, a stale complete request cannot resurrect an object."""
+    from superboss.core.errors import NotFoundError
+    from superboss.modules.files.models import File
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileService
+    from superboss.modules.files.storage import CompletedPart
+
+    project = Project(name="Delete winner")
+    db_session.add(project)
+    await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    storage = InMemoryObjectStorage()
+    upload = await FileService(db_session, storage).start_upload(
+        actor,
+        UploadStart(project_id=project.id, filename="winner.pdf", category="docs", file_date="2026-08-09", size_bytes=1, sha256="0" * 64),
+        "delete-winner",
+    )
+    file = await db_session.get(File, upload.file_id)
+    assert file is not None
+    upload_id = upload.id
+    await db_session.delete(file)
+    await db_session.commit()
+    db_session.expire_all()
+    with pytest.raises(NotFoundError):
+        await FileService(db_session, storage).complete_upload(actor, upload_id, [CompletedPart(1, "etag")])
+    assert storage.completed == {} and storage.objects == {}
