@@ -170,7 +170,20 @@ def test_invalid_header_only_bearer_uses_safe_401_error_contract(api_client: Tes
 def test_project_creation_requires_browser_csrf(api_client: TestClient) -> None:
     """Bypassing the existing browser-CSRF boundary enables cookie-authenticated writes."""
     _login(api_client, "owner-code")
-    assert api_client.post("/api/v1/projects", json={"name": "No CSRF"}).status_code == 403
+    _assert_error(
+        api_client.post("/api/v1/projects", json={"name": "No CSRF"}),
+        403,
+        "CSRF_VALIDATION_FAILED",
+        "CSRF validation failed",
+    )
+    _assert_error(
+        api_client.post(
+            "/api/v1/projects", json={"name": "Wrong CSRF"}, headers={"X-CSRF-Token": "wrong"}
+        ),
+        403,
+        "CSRF_VALIDATION_FAILED",
+        "CSRF validation failed",
+    )
 
 
 @pytest.mark.parametrize("request_id", ["a", "x" * 128])
@@ -214,6 +227,21 @@ def test_project_name_is_canonical_and_bounded(
         "/api/v1/projects", json={"name": name}, headers=_csrf_headers(api_client)
     )
     assert response.status_code == status
+
+
+@pytest.mark.parametrize("edge", [" ", "\t", "\r", "\n", "\u00a0"])
+def test_http_normalizes_every_supported_edge_whitespace(api_client: TestClient, edge: str) -> None:
+    """API and database must agree on every configured edge-whitespace character."""
+    _login(api_client, "owner-code")
+    response = api_client.post(
+        "/api/v1/projects", json={"name": f"{edge}Unicode项目{edge}"}, headers=_csrf_headers(api_client)
+    )
+    assert response.status_code == 201
+    assert response.json()["name"] == "Unicode项目"
+    rejected = api_client.post(
+        "/api/v1/projects", json={"name": edge * 2}, headers=_csrf_headers(api_client)
+    )
+    _assert_error(rejected, 422, "VALIDATION_ERROR", "Request validation failed")
 
 
 def test_project_name_trims_and_rejects_case_insensitive_aliases(api_client: TestClient) -> None:

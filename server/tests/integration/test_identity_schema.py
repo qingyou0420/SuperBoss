@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.schema import CreateIndex
 
 from superboss.modules.projects.models import Project, ProjectMember
+from superboss.modules.projects.schemas import ProjectCreate
 from superboss.modules.users.models import Role, User, UserStatus
 
 SERVER_ROOT = Path(__file__).resolve().parents[2]
@@ -53,29 +54,46 @@ def test_pristine_0002_upgrade_head_and_downgrade_restore_exact_schema(
     environment = os.environ.copy()
     environment["SUPERBOSS_DATABASE_URL"] = temporary_url
     try:
-        for revision in ("0002_auth_sessions", "head"):
-            subprocess.run(
-                [sys.executable, "-m", "alembic", "upgrade", revision],
-                cwd=SERVER_ROOT,
-                env=environment,
-                check=True,
-            )
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "0002_auth_sessions"],
+            cwd=SERVER_ROOT,
+            env=environment,
+            check=True,
+        )
 
-        async def head_catalog() -> tuple[bool, bool]:
+        async def catalog() -> tuple[list[tuple[str, str, str]], list[tuple[str, str]]]:
             connection = await asyncpg.connect(temporary_url.replace("postgresql+asyncpg", "postgresql"))
             try:
-                index = await connection.fetchval(
-                    "SELECT indexdef FROM pg_indexes WHERE indexname = 'uq_projects_name_ci'"
+                constraints = await connection.fetch(
+                    "SELECT conname, contype, pg_get_constraintdef(oid) "
+                    "FROM pg_constraint WHERE conrelid = 'projects'::regclass ORDER BY conname"
                 )
-                checks = await connection.fetchval(
-                    "SELECT count(*) FROM pg_constraint WHERE conname IN "
-                    "('ck_projects_name_trimmed', 'ck_projects_name_length')"
+                indexes = await connection.fetch(
+                    "SELECT indexname, indexdef FROM pg_indexes "
+                    "WHERE tablename = 'projects' ORDER BY indexname"
                 )
-                return "lower(" in str(index) and "name" in str(index), checks == 2
+                return (
+                    [(row["conname"], row["contype"], row["pg_get_constraintdef"]) for row in constraints],
+                    [(row["indexname"], row["indexdef"]) for row in indexes],
+                )
             finally:
                 await connection.close()
 
-        assert asyncio.run(head_catalog()) == (True, True)
+        baseline = asyncio.run(catalog())
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            cwd=SERVER_ROOT,
+            env=environment,
+            check=True,
+        )
+        head_constraints, head_indexes = asyncio.run(catalog())
+        assert {name for name, _, _ in head_constraints} >= {
+            "ck_projects_name_trimmed",
+            "ck_projects_name_length",
+        }
+        expression = dict(head_indexes)["uq_projects_name_ci"].replace(" ", "")
+        assert "lower((name)::text)" in expression or "lower(name)" in expression
+        assert "lower('name')" not in expression and 'lower("name")' not in expression
         subprocess.run(
             [sys.executable, "-m", "alembic", "downgrade", "0002_auth_sessions"],
             cwd=SERVER_ROOT,
@@ -83,21 +101,7 @@ def test_pristine_0002_upgrade_head_and_downgrade_restore_exact_schema(
             check=True,
         )
 
-        async def base_catalog() -> tuple[int, int]:
-            connection = await asyncpg.connect(temporary_url.replace("postgresql+asyncpg", "postgresql"))
-            try:
-                index_count = await connection.fetchval(
-                    "SELECT count(*) FROM pg_indexes WHERE indexname = 'uq_projects_name_ci'"
-                )
-                check_count = await connection.fetchval(
-                    "SELECT count(*) FROM pg_constraint WHERE conname IN "
-                    "('ck_projects_name_trimmed', 'ck_projects_name_length')"
-                )
-                return index_count, check_count
-            finally:
-                await connection.close()
-
-        assert asyncio.run(base_catalog()) == (0, 0)
+        assert asyncio.run(catalog()) == baseline
     finally:
         asyncio.run(drop_database())
 
@@ -189,7 +193,11 @@ async def test_independent_sessions_race_on_canonical_project_name(postgres_data
                 return str(error.orig)
 
     try:
-        first, second = await asyncio.gather(insert("Race DB"), insert("race db"))
+        first_name = ProjectCreate(name=" Race DB ").name
+        second_name = ProjectCreate(name="race db").name
+        assert first_name.casefold() == second_name.casefold()
+        assert first_name == first_name.strip(" \t\r\n\u00a0")
+        first, second = await asyncio.gather(insert(first_name), insert(second_name))
         assert sorted([first == "committed", second == "committed"]) == [False, True]
         failed = second if first == "committed" else first
         assert "uq_projects_name_ci" in failed
