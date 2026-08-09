@@ -274,3 +274,20 @@ async def test_clean_download_owner_returns_key_url_with_short_expiry(db_session
     actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
     assert await FileService(db_session, storage).presign_download(actor, file.id) == "memory://get/projects/clean/key"
     assert storage.expiries == [300]
+
+
+@pytest.mark.asyncio
+async def test_clean_download_assigned_staff_and_foreign_denial(db_session, active_owner) -> None:
+    from superboss.core.errors import ForbiddenError
+    from superboss.modules.files.models import File, FileState
+    from superboss.modules.files.service import FileService
+    project, other = Project(name="Staff download"), Project(name="Other download")
+    staff = User(wecom_userid="download-staff", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
+    db_session.add_all([project, other, staff]); await db_session.flush(); db_session.add(ProjectMember(project_id=project.id, user_id=staff.id))
+    file = File(project_id=project.id, filename="x.pdf", category="资料", file_date=date(2026, 8, 9), object_key="projects/staff/key", size_bytes=1, sha256="0" * 64, uploader_id=active_owner.id, uploader_kind="user", content_type="application/pdf", state=FileState.CLEAN)
+    db_session.add(file); await db_session.flush(); storage = InMemoryObjectStorage(); service = FileService(db_session, storage)
+    assigned = Actor("user", staff.id, Role.STAFF, frozenset({project.id}), frozenset())
+    assert await service.presign_download(assigned, file.id) == "memory://get/projects/staff/key"
+    foreign = Actor("user", staff.id, Role.STAFF, frozenset({other.id}), frozenset())
+    with pytest.raises(ForbiddenError): await service.presign_download(foreign, file.id)
+    assert storage.expiries == [300]
