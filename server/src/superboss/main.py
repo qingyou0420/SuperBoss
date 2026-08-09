@@ -20,6 +20,10 @@ from superboss.modules.auth.service import AuthService, InvalidSession
 from superboss.modules.users.repository import UserRepository
 
 
+def _unconfigured_file_scan_dispatcher(_file_id: UUID) -> None:
+    raise RuntimeError("file scan dispatcher is not configured")
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     active_settings = settings or get_settings()
     app = FastAPI(title="SuperBoss API", version="1.0.0")
@@ -33,7 +37,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         active_settings.s3_access_key_id,
         active_settings.s3_secret_access_key,
     )
-    app.state.enqueue_file_scan = lambda _file_id: None
+    app.state.enqueue_file_scan = _unconfigured_file_scan_dispatcher
 
     def request_id(request: Request) -> str:
         candidate = request.headers.get("X-Request-ID", "")
