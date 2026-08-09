@@ -873,3 +873,46 @@ async def test_complete_missing_upload_returns_file_upload_not_found(file_client
     assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"] == request_id
     assert storage.active == {} and storage.completed == {} and dispatched == []
     assert not [event for event in events if event.action == "file.upload.complete" and event.outcome == "SUCCESS"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("content_type", "status_code"),
+    [("a" * 128 + "/" + "b" * 127, 422), ("a" * 127 + "/" + "b" * 127, 201)],
+)
+async def test_start_enforces_content_type_database_length_boundary(
+    file_client, db_session: AsyncSession, content_type: str, status_code: int
+) -> None:
+    from sqlalchemy import func, select
+
+    from superboss.modules.files.models import File, Upload
+
+    client, storage = file_client
+    project = Project(name=f"Content type {len(content_type)}")
+    db_session.add(project)
+    await db_session.commit()
+    _login(client)
+    response = client.post(
+        "/api/v1/files/uploads",
+        json={
+            "project_id": str(project.id),
+            "filename": "x.pdf",
+            "size_bytes": 1,
+            "sha256": "0" * 64,
+            "category": "资料",
+            "file_date": "2026-08-09",
+            "content_type": content_type,
+        },
+        headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": f"content-{len(content_type)}"},
+    )
+
+    file_count = await db_session.scalar(select(func.count()).select_from(File))
+    upload_count = await db_session.scalar(select(func.count()).select_from(Upload))
+    assert response.status_code == status_code
+    assert file_count == upload_count == (0 if status_code == 422 else 1)
+    assert len(storage.active) == (0 if status_code == 422 else 1)
+    if status_code == 422:
+        assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    else:
+        file = await db_session.get(File, response.json()["file_id"])
+        assert file is not None and file.content_type == content_type

@@ -12,7 +12,7 @@ class UploadStart(BaseModel):
     sha256: str
     category: str = Field(min_length=1, max_length=255)
     file_date: date
-    content_type: str = "application/octet-stream"
+    content_type: str = Field(default="application/octet-stream", max_length=255)
 
     @field_validator("sha256")
     @classmethod
