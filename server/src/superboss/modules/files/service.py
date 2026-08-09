@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from sqlalchemy import case, select
+from sqlalchemy import case, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -496,7 +496,18 @@ class FileLifecycleService:
                     return False
                 if outbox.state == "DELIVERED":
                     continue
+                now = datetime.now(UTC)
+                expired = now - timedelta(seconds=30)
+                if not (
+                    (outbox.state == "PENDING" and outbox.next_attempt_at <= now)
+                    or (outbox.state == "DELIVERING" and outbox.locked_at is not None and outbox.locked_at <= expired)
+                ):
+                    return False
+                claim_token = uuid4()
                 outbox.state = "DELIVERING"
+                outbox.locked_at = now
+                outbox.claim_token = claim_token
+                outbox.attempt_count += 1
                 await session.commit()
                 try:
                     if kind == "completion_audit":
@@ -504,17 +515,32 @@ class FileLifecycleService:
                     else:
                         await self._enqueue_scan(lifecycle)
                 except Exception:  # noqa: BLE001 -- provider details are never persisted
-                    outbox.state = "PENDING"
-                    outbox.attempt_count += 1
-                    outbox.next_attempt_at = datetime.now(UTC) + timedelta(seconds=30)
-                    outbox.last_error_code = (
-                        "AUDIT_FAILED" if kind == "completion_audit" else "DISPATCH_FAILED"
+                    await session.execute(
+                        update(FileLifecycleOutbox)
+                        .where(
+                            FileLifecycleOutbox.id == outbox.id,
+                            FileLifecycleOutbox.claim_token == claim_token,
+                            FileLifecycleOutbox.state == "DELIVERING",
+                        )
+                        .values(
+                            state="PENDING",
+                            claim_token=None,
+                            locked_at=None,
+                            next_attempt_at=datetime.now(UTC) + timedelta(seconds=30),
+                            last_error_code="AUDIT_FAILED" if kind == "completion_audit" else "DISPATCH_FAILED",
+                        )
                     )
                     await session.commit()
                     return False
-                outbox.state = "DELIVERED"
-                outbox.attempt_count += 1
-                outbox.last_error_code = None
+                await session.execute(
+                    update(FileLifecycleOutbox)
+                    .where(
+                        FileLifecycleOutbox.id == outbox.id,
+                        FileLifecycleOutbox.claim_token == claim_token,
+                        FileLifecycleOutbox.state == "DELIVERING",
+                    )
+                    .values(state="DELIVERED", claim_token=None, locked_at=None, last_error_code=None)
+                )
                 await session.commit()
         return True
 

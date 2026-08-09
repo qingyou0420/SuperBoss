@@ -1256,3 +1256,125 @@ async def test_delete_after_completion_enters_storage_leaves_durable_cleanup(db_
         assert storage.calls <= 1 and len(jobs) == 2
         assert await FileLifecycleService(factory, storage).reconcile() == 2
         assert storage.active == {} and storage.objects == {}
+
+
+@pytest.mark.asyncio
+async def test_live_outbox_lease_allows_one_concurrent_scan_dispatch(db_session, active_owner) -> None:
+    """A live claim token prevents a second worker from entering the scan boundary."""
+    import asyncio
+
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from superboss.modules.files.models import FileLifecycleOutbox
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileLifecycleService, FileService
+    from superboss.modules.files.storage import CompletedPart
+
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    for number in range(3):
+        project = Project(name=f"Lease dispatch {number}")
+        db_session.add(project)
+        await db_session.commit()
+        storage = InMemoryObjectStorage()
+        upload = await FileService(db_session, storage).start_upload(actor, UploadStart(project_id=project.id, filename="lease.pdf", category="docs", file_date="2026-08-09", size_bytes=1, sha256="0" * 64), f"lease-{number}")
+        file_id = upload.file_id
+        upload_id = upload.id
+        await FileService(db_session, storage).complete_upload(actor, upload.id, [CompletedPart(1, "etag")], uuid4())
+        audit_job = await db_session.scalar(
+            select(FileLifecycleOutbox).where(
+                FileLifecycleOutbox.kind == "completion_audit",
+            FileLifecycleOutbox.file_id == file_id,
+            )
+        )
+        assert audit_job is not None
+        audit_job.state = "DELIVERED"
+        await db_session.commit()
+        entered = asyncio.Event(); release = asyncio.Event(); calls = 0
+
+        async def dispatch(
+            _file_id: UUID,
+            _key: UUID,
+            race_entered: asyncio.Event = entered,
+            race_release: asyncio.Event = release,
+        ) -> None:
+            nonlocal calls
+            calls += 1; race_entered.set(); await asyncio.wait_for(race_release.wait(), timeout=3)
+
+        first = asyncio.create_task(FileLifecycleService(factory, storage, dispatch).deliver_completion(upload_id))
+        await asyncio.wait_for(entered.wait(), timeout=3)
+        second = await FileLifecycleService(factory, storage, dispatch).deliver_completion(upload_id)
+        assert not second and calls == 1
+        release.set(); assert await asyncio.wait_for(first, timeout=3)
+        db_session.expire_all()
+        job = await db_session.scalar(select(FileLifecycleOutbox).where(FileLifecycleOutbox.kind == "scan_dispatch", FileLifecycleOutbox.file_id == file_id))
+        assert job is not None and job.state == "DELIVERED" and job.attempt_count == 1 and job.claim_token is None and job.locked_at is None
+
+
+@pytest.mark.asyncio
+async def test_expired_outbox_lease_takeover_uses_new_token_cas(db_session, active_owner) -> None:
+    """An expired owner cannot acknowledge over a newer scan-delivery claim."""
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from superboss.modules.files.models import FileLifecycleOutbox
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileLifecycleService, FileService
+    from superboss.modules.files.storage import CompletedPart
+
+    project = Project(name="Lease takeover")
+    db_session.add(project); await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    storage = InMemoryObjectStorage()
+    upload = await FileService(db_session, storage).start_upload(actor, UploadStart(project_id=project.id, filename="takeover.pdf", category="docs", file_date="2026-08-09", size_bytes=1, sha256="0" * 64), "takeover")
+    file_id = upload.file_id
+    upload_id = upload.id
+    await FileService(db_session, storage).complete_upload(actor, upload.id, [CompletedPart(1, "etag")], uuid4())
+    scan = await db_session.scalar(select(FileLifecycleOutbox).where(FileLifecycleOutbox.kind == "scan_dispatch", FileLifecycleOutbox.file_id == file_id))
+    audit = await db_session.scalar(select(FileLifecycleOutbox).where(FileLifecycleOutbox.kind == "completion_audit", FileLifecycleOutbox.file_id == file_id))
+    assert scan is not None and audit is not None
+    audit.state = "DELIVERED"; await db_session.commit()
+    first_token = uuid4(); scan.state = "DELIVERING"; scan.claim_token = first_token; scan.locked_at = datetime.now(UTC) - timedelta(seconds=31); scan.attempt_count = 1; await db_session.commit()
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    seen: list[UUID] = []
+    assert await FileLifecycleService(factory, storage, lambda _file, key: seen.append(key)).deliver_completion(upload_id)
+    db_session.expire_all()
+    scan = await db_session.scalar(select(FileLifecycleOutbox).where(FileLifecycleOutbox.kind == "scan_dispatch", FileLifecycleOutbox.file_id == file_id))
+    assert scan is not None and scan.state == "DELIVERED" and scan.attempt_count == 2 and scan.claim_token is None and scan.locked_at is None and seen
+    assert first_token != seen[0]
+
+
+@pytest.mark.asyncio
+async def test_future_due_outbox_skips_dispatch_without_claim(db_session, active_owner) -> None:
+    """Backoff prevents a worker from claiming or calling a future scan job."""
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from superboss.modules.files.models import FileLifecycleOutbox
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileLifecycleService, FileService
+    from superboss.modules.files.storage import CompletedPart
+
+    project = Project(name="Future delivery")
+    db_session.add(project); await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    storage = InMemoryObjectStorage()
+    upload = await FileService(db_session, storage).start_upload(actor, UploadStart(project_id=project.id, filename="future.pdf", category="docs", file_date="2026-08-09", size_bytes=1, sha256="0" * 64), "future")
+    file_id = upload.file_id
+    await FileService(db_session, storage).complete_upload(actor, upload.id, [CompletedPart(1, "etag")], uuid4())
+    jobs = list(await db_session.scalars(select(FileLifecycleOutbox).where(FileLifecycleOutbox.file_id == file_id)))
+    for job in jobs:
+        if job.kind == "completion_audit": job.state = "DELIVERED"
+        else: job.next_attempt_at = datetime.now(UTC) + timedelta(minutes=1)
+    await db_session.commit()
+    called: list[UUID] = []
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    assert not await FileLifecycleService(factory, storage, lambda _file, key: called.append(key)).deliver_completion(upload.id)
+    db_session.expire_all()
+    scan = await db_session.scalar(select(FileLifecycleOutbox).where(FileLifecycleOutbox.kind == "scan_dispatch", FileLifecycleOutbox.file_id == file_id))
+    assert scan is not None and scan.state == "PENDING" and scan.attempt_count == 0 and scan.claim_token is None and scan.locked_at is None and called == []

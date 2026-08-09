@@ -202,6 +202,7 @@ class FileLifecycleOutbox(Base):
         ),
         CheckConstraint("attempt_count >= 0", name="ck_file_lifecycle_outbox_attempt_count"),
         Index("ix_file_lifecycle_outbox_pending", "state", "next_attempt_at"),
+        Index("ix_file_lifecycle_outbox_due_lease", "state", "next_attempt_at", "locked_at"),
     )
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), default=uuid4, nullable=False)
     kind: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -216,6 +217,7 @@ class FileLifecycleOutbox(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claim_token: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
     last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

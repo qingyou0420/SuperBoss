@@ -191,7 +191,7 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
             check=True,
         )
         tables, constraints, indexes = asyncio.run(catalog())
-        assert asyncio.run(revision()) == "0008_file_delete_cleanup"
+        assert asyncio.run(revision()) == "0009_outbox_claim_lease"
         assert "trg_files_snapshot_storage_cleanup" in asyncio.run(trigger_names())
         assert {"files", "uploads", "file_upload_lifecycle", "file_lifecycle_outbox", "file_storage_cleanup"} <= set(tables)
         assert asyncio.run(table_columns("files")) == [
@@ -213,6 +213,7 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
         assert asyncio.run(table_columns("file_lifecycle_outbox")) == [
             "id", "kind", "dedupe_key", "file_id", "project_id", "state", "attempt_count",
             "next_attempt_at", "locked_at", "last_error_code", "created_at", "updated_at",
+            "claim_token",
         ]
         assert asyncio.run(table_columns("file_storage_cleanup")) == [
             "id", "operation", "dedupe_key", "object_key", "multipart_id", "lifecycle_id",
@@ -269,6 +270,7 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
         assert "UNIQUE(project_id,uploader_kind,uploader_id,idempotency_key)" in definitions[("uploads", "uq_upload_idempotency")].replace(" ", "")
         assert "UNIQUEINDEXuq_audit_logs_event_keyONpublic.audit_logsUSINGbtree(event_key)WHERE(event_keyISNOTNULL)" in normalized_indexes
         assert "INDEXix_file_lifecycle_outbox_pendingONpublic.file_lifecycle_outboxUSINGbtree(state,next_attempt_at)" in normalized_indexes
+        assert "INDEXix_file_lifecycle_outbox_due_leaseONpublic.file_lifecycle_outboxUSINGbtree(state,next_attempt_at,locked_at)" in normalized_indexes
         assert "INDEXix_file_storage_cleanup_pendingONpublic.file_storage_cleanupUSINGbtree(state,next_attempt_at)" in normalized_indexes
         assert "UNIQUEINDEXuq_file_storage_cleanup_operation_target" in normalized_indexes
 
