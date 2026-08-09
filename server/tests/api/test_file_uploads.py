@@ -60,3 +60,15 @@ def test_completed_part_rejects_s3_outside_range(part: int) -> None:
 def test_completed_part_rejects_unsafe_etag(etag: str) -> None:
     from superboss.modules.files.schemas import PartComplete
     with pytest.raises(ValidationError): PartComplete(part_number=1, etag=etag)
+
+
+def test_upload_complete_rejects_empty_and_duplicate_parts() -> None:
+    from superboss.modules.files.schemas import UploadComplete
+    with pytest.raises(ValidationError): UploadComplete(parts=[])
+    with pytest.raises(ValidationError): UploadComplete(parts=[{"part_number": 1, "etag": "a"}, {"part_number": 1, "etag": "b"}])
+
+
+def test_upload_complete_canonicalizes_part_order() -> None:
+    from superboss.modules.files.schemas import UploadComplete
+    complete = UploadComplete(parts=[{"part_number": 2, "etag": "b"}, {"part_number": 1, "etag": "a"}])
+    assert [part.part_number for part in complete.parts] == [1, 2]
