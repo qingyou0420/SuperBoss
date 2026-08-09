@@ -375,6 +375,30 @@ _UNSAFE_ALLOWLIST = {
         "create_pairing_code",
     ),
     (
+        "POST",
+        "/api/v1/device/import-jobs",
+        "superboss.modules.imports.router",
+        "create_import",
+    ),
+    (
+        "POST",
+        "/api/v1/device/import-jobs/{job_id}/attachments/{attachment_id}/complete",
+        "superboss.modules.imports.router",
+        "complete_import_attachment",
+    ),
+    (
+        "POST",
+        "/api/v1/device/import-jobs/{job_id}/attachments/{attachment_id}/parts/{part_number}",
+        "superboss.modules.imports.router",
+        "presign_import_part",
+    ),
+    (
+        "POST",
+        "/api/v1/device/import-jobs/{job_id}/submit",
+        "superboss.modules.imports.router",
+        "submit_import",
+    ),
+    (
         "DELETE",
         "/api/v1/owner/devices/{device_id}",
         "superboss.modules.devices.router",

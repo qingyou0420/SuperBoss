@@ -9,7 +9,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from superboss.modules.imports.models import AttachmentKind
+from superboss.modules.files.models import FileState
+from superboss.modules.imports.models import AttachmentKind, ImportStatus
 
 MANIFEST_MAX_UTF8_BYTES = 65_536
 MODEL_LABEL_MAX_CHARS = 128
@@ -38,6 +39,8 @@ AttachmentFilename = Annotated[
 ContentType = Annotated[
     str, Field(min_length=1, max_length=ATTACHMENT_CONTENT_TYPE_MAX_CHARS)
 ]
+ResultCode = Annotated[str, Field(min_length=1, max_length=64)]
+PartUrl = Annotated[str, Field(min_length=1, max_length=4_096)]
 
 _MODEL_CONFIG = ConfigDict(
     extra="forbid",
@@ -227,3 +230,59 @@ def _json_bytes(payload: object, *, separators: tuple[str, str]) -> bytes:
 def canonical_manifest_bytes(manifest: ImportJobCreate) -> bytes:
     """Return the stable compact JSON representation used for the future fingerprint."""
     return _json_bytes(manifest.model_dump(mode="json"), separators=(",", ":"))
+
+
+class ImportAttachmentRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
+
+    id: UUID
+    file_id: UUID
+    upload_id: UUID
+    kind: AttachmentKind
+    file_state: FileState
+
+
+class ImportJobRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
+
+    id: UUID
+    project_id: UUID
+    local_task_id: LocalTaskId
+    external_document_reference: ExternalReference | None
+    base_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    status: ImportStatus
+    result_code: ResultCode | None
+    k3_result: K3Result
+    submitted_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+    attachments: tuple[ImportAttachmentRead, ...] = Field(min_length=1, max_length=3)
+
+
+class OwnerImportJobRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
+
+    id: UUID
+    project_id: UUID
+    local_task_id: LocalTaskId
+    external_document_reference: ExternalReference | None
+    model_label: ModelLabel
+    status: ImportStatus
+    result_code: ResultCode | None
+    submitted_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+    attachments: tuple[ImportAttachmentRead, ...] = Field(min_length=1, max_length=3)
+
+
+class ImportPartUrlRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: PartUrl
+
+    @field_validator("url")
+    @classmethod
+    def safe_url(cls, value: str) -> str:
+        if any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise ValueError("part URL must contain no control characters")
+        return value

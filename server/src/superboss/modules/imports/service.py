@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from superboss.core.actors import Actor
-from superboss.core.errors import DomainError, ForbiddenError
+from superboss.core.errors import DomainError, ForbiddenError, OwnerRequiredError
 from superboss.modules.audit.models import AuditLog
 from superboss.modules.audit.schemas import AuditEventInput
 from superboss.modules.audit.service import AuditService
@@ -25,7 +25,8 @@ from superboss.modules.imports.models import (
     ImportJob,
     ImportStatus,
 )
-from superboss.modules.imports.schemas import ImportJobCreate, canonical_manifest_bytes
+from superboss.modules.imports.schemas import ImportJobCreate, K3Result, canonical_manifest_bytes
+from superboss.modules.users.models import Role
 
 
 class ImportIdempotencyConflictError(DomainError):
@@ -95,6 +96,46 @@ class _FileObservation:
 class _ImportEvaluation:
     status: ImportStatus
     result_code: str | None
+
+
+@dataclass(frozen=True)
+class ImportAttachmentView:
+    id: UUID
+    file_id: UUID
+    upload_id: UUID
+    kind: AttachmentKind
+    file_state: FileState
+
+
+@dataclass(frozen=True)
+class ImportJobView:
+    id: UUID
+    project_id: UUID
+    local_task_id: str
+    external_document_reference: str | None
+    base_sha256: str | None
+    status: ImportStatus
+    result_code: str | None
+    k3_result: K3Result
+    submitted_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+    attachments: tuple[ImportAttachmentView, ...]
+
+
+@dataclass(frozen=True)
+class OwnerImportJobView:
+    id: UUID
+    project_id: UUID
+    local_task_id: str
+    external_document_reference: str | None
+    model_label: str
+    status: ImportStatus
+    result_code: str | None
+    submitted_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+    attachments: tuple[ImportAttachmentView, ...]
 
 
 class ImportService:
@@ -217,6 +258,200 @@ class ImportService:
                 parts,
                 request_id,
             )
+
+    async def view_job(self, job_id: UUID) -> ImportJobView:
+        """Render a server-owned job ID already authorized by a mutating operation."""
+        async with self.session_factory() as session:
+            job = await session.get(ImportJob, job_id)
+            if job is None:
+                raise ImportJobNotFoundError()
+            return await self._job_view(session, job)
+
+    async def view_attachment(
+        self,
+        job_id: UUID,
+        attachment_id: UUID,
+    ) -> ImportAttachmentView:
+        """Render an attachment already authorized by the completion operation."""
+        async with self.session_factory() as session:
+            row = (
+                await session.execute(
+                    select(ImportAttachment, File.state)
+                    .join(
+                        File,
+                        and_(
+                            File.id == ImportAttachment.file_id,
+                            File.project_id == ImportAttachment.project_id,
+                        ),
+                    )
+                    .where(
+                        ImportAttachment.job_id == job_id,
+                        ImportAttachment.id == attachment_id,
+                    )
+                )
+            ).one_or_none()
+            if row is None:
+                raise ImportAttachmentNotFoundError()
+            attachment, file_state = row
+            return self._attachment_view(attachment, file_state)
+
+    async def read(
+        self,
+        actor: Actor,
+        job_id: UUID,
+        *,
+        request_id: UUID,
+    ) -> ImportJobView:
+        if (
+            actor.kind != "device"
+            or actor.role is not None
+            or "imports:read-own" not in actor.scopes
+        ):
+            forbidden = ForbiddenError(
+                "IMPORT_READ_FORBIDDEN",
+                "Import read is not permitted",
+            )
+            await self._record_read_denial(
+                actor,
+                job_id,
+                project_id=None,
+                request_id=request_id,
+                error=forbidden,
+            )
+            raise forbidden
+
+        denial: DomainError | None
+        project_id: UUID | None
+        file_ids: list[UUID] = []
+        async with self.session_factory() as session:
+            job = await session.get(ImportJob, job_id)
+            if job is None or job.device_id != actor.subject_id:
+                denial = ImportJobNotFoundError()
+                project_id = None
+            elif job.project_id not in actor.project_ids:
+                denial = ForbiddenError(
+                    "IMPORT_READ_FORBIDDEN",
+                    "Import read is not permitted",
+                )
+                project_id = job.project_id
+            else:
+                denial = None
+                project_id = job.project_id
+                file_ids = list(
+                    await session.scalars(
+                        select(ImportAttachment.file_id)
+                        .where(ImportAttachment.job_id == job.id)
+                        .order_by(ImportAttachment.file_id)
+                    )
+                )
+
+        if denial is not None:
+            await self._record_read_denial(
+                actor,
+                job_id,
+                project_id=project_id,
+                request_id=request_id,
+                error=denial,
+            )
+            raise denial
+
+        for file_id in file_ids:
+            await self.reconcile_file(file_id)
+
+        async with self.session_factory() as session:
+            job = await session.get(ImportJob, job_id)
+            if (
+                job is None
+                or job.device_id != actor.subject_id
+                or job.project_id != project_id
+            ):
+                denial = ImportJobNotFoundError()
+            elif job.project_id not in actor.project_ids:
+                denial = ForbiddenError(
+                    "IMPORT_READ_FORBIDDEN",
+                    "Import read is not permitted",
+                )
+            else:
+                return await self._job_view(session, job)
+
+        await self._record_read_denial(
+            actor,
+            job_id,
+            project_id=project_id,
+            request_id=request_id,
+            error=denial,
+        )
+        raise denial
+
+    async def list_owner(
+        self,
+        actor: Actor,
+        *,
+        limit: int,
+        request_id: UUID,
+    ) -> list[OwnerImportJobView]:
+        if actor.kind != "user" or actor.role != Role.OWNER:
+            await AuditService(self.session_factory).record(
+                AuditEventInput(
+                    actor=actor,
+                    action="import.list",
+                    object_type="import_job",
+                    outcome="DENIED",
+                    request_id=request_id,
+                    metadata={"reason": "OWNER_REQUIRED"},
+                )
+            )
+            raise OwnerRequiredError()
+        if not 1 <= limit <= 100:
+            raise ValueError("import list limit must be in 1..100")
+
+        async with self.session_factory() as session:
+            jobs = list(
+                await session.scalars(
+                    select(ImportJob)
+                    .order_by(ImportJob.created_at.desc(), ImportJob.id.desc())
+                    .limit(limit)
+                )
+            )
+            views = await self._job_views(session, jobs)
+        return [
+            OwnerImportJobView(
+                id=view.id,
+                project_id=view.project_id,
+                local_task_id=view.local_task_id,
+                external_document_reference=view.external_document_reference,
+                model_label=view.k3_result.model_label,
+                status=view.status,
+                result_code=view.result_code,
+                submitted_at=view.submitted_at,
+                created_at=view.created_at,
+                updated_at=view.updated_at,
+                attachments=view.attachments,
+            )
+            for view in views
+        ]
+
+    async def _record_read_denial(
+        self,
+        actor: Actor,
+        job_id: UUID,
+        *,
+        project_id: UUID | None,
+        request_id: UUID,
+        error: DomainError,
+    ) -> None:
+        await AuditService(self.session_factory).record(
+            AuditEventInput(
+                actor=actor,
+                action="import.read",
+                object_type="import_job",
+                object_id=job_id,
+                project_id=project_id,
+                outcome="DENIED",
+                request_id=request_id,
+                metadata={"error_code": error.code, "job_id": str(job_id)},
+            )
+        )
 
     async def _resolve_attachment_upload(
         self,
@@ -538,6 +773,91 @@ class ImportService:
                     actor_id=None,
                     request_id=event_key,
                 )
+
+    async def _job_view(
+        self,
+        session: AsyncSession,
+        job: ImportJob,
+    ) -> ImportJobView:
+        views = await self._job_views(session, [job])
+        if not views:
+            raise ImportJobNotFoundError()
+        return views[0]
+
+    async def _job_views(
+        self,
+        session: AsyncSession,
+        jobs: list[ImportJob],
+    ) -> list[ImportJobView]:
+        if not jobs:
+            return []
+        job_ids = [job.id for job in jobs]
+        attachments = list(
+            await session.scalars(
+                select(ImportAttachment)
+                .where(ImportAttachment.job_id.in_(job_ids))
+                .order_by(
+                    ImportAttachment.job_id,
+                    ImportAttachment.kind,
+                    ImportAttachment.id,
+                )
+            )
+        )
+        file_ids = [attachment.file_id for attachment in attachments]
+        states_by_file: dict[UUID, FileState] = {}
+        if file_ids:
+            states_by_file = {
+                file_id: file_state
+                for file_id, file_state in (
+                    await session.execute(
+                        select(File.id, File.state).where(File.id.in_(file_ids))
+                    )
+                ).all()
+            }
+        attachments_by_job: dict[UUID, list[ImportAttachmentView]] = {
+            job_id: [] for job_id in job_ids
+        }
+        for attachment in attachments:
+            file_state = states_by_file.get(attachment.file_id)
+            if file_state is None:
+                raise RuntimeError("import attachment file is missing")
+            attachments_by_job[attachment.job_id].append(
+                self._attachment_view(attachment, file_state)
+            )
+
+        views: list[ImportJobView] = []
+        for job in jobs:
+            manifest = ImportJobCreate.model_validate(job.canonical_manifest_json)
+            views.append(
+                ImportJobView(
+                    id=job.id,
+                    project_id=job.project_id,
+                    local_task_id=job.local_task_id,
+                    external_document_reference=job.external_document_reference,
+                    base_sha256=job.base_sha256,
+                    status=job.status,
+                    result_code=job.result_code,
+                    k3_result=manifest.k3_result,
+                    submitted_at=job.submitted_at,
+                    created_at=job.created_at,
+                    updated_at=job.updated_at,
+                    attachments=tuple(attachments_by_job[job.id]),
+                )
+            )
+        return views
+
+    @staticmethod
+    def _attachment_view(
+        attachment: ImportAttachment,
+        file_state: FileState,
+    ) -> ImportAttachmentView:
+        return ImportAttachmentView(
+            id=attachment.id,
+            file_id=attachment.file_id,
+            upload_id=attachment.upload_id,
+            kind=attachment.kind,
+            file_state=file_state,
+        )
 
     @staticmethod
     async def _file_observations(

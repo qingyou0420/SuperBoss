@@ -90,8 +90,17 @@ def create_app(
         return response
 
     def is_authenticated_write_path(path: str) -> bool:
-        return path in {"/api/v1/projects", "/api/v1/files"} or path.startswith(
-            ("/api/v1/projects/", "/api/v1/files/", "/api/v1/owner/devices")
+        return path in {
+            "/api/v1/projects",
+            "/api/v1/files",
+            "/api/v1/device/import-jobs",
+        } or path.startswith(
+            (
+                "/api/v1/projects/",
+                "/api/v1/files/",
+                "/api/v1/owner/devices",
+                "/api/v1/device/import-jobs/",
+            )
         )
 
     @app.exception_handler(DomainError)
