@@ -62,6 +62,13 @@ async def test_foreign_staff_cannot_start_upload(file_client, db_session: AsyncS
     started = client.get("/api/v1/auth/wecom/start"); client.get("/api/v1/auth/wecom/callback", params={"code": "staff-code", "state": started.json()["state"]})
     response = client.post("/api/v1/files/uploads", json={"project_id": str(target.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "foreign-start"})
     assert response.status_code == 403 and response.json()["error"]["code"] == "PROJECT_FORBIDDEN" and storage.active == {}
+
+
+def test_anonymous_start_uses_authentication_error_before_csrf(file_client) -> None:
+    client, storage = file_client
+    response = client.post("/api/v1/files/uploads", json={"project_id": "00000000-0000-0000-0000-000000000001", "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers={"Idempotency-Key": "anonymous"})
+    assert response.status_code == 401 and response.json()["error"]["code"] == "AUTHENTICATION_REQUIRED"
+    assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and storage.active == {}
 from pydantic import ValidationError
 
 
