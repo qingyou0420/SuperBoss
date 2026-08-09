@@ -117,6 +117,27 @@ def test_oauth_state_failure_is_committed_and_cookie_is_cleared(api_client: Test
     assert "wecom_oauth_state=\"\"" in replay.headers["set-cookie"]
 
 
+@pytest.mark.parametrize("code", ["unknown-code", "not-a-provider-code"])
+def test_all_identity_failures_consume_state_once(api_client: TestClient, code: str) -> None:
+    """Provider and authorization failures must not make a one-time state reusable."""
+    started = api_client.get("/api/v1/auth/wecom/start")
+    state = started.json()["state"]
+    signed = api_client.cookies.get("wecom_oauth_state")
+    failed = _callback(api_client, code, state)
+    assert failed.status_code == 403
+    assert "Max-Age=0" in failed.headers["set-cookie"]
+    api_client.cookies.set("wecom_oauth_state", signed, domain="testserver.local", path="/api/v1/auth/wecom")
+    assert _callback(api_client, "owner-code", state).status_code == 400
+
+
+def test_callback_missing_code_clears_state_cookie(api_client: TestClient) -> None:
+    """Optional callback parameters keep malformed callbacks inside the cookie-clearing handler."""
+    started = api_client.get("/api/v1/auth/wecom/start")
+    response = api_client.get("/api/v1/auth/wecom/callback", params={"state": started.json()["state"]})
+    assert response.status_code == 400
+    assert "Max-Age=0" in response.headers["set-cookie"]
+
+
 def test_logout_revokes_browser_access_and_refresh_tokens(api_client: TestClient) -> None:
     """Removing either server-side logout revocation leaves a cookie token usable."""
     started = api_client.get("/api/v1/auth/wecom/start")
