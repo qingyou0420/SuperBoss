@@ -1021,3 +1021,103 @@ async def test_database_file_delete_snapshots_cleanup_before_cascade(db_session,
     jobs = list(await db_session.scalars(select(FileStorageCleanup).order_by(FileStorageCleanup.operation)))
     assert [job.state for job in jobs] == ["DONE", "DONE"]
     assert storage.active == {}
+
+
+@pytest.mark.asyncio
+async def test_raw_sql_file_delete_snapshots_active_multipart_cleanup(db_session, active_owner) -> None:
+    """A raw SQL delete cannot bypass the database cleanup trigger."""
+    from sqlalchemy import select, text
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from superboss.modules.files.models import File, FileStorageCleanup, Upload
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileLifecycleService, FileService
+
+    project = Project(name="Raw delete cleanup")
+    db_session.add(project)
+    await db_session.commit()
+    storage = InMemoryObjectStorage()
+    upload = await FileService(db_session, storage).start_upload(
+        Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset()),
+        UploadStart(project_id=project.id, filename="raw.pdf", category="docs", file_date="2026-08-09", size_bytes=1, sha256="0" * 64),
+        "raw-delete",
+    )
+    file = await db_session.get(File, upload.file_id)
+    assert file is not None
+    file_id = file.id
+    upload_id = upload.id
+    await db_session.execute(text("DELETE FROM files WHERE id = :id"), {"id": file_id})
+    await db_session.commit()
+    db_session.expire_all()
+    jobs = list(await db_session.scalars(select(FileStorageCleanup).order_by(FileStorageCleanup.operation)))
+    assert await db_session.get(File, file_id) is None and await db_session.get(Upload, upload_id) is None
+    assert [job.operation for job in jobs] == ["ABORT_MULTIPART", "DELETE_OBJECT"]
+    assert len({(job.operation, job.object_key, job.multipart_id) for job in jobs}) == 2
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    assert await FileLifecycleService(factory, storage).reconcile() == 2
+    assert storage.active == {}
+
+
+@pytest.mark.asyncio
+async def test_project_cascade_snapshots_active_and_completed_file_cleanup(db_session, active_owner) -> None:
+    """Project cascade leaves cleanup for both active multipart and completed object."""
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from superboss.modules.files.models import File, FileStorageCleanup
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileLifecycleService, FileService
+    from superboss.modules.files.storage import CompletedPart
+
+    project = Project(name="Project cascade cleanup")
+    db_session.add(project)
+    await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    storage = InMemoryObjectStorage()
+    service = FileService(db_session, storage)
+    active = await service.start_upload(actor, UploadStart(project_id=project.id, filename="active.pdf", category="docs", file_date="2026-08-09", size_bytes=1, sha256="0" * 64), "cascade-active")
+    completed = await service.start_upload(actor, UploadStart(project_id=project.id, filename="done.pdf", category="docs", file_date="2026-08-09", size_bytes=1, sha256="1" * 64), "cascade-done")
+    await service.complete_upload(actor, completed.id, [CompletedPart(1, "etag")], uuid4())
+    active_file = await db_session.get(File, active.file_id)
+    completed_file = await db_session.get(File, completed.file_id)
+    assert active_file is not None and completed_file is not None
+    completed_key = completed_file.object_key
+    await db_session.delete(project)
+    await db_session.commit()
+    db_session.expire_all()
+    jobs = list(await db_session.scalars(select(FileStorageCleanup)))
+    assert len(jobs) == 4 and await storage.stat_object(completed_key) is not None
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    assert await FileLifecycleService(factory, storage).reconcile() == 4
+    assert storage.active == {} and await storage.stat_object(completed_key) is None
+
+
+@pytest.mark.asyncio
+async def test_file_delete_rollback_leaves_no_cleanup_snapshot(db_session, active_owner) -> None:
+    """Trigger rows share the deleting transaction and disappear on rollback."""
+    from sqlalchemy import select
+
+    from superboss.modules.files.models import File, FileStorageCleanup, Upload
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileService
+
+    project = Project(name="Rollback cleanup")
+    db_session.add(project)
+    await db_session.commit()
+    storage = InMemoryObjectStorage()
+    upload = await FileService(db_session, storage).start_upload(
+        Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset()),
+        UploadStart(project_id=project.id, filename="rollback.pdf", category="docs", file_date="2026-08-09", size_bytes=1, sha256="0" * 64),
+        "rollback-delete",
+    )
+    file = await db_session.get(File, upload.file_id)
+    assert file is not None
+    file_id = file.id
+    upload_id = upload.id
+    await db_session.delete(file)
+    await db_session.flush()
+    await db_session.rollback()
+    assert await db_session.get(File, file_id) is not None
+    assert await db_session.get(Upload, upload_id) is not None
+    assert list(await db_session.scalars(select(FileStorageCleanup))) == []
+    assert storage.active
