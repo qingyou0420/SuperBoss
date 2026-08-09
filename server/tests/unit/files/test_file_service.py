@@ -291,3 +291,12 @@ async def test_clean_download_assigned_staff_and_foreign_denial(db_session, acti
     foreign = Actor("user", staff.id, Role.STAFF, frozenset({other.id}), frozenset())
     with pytest.raises(ForbiddenError): await service.presign_download(foreign, file.id)
     assert storage.expiries == [300]
+
+
+@pytest.mark.asyncio
+async def test_missing_download_file_fails_closed(db_session, active_owner) -> None:
+    from superboss.core.errors import NotFoundError
+    from superboss.modules.files.service import FileService
+    storage = InMemoryObjectStorage(); actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    with pytest.raises(NotFoundError): await FileService(db_session, storage).presign_download(actor, uuid4())
+    assert storage.expiries == []
