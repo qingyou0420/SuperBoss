@@ -27,11 +27,13 @@ def test_scan_task_has_stable_delivery_and_worker_limits() -> None:
 
     assert task.name == "superboss.files.scan"
     assert task.acks_late is True
+    assert task.reject_on_worker_lost is True
     assert task.max_retries == 3
     assert task.retry_backoff is True
     assert 0 < task.soft_time_limit < task.time_limit < 24 * 60 * 60
     assert app.conf.worker_prefetch_multiplier == 1
     assert app.conf.worker_concurrency == 1
+    assert app.conf.task_reject_on_worker_lost is True
     assert app.conf.task_default_queue == "file-scan"
     assert app.conf.task_routes[task.name]["queue"] == "file-scan"
     assert str(app.conf.broker_url).startswith("redis://")

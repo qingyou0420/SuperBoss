@@ -22,14 +22,10 @@ from superboss.modules.auth.repository import AuthRepository
 from superboss.modules.auth.service import AuthService, InvalidSession
 from superboss.modules.files.service import FileLifecycleService
 from superboss.modules.files.storage import ObjectStorage
+from superboss.modules.files.tasks import enqueue_file_scan as celery_enqueue_file_scan
 from superboss.modules.users.repository import UserRepository
 
 logger = logging.getLogger(__name__)
-
-
-def _unconfigured_file_scan_dispatcher(_file_id: UUID, _delivery_key: UUID) -> None:
-    raise RuntimeError("file scan dispatcher is not configured")
-
 
 def create_app(
     settings: Settings | None = None,
@@ -74,7 +70,7 @@ def create_app(
     app.state.session_factory = async_sessionmaker(engine, expire_on_commit=False)
     app.state.wecom_provider = build_wecom_provider(active_settings)
     app.state.object_storage = object_storage or Boto3ObjectStorage(active_settings.s3_bucket, active_settings.s3_endpoint_url, active_settings.s3_access_key_id, active_settings.s3_secret_access_key)
-    app.state.enqueue_file_scan = enqueue_file_scan or _unconfigured_file_scan_dispatcher
+    app.state.enqueue_file_scan = enqueue_file_scan or celery_enqueue_file_scan
 
     def request_id(request: Request) -> str:
         candidate = request.headers.get("X-Request-ID", "")
