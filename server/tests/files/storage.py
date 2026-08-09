@@ -1,0 +1,43 @@
+"""Behavioral in-memory object storage for file service tests."""
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
+from uuid import uuid4
+
+from superboss.modules.files.storage import CompletedPart, ObjectMetadata
+
+
+@dataclass
+class InMemoryObjectStorage:
+    complete_size: int = 1
+    active: dict[str, str] = field(default_factory=dict)
+    completed: dict[str, list[CompletedPart]] = field(default_factory=dict)
+    aborted: set[str] = field(default_factory=set)
+    objects: dict[str, ObjectMetadata] = field(default_factory=dict)
+    expiries: list[int] = field(default_factory=list)
+
+    async def create_multipart(self, object_key: str, content_type: str) -> str:
+        upload_id = str(uuid4())
+        self.active[upload_id] = object_key
+        return upload_id
+
+    async def presign_upload_part(self, object_key: str, multipart_id: str, part_number: int, expires_seconds: int) -> str:
+        self.expiries.append(expires_seconds)
+        return f"memory://part/{multipart_id}/{part_number}"
+
+    async def complete_multipart(self, object_key: str, multipart_id: str, parts: list[CompletedPart]) -> ObjectMetadata:
+        self.active.pop(multipart_id)
+        self.completed[multipart_id] = parts
+        metadata = ObjectMetadata(self.complete_size)
+        self.objects[object_key] = metadata
+        return metadata
+
+    async def abort_multipart(self, object_key: str, multipart_id: str) -> None:
+        self.active.pop(multipart_id, None)
+        self.aborted.add(multipart_id)
+
+    async def presign_get(self, object_key: str, expires_seconds: int) -> str:
+        self.expiries.append(expires_seconds)
+        return f"memory://get/{object_key}"
+
+    async def stream(self, object_key: str) -> AsyncIterator[bytes]:
+        yield b""
