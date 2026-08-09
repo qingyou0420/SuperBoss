@@ -574,3 +574,57 @@ async def test_owner_downloads_clean_file_with_audited_short_presign(file_client
     assert str(event.request_id) == request_id and event.metadata_json["state"] == "CLEAN"
     assert "url" not in event.metadata_json and "object_key" not in event.metadata_json
     assert "memory://" not in str(event.metadata_json) and file.object_key not in str(event.metadata_json)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["UPLOADING", "QUARANTINED", "SCANNING", "INFECTED", "FAILED"])
+async def test_download_rejects_non_clean_file_with_denied_audit(
+    file_client, db_session: AsyncSession, state: str
+) -> None:
+    from datetime import date
+
+    from sqlalchemy import select
+
+    from superboss.modules.audit.models import AuditLog
+    from superboss.modules.files.models import File, FileState
+
+    client, storage = file_client
+    project = Project(name=f"Download {state}")
+    db_session.add(project)
+    await db_session.commit()
+    _login(client)
+    owner = await db_session.scalar(select(User).where(User.wecom_userid == "owner-1"))
+    assert owner is not None
+    file = File(
+        project_id=project.id,
+        filename="x.pdf",
+        category="资料",
+        file_date=date(2026, 8, 9),
+        object_key=f"projects/{project.id}/资料/2026-08-09/{state}/x.pdf",
+        size_bytes=1,
+        sha256="0" * 64,
+        state=FileState(state),
+        uploader_id=owner.id,
+        uploader_kind="user",
+        content_type="application/pdf",
+    )
+    db_session.add(file)
+    await db_session.commit()
+
+    request_id = "bba39a39-47ba-4ac5-9250-ccdba1d7f25e"
+    response = client.get(
+        f"/api/v1/files/{file.id}/download",
+        headers={"X-Request-ID": request_id},
+    )
+
+    events = list((await db_session.scalars(select(AuditLog))).all())
+    assert response.status_code == 409 and response.json()["error"]["code"] == "FILE_NOT_READY"
+    assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"] == request_id
+    assert storage.expiries == [] and len(events) == 1
+    event = events[0]
+    assert event.action == "file.download" and event.outcome == "DENIED"
+    assert event.actor_kind == "user" and event.actor_id == owner.id
+    assert event.object_type == "file" and event.object_id == file.id and event.project_id == project.id
+    assert str(event.request_id) == request_id and event.metadata_json["state"] == state
+    assert "url" not in event.metadata_json and "object_key" not in event.metadata_json
+    assert "memory://" not in str(event.metadata_json) and file.object_key not in str(event.metadata_json)

@@ -10,7 +10,7 @@ from superboss.modules.audit.schemas import AuditEventInput
 from superboss.modules.audit.service import AuditService
 from superboss.modules.files.models import File
 from superboss.modules.files.schemas import UploadComplete, UploadStart
-from superboss.modules.files.service import FileService
+from superboss.modules.files.service import FileNotReadyError, FileService
 from superboss.modules.files.storage import CompletedPart
 
 router = APIRouter(prefix="/files", tags=["files"])
@@ -32,6 +32,26 @@ def get_service(request: Request, session: AsyncSession = Depends(get_session)) 
     return FileService(
         session, request.app.state.object_storage, request.app.state.enqueue_file_scan
     )
+
+
+async def _record_download_audit(
+    request: Request, actor: Actor, file: File, outcome: str
+) -> None:
+    try:
+        await AuditService(request.app.state.session_factory).record(
+            AuditEventInput(
+                actor=actor,
+                action="file.download",
+                object_type="file",
+                object_id=file.id,
+                project_id=file.project_id,
+                outcome=outcome,
+                request_id=UUID(request.state.request_id),
+                metadata={"state": file.state.value},
+            )
+        )
+    except Exception:  # noqa: BLE001 -- audit unavailability must not alter download authorization
+        return
 
 
 @router.post("/uploads", status_code=status.HTTP_201_CREATED)
@@ -92,19 +112,14 @@ async def download(
     actor: Actor = Depends(get_actor),
     service: FileService = Depends(get_service),
 ) -> dict[str, str]:
-    url = await service.presign_download(actor, file_id)
+    try:
+        url = await service.presign_download(actor, file_id)
+    except FileNotReadyError:
+        file = await service.session.get(File, file_id)
+        if file is not None:
+            await _record_download_audit(request, actor, file, "DENIED")
+        raise
     file = await service.session.get(File, file_id)
     assert file is not None
-    await AuditService(request.app.state.session_factory).record(
-        AuditEventInput(
-            actor=actor,
-            action="file.download",
-            object_type="file",
-            object_id=file.id,
-            project_id=file.project_id,
-            outcome="SUCCESS",
-            request_id=UUID(request.state.request_id),
-            metadata={"state": file.state.value},
-        )
-    )
+    await _record_download_audit(request, actor, file, "SUCCESS")
     return {"url": url}
