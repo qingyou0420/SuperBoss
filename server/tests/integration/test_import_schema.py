@@ -393,6 +393,109 @@ async def test_database_rejects_illegal_import_status_result_and_time_combinatio
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("write_kind", ["insert", "update"])
+@pytest.mark.parametrize(
+    "invalid_result_code",
+    [" ", "BAD-CODE", "lowercase", "_LEADING"],
+)
+async def test_database_rejects_non_token_result_codes_on_insert_and_update(
+    db_session: AsyncSession,
+    active_owner: User,
+    write_kind: str,
+    invalid_result_code: str,
+) -> None:
+    """Terminal result codes are stable server tokens, never free-form text."""
+    project, device = await _seed_import_parent(
+        db_session,
+        active_owner,
+        name=f"Invalid result token {write_kind} {uuid4()}",
+    )
+    now = datetime(2026, 8, 10, 2, 30, tzinfo=UTC)
+    values = _job_values(
+        project,
+        device,
+        status="REJECTED",
+        result_code=(
+            invalid_result_code if write_kind == "insert" else "ATTACHMENT_INFECTED"
+        ),
+        submitted_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    if write_kind == "update":
+        await db_session.execute(_IMPORT_JOB_INSERT, values)
+        await db_session.commit()
+
+    with pytest.raises(DBAPIError) as rejected:
+        async with db_session.begin_nested():
+            if write_kind == "insert":
+                await db_session.execute(_IMPORT_JOB_INSERT, values)
+            else:
+                await db_session.execute(
+                    text(
+                        "UPDATE import_jobs SET result_code = :result_code "
+                        "WHERE id = :job_id"
+                    ),
+                    {
+                        "result_code": invalid_result_code,
+                        "job_id": values["id"],
+                    },
+                )
+
+    assert _constraint_name(rejected.value) == "ck_import_jobs_result_code"
+    if write_kind == "update":
+        persisted = await db_session.scalar(
+            text("SELECT result_code FROM import_jobs WHERE id = :job_id"),
+            {"job_id": values["id"]},
+        )
+        assert persisted == "ATTACHMENT_INFECTED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "result_code"),
+    [
+        ("REJECTED", "ATTACHMENT_INFECTED"),
+        ("REJECTED", "ATTACHMENT_SCAN_FAILED"),
+        ("CONFLICT", "BASE_SHA256_MISMATCH"),
+    ],
+)
+async def test_database_accepts_every_current_server_result_code(
+    db_session: AsyncSession,
+    active_owner: User,
+    status: str,
+    result_code: str,
+) -> None:
+    """The DB grammar must include every literal emitted by the import state machine."""
+    models = import_models()
+    project, device = await _seed_import_parent(
+        db_session,
+        active_owner,
+        name=f"Legal fixed result {result_code}",
+    )
+    now = datetime(2026, 8, 10, 2, 45, tzinfo=UTC)
+
+    await db_session.execute(
+        _IMPORT_JOB_INSERT,
+        _job_values(
+            project,
+            device,
+            status=status,
+            result_code=result_code,
+            submitted_at=now,
+            created_at=now,
+            updated_at=now,
+        ),
+    )
+    await db_session.commit()
+
+    saved = await db_session.scalar(select(models.ImportJob))
+    assert saved is not None
+    assert saved.status.value == status
+    assert saved.result_code == result_code
+
+
+@pytest.mark.asyncio
 async def test_database_accepts_each_legal_import_state_shape(
     db_session: AsyncSession,
     active_owner: User,

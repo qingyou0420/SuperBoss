@@ -259,6 +259,16 @@ class ImportJobRead(BaseModel):
     attachments: tuple[ImportAttachmentRead, ...] = Field(min_length=1, max_length=3)
 
 
+class ImportJobSubmitRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
+
+    id: UUID
+    status: ImportStatus
+    result_code: ResultCode | None
+    submitted_at: datetime
+    updated_at: datetime
+
+
 class OwnerImportJobRead(BaseModel):
     model_config = ConfigDict(from_attributes=True, extra="forbid")
 

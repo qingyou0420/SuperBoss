@@ -51,6 +51,13 @@ JOB_RESPONSE_KEYS = {
     "updated_at",
     "attachments",
 }
+SUBMIT_RESPONSE_KEYS = {
+    "id",
+    "status",
+    "result_code",
+    "submitted_at",
+    "updated_at",
+}
 OWNER_SUMMARY_KEYS = {
     "id",
     "project_id",
@@ -336,6 +343,19 @@ def _assert_job_shape(value: dict[str, object]) -> None:
     _assert_no_forbidden_keys(value)
 
 
+def _assert_submit_shape(value: dict[str, object]) -> None:
+    assert set(value) == SUBMIT_RESPONSE_KEYS
+    UUID(str(value["id"]))
+    assert value["status"] in {"SCANNING", "RECEIVED", "REJECTED", "CONFLICT"}
+    result = value["result_code"]
+    assert result is None or isinstance(result, str) and 1 <= len(result) <= 64
+    assert isinstance(value["submitted_at"], str)
+    assert isinstance(value["updated_at"], str)
+    _assert_timestamp(value["submitted_at"])
+    _assert_timestamp(value["updated_at"])
+    _assert_no_forbidden_keys(value)
+
+
 @pytest.mark.asyncio
 async def test_openapi_exposes_exactly_the_six_import_routes(import_api: ImportApiContext) -> None:
     expected = {
@@ -423,7 +443,7 @@ async def test_device_bearer_completes_the_import_flow_with_exact_safe_responses
         headers=_device_headers(pair),
     )
     assert submitted.status_code == 200
-    _assert_job_shape(submitted.json())
+    _assert_submit_shape(submitted.json())
     assert submitted.json()["status"] == "SCANNING"
 
     read = import_api.client.get(
@@ -432,7 +452,8 @@ async def test_device_bearer_completes_the_import_flow_with_exact_safe_responses
     )
     assert read.status_code == 200
     _assert_job_shape(read.json())
-    assert read.json() == submitted.json()
+    assert read.json()["id"] == submitted.json()["id"]
+    assert read.json()["status"] == submitted.json()["status"]
     assert pair.access_token not in read.text
 
 
@@ -462,6 +483,117 @@ async def test_create_requires_a_valid_idempotency_key_before_storage(
     _assert_error(response, 422, "VALIDATION_ERROR")
     assert _storage_calls(import_api.storage) == before
     assert not await db_session.scalar(select(ImportJob.id))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("project_case", ["existing_ungranted", "unknown"])
+async def test_create_unknown_project_matches_existing_ungranted_denial(
+    import_api: ImportApiContext,
+    db_session: AsyncSession,
+    active_owner: User,
+    project_case: str,
+) -> None:
+    """A valid unknown UUID must be the same audited 403 as a real ungranted project."""
+    granted_project = Project(name=f"Known create grant {project_case}")
+    db_session.add(granted_project)
+    await db_session.commit()
+    pair = await _pair(
+        import_api,
+        db_session,
+        active_owner.id,
+        granted_project.id,
+        name=f"Unknown-project-{project_case}",
+    )
+    if project_case == "existing_ungranted":
+        target_project = Project(name=f"Known denied create {uuid4()}")
+        db_session.add(target_project)
+        await db_session.commit()
+        target_project_id = target_project.id
+        expected_audit_project_id: UUID | None = target_project.id
+    else:
+        target_project_id = uuid4()
+        expected_audit_project_id = None
+    request_id = uuid4()
+    suffix = f"project-denial-{project_case}"
+    before = _storage_calls(import_api.storage)
+
+    response = import_api.client.post(
+        "/api/v1/device/import-jobs",
+        json=_body(target_project_id, suffix),
+        headers={
+            **_device_headers(pair, request_id=request_id),
+            "Idempotency-Key": f"project-denial-{project_case}",
+        },
+    )
+
+    _assert_error(response, 403, "IMPORT_CREATE_FORBIDDEN")
+    assert _storage_calls(import_api.storage) == before
+    assert not await db_session.scalar(select(ImportJob.id))
+    assert not await db_session.scalar(select(File.id))
+    assert not await db_session.scalar(select(Upload.id))
+    assert not await db_session.scalar(select(FileUploadLifecycle.upload_id))
+    audits = list(
+        await db_session.scalars(
+            select(AuditLog).where(
+                AuditLog.request_id == request_id,
+                AuditLog.action == "import.create",
+                AuditLog.outcome == "DENIED",
+            )
+        )
+    )
+    assert len(audits) == 1
+    assert audits[0].project_id == expected_audit_project_id
+    serialized_audit = str(audits[0].metadata_json)
+    assert str(target_project_id) not in serialized_audit
+    assert suffix not in serialized_audit
+
+
+@pytest.mark.asyncio
+async def test_unknown_project_denial_audit_failure_is_safe_and_fail_closed(
+    import_api: ImportApiContext,
+    db_session: AsyncSession,
+    active_owner: User,
+) -> None:
+    """An evidence failure must precede every business and provider side effect."""
+    granted_project = Project(name="Unknown create audit fault grant")
+    db_session.add(granted_project)
+    await db_session.commit()
+    pair = await _pair(import_api, db_session, active_owner.id, granted_project.id)
+    unknown_project_id = uuid4()
+    request_id = uuid4()
+    before = _storage_calls(import_api.storage)
+
+    def fail_denial(_mapper: object, _connection: object, target: AuditLog) -> None:
+        if target.action == "import.create" and target.outcome == "DENIED":
+            raise RuntimeError("unknown-project-audit-secret")
+
+    event.listen(AuditLog, "before_insert", fail_denial)
+    try:
+        response = import_api.client.post(
+            "/api/v1/device/import-jobs",
+            json=_body(unknown_project_id, "unknown-audit-fault-manifest"),
+            headers={
+                **_device_headers(pair, request_id=request_id),
+                "Idempotency-Key": "unknown-project-audit-fault",
+            },
+        )
+    finally:
+        event.remove(AuditLog, "before_insert", fail_denial)
+
+    _assert_error(response, 500, "REQUEST_FAILED")
+    assert "unknown-project-audit-secret" not in response.text
+    assert str(unknown_project_id) not in response.text
+    assert _storage_calls(import_api.storage) == before
+    assert not await db_session.scalar(select(ImportJob.id))
+    assert not await db_session.scalar(select(File.id))
+    assert not await db_session.scalar(select(Upload.id))
+    assert not await db_session.scalar(
+        select(AuditLog.id).where(
+            AuditLog.request_id == request_id,
+            AuditLog.action == "import.create",
+            AuditLog.outcome == "DENIED",
+        )
+    )
 
 
 def _request_operation(
@@ -560,8 +692,124 @@ async def test_each_device_operation_accepts_only_its_exact_live_scope(
         assert set(response.json()) == {"url"}
     elif operation == "complete":
         _assert_attachment_shape(response.json())
+    elif operation == "submit":
+        _assert_submit_shape(response.json())
     else:
         _assert_job_shape(response.json())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("job_case", ["scanning", "terminal"])
+async def test_submit_only_scope_is_status_only_and_cannot_replace_read_own(
+    import_api: ImportApiContext,
+    db_session: AsyncSession,
+    active_owner: User,
+    job_case: str,
+) -> None:
+    """Submit can replay operation status but cannot disclose the read-scoped manifest."""
+    project = Project(name=f"Submit-only response {job_case}")
+    db_session.add(project)
+    await db_session.commit()
+    pair = await _pair(import_api, db_session, active_owner.id, project.id)
+    suffix = f"submit-only-{job_case}-secret"
+    seeded = await _seed_import(
+        import_api,
+        db_session,
+        pair,
+        project.id,
+        suffix=suffix,
+    )
+    file = await db_session.get(File, seeded.file_id)
+    assert file is not None
+    if job_case == "scanning":
+        file.state = FileState.QUARANTINED
+        expected_status = "SCANNING"
+        expected_new_audits = 1
+        await db_session.commit()
+    else:
+        file.state = FileState.CLEAN
+        file.scan_result = "CLEAN"
+        await db_session.commit()
+        await ImportService(_factory(db_session), import_api.storage).submit(
+            Actor(
+                "device",
+                pair.device_id,
+                None,
+                frozenset({project.id}),
+                DEVICE_SCOPES,
+            ),
+            seeded.job_id,
+            request_id=uuid4(),
+        )
+        expected_status = "RECEIVED"
+        expected_new_audits = 0
+
+    await db_session.execute(
+        delete(DeviceScopeGrant).where(
+            DeviceScopeGrant.device_id == pair.device_id,
+            DeviceScopeGrant.scope != "imports:submit",
+        )
+    )
+    await db_session.commit()
+    before_storage = _storage_calls(import_api.storage)
+    before_audits = len(
+        list(
+            await db_session.scalars(
+                select(AuditLog.id).where(
+                    AuditLog.action == "import.submit",
+                    AuditLog.object_id == seeded.job_id,
+                    AuditLog.outcome == "SUCCESS",
+                )
+            )
+        )
+    )
+    root = f"/api/v1/device/import-jobs/{seeded.job_id}"
+
+    submit_responses = [
+        import_api.client.post(f"{root}/submit", headers=_device_headers(pair))
+        for _ in range(2)
+    ]
+
+    assert [response.status_code for response in submit_responses] == [200, 200]
+    for response in submit_responses:
+        _assert_submit_shape(response.json())
+        assert response.json()["id"] == str(seeded.job_id)
+        assert response.json()["status"] == expected_status
+        assert suffix not in response.text
+        assert str(seeded.attachment_id) not in response.text
+        assert str(seeded.file_id) not in response.text
+        assert str(seeded.upload_id) not in response.text
+    after_audits = len(
+        list(
+            await db_session.scalars(
+                select(AuditLog.id).where(
+                    AuditLog.action == "import.submit",
+                    AuditLog.object_id == seeded.job_id,
+                    AuditLog.outcome == "SUCCESS",
+                )
+            )
+        )
+    )
+    assert after_audits == before_audits + expected_new_audits
+    assert _storage_calls(import_api.storage) == before_storage
+
+    denied_read = import_api.client.get(root, headers=_device_headers(pair))
+    _assert_error(denied_read, 403, "IMPORT_READ_FORBIDDEN")
+    assert _storage_calls(import_api.storage) == before_storage
+
+    db_session.add(
+        DeviceScopeGrant(device_id=pair.device_id, scope="imports:read-own")
+    )
+    await db_session.commit()
+    full_read = import_api.client.get(root, headers=_device_headers(pair))
+
+    assert full_read.status_code == 200
+    _assert_job_shape(full_read.json())
+    assert full_read.json()["id"] == str(seeded.job_id)
+    assert full_read.json()["status"] == expected_status
+    assert suffix in full_read.text
+    assert str(seeded.attachment_id) in full_read.text
+    assert _storage_calls(import_api.storage) == before_storage
 
 
 @pytest.mark.asyncio

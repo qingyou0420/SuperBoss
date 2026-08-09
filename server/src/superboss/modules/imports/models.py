@@ -80,8 +80,7 @@ class ImportJob(Base):
             name="ck_import_jobs_external_reference",
         ),
         CheckConstraint(
-            "result_code IS NULL OR (char_length(result_code) BETWEEN 1 AND 64 "
-            "AND result_code !~ '[[:cntrl:]]')",
+            "result_code IS NULL OR result_code ~ '^[A-Z][A-Z0-9_]{0,63}$'",
             name="ck_import_jobs_result_code",
         ),
         CheckConstraint(

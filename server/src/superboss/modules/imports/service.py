@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -26,6 +26,7 @@ from superboss.modules.imports.models import (
     ImportStatus,
 )
 from superboss.modules.imports.schemas import ImportJobCreate, K3Result, canonical_manifest_bytes
+from superboss.modules.projects.models import Project
 from superboss.modules.users.models import Role
 
 
@@ -71,6 +72,7 @@ class ImportJobResult:
     status: ImportStatus
     result_code: str | None
     submitted_at: datetime | None
+    updated_at: datetime
     attachments: tuple[ImportAttachmentResult, ...]
 
 
@@ -159,58 +161,69 @@ class ImportService:
     ) -> ImportJobResult:
         self._validate_idempotency_key(idempotency_key)
         if not self._can_create(actor, command.project_id):
-            await self._record_denial(actor, command.project_id, request_id)
+            audit_project_id = await self._resolved_project_id(command.project_id)
+            await self._record_denial(actor, audit_project_id, request_id)
             raise ForbiddenError("IMPORT_CREATE_FORBIDDEN", "Import creation is not permitted")
 
         manifest_bytes = canonical_manifest_bytes(command)
         manifest_fingerprint = hashlib.sha256(manifest_bytes).hexdigest()
         canonical_manifest = command.model_dump(mode="json")
-        existing = await self._existing_result(
-            actor.subject_id,
-            idempotency_key,
-            manifest_fingerprint,
-        )
-        if existing is not None:
-            return existing
-
-        uploads: list[Upload] = []
-        for declaration in command.attachments:
-            upload_command = UploadStart(
-                project_id=command.project_id,
-                filename=declaration.filename,
-                size_bytes=declaration.size_bytes,
-                sha256=declaration.sha256,
-                category="kimi-imports",
-                file_date=command.k3_result.processed_at.date(),
-                content_type=declaration.content_type,
-            )
-            try:
-                async with self.session_factory() as file_session:
-                    upload = await FileService(
-                        file_session,
-                        self.storage,
-                    ).start_import_upload(
-                        actor,
-                        upload_command,
-                        self._child_idempotency_key(
-                            actor.subject_id,
-                            idempotency_key,
-                            declaration.kind,
-                        ),
+        async with self.session_factory() as guard_session, guard_session.begin():
+            await guard_session.execute(
+                select(
+                    func.pg_advisory_xact_lock(
+                        self._create_lock_key(actor.subject_id, idempotency_key)
                     )
-            except FileUploadConflictError as error:
-                raise ImportIdempotencyConflictError() from error
-            uploads.append(upload)
+                )
+            )
+            existing = await self._existing_result(
+                guard_session,
+                actor.subject_id,
+                idempotency_key,
+                manifest_fingerprint,
+            )
+            if existing is not None:
+                return existing
 
-        return await self._persist_job(
-            actor,
-            command,
-            idempotency_key,
-            canonical_manifest,
-            manifest_fingerprint,
-            uploads,
-            request_id,
-        )
+            uploads: list[Upload] = []
+            for declaration in command.attachments:
+                upload_command = UploadStart(
+                    project_id=command.project_id,
+                    filename=declaration.filename,
+                    size_bytes=declaration.size_bytes,
+                    sha256=declaration.sha256,
+                    category="kimi-imports",
+                    file_date=command.k3_result.processed_at.date(),
+                    content_type=declaration.content_type,
+                )
+                try:
+                    async with self.session_factory() as file_session:
+                        upload = await FileService(
+                            file_session,
+                            self.storage,
+                        ).start_import_upload(
+                            actor,
+                            upload_command,
+                            self._child_idempotency_key(
+                                actor.subject_id,
+                                idempotency_key,
+                                declaration.kind,
+                            ),
+                        )
+                except FileUploadConflictError as error:
+                    raise ImportIdempotencyConflictError() from error
+                uploads.append(upload)
+
+            return await self._persist_job(
+                guard_session,
+                actor,
+                command,
+                idempotency_key,
+                canonical_manifest,
+                manifest_fingerprint,
+                uploads,
+                request_id,
+            )
 
     async def presign_part(
         self,
@@ -982,6 +995,7 @@ class ImportService:
             status=job.status,
             result_code=job.result_code,
             submitted_at=job.submitted_at,
+            updated_at=job.updated_at,
             attachments=tuple(self._attachment_result(row) for row in attachments),
         )
 
@@ -1002,7 +1016,7 @@ class ImportService:
     async def _record_denial(
         self,
         actor: Actor,
-        project_id: UUID,
+        project_id: UUID | None,
         request_id: UUID,
     ) -> None:
         await AuditService(self.session_factory).record(
@@ -1018,25 +1032,31 @@ class ImportService:
             )
         )
 
+    async def _resolved_project_id(self, project_id: UUID) -> UUID | None:
+        async with self.session_factory() as session:
+            project = await session.get(Project, project_id)
+            return None if project is None else project.id
+
     async def _existing_result(
         self,
+        session: AsyncSession,
         device_id: UUID,
         idempotency_key: str,
         manifest_fingerprint: str,
     ) -> ImportJobResult | None:
-        async with self.session_factory() as session:
-            existing = await session.scalar(
-                select(ImportJob).where(
-                    ImportJob.device_id == device_id,
-                    ImportJob.idempotency_key == idempotency_key,
-                )
+        existing = await session.scalar(
+            select(ImportJob).where(
+                ImportJob.device_id == device_id,
+                ImportJob.idempotency_key == idempotency_key,
             )
-            if existing is None:
-                return None
-            return await self._matching_result(session, existing, manifest_fingerprint)
+        )
+        if existing is None:
+            return None
+        return await self._matching_result(session, existing, manifest_fingerprint)
 
     async def _persist_job(
         self,
+        session: AsyncSession,
         actor: Actor,
         command: ImportJobCreate,
         idempotency_key: str,
@@ -1045,89 +1065,89 @@ class ImportService:
         uploads: list[Upload],
         request_id: UUID,
     ) -> ImportJobResult:
-        async with self.session_factory() as session:
-            existing = await session.scalar(
+        existing = await session.scalar(
+            select(ImportJob).where(
+                ImportJob.device_id == actor.subject_id,
+                ImportJob.idempotency_key == idempotency_key,
+            )
+        )
+        if existing is not None:
+            return await self._matching_result(session, existing, manifest_fingerprint)
+
+        job = ImportJob(
+            id=uuid4(),
+            device_id=actor.subject_id,
+            project_id=command.project_id,
+            idempotency_key=idempotency_key,
+            local_task_id=command.local_task_id,
+            external_document_reference=command.external_document_reference,
+            base_sha256=command.base_sha256,
+            canonical_manifest_json=canonical_manifest,
+            manifest_fingerprint=manifest_fingerprint,
+            status=ImportStatus.UPLOADING,
+            result_code=None,
+            submitted_at=None,
+        )
+        try:
+            async with session.begin_nested():
+                session.add(job)
+                await session.flush()
+        except IntegrityError as error:
+            is_idempotency = self._constraint_name(error) == (
+                "uq_import_jobs_device_idempotency"
+            )
+            if not is_idempotency:
+                raise
+            winner = await session.scalar(
                 select(ImportJob).where(
                     ImportJob.device_id == actor.subject_id,
                     ImportJob.idempotency_key == idempotency_key,
                 )
             )
-            if existing is not None:
-                return await self._matching_result(session, existing, manifest_fingerprint)
+            if winner is None:
+                raise
+            return await self._matching_result(session, winner, manifest_fingerprint)
 
-            job = ImportJob(
-                id=uuid4(),
-                device_id=actor.subject_id,
-                project_id=command.project_id,
-                idempotency_key=idempotency_key,
-                local_task_id=command.local_task_id,
-                external_document_reference=command.external_document_reference,
-                base_sha256=command.base_sha256,
-                canonical_manifest_json=canonical_manifest,
-                manifest_fingerprint=manifest_fingerprint,
-                status=ImportStatus.UPLOADING,
-                result_code=None,
-                submitted_at=None,
+        attachment_rows = [
+            ImportAttachment(
+                job_id=job.id,
+                project_id=job.project_id,
+                file_id=upload.file_id,
+                upload_id=upload.id,
+                kind=declaration.kind,
             )
-            session.add(job)
-            try:
-                await session.flush()
-            except IntegrityError as error:
-                is_idempotency = self._constraint_name(error) == (
-                    "uq_import_jobs_device_idempotency"
-                )
-                await session.rollback()
-                if not is_idempotency:
-                    raise
-                winner = await session.scalar(
-                    select(ImportJob).where(
-                        ImportJob.device_id == actor.subject_id,
-                        ImportJob.idempotency_key == idempotency_key,
-                    )
-                )
-                if winner is None:
-                    raise
-                return await self._matching_result(session, winner, manifest_fingerprint)
-
-            attachment_rows = [
-                ImportAttachment(
-                    job_id=job.id,
-                    project_id=job.project_id,
-                    file_id=upload.file_id,
-                    upload_id=upload.id,
-                    kind=declaration.kind,
-                )
-                for declaration, upload in zip(command.attachments, uploads, strict=True)
-            ]
-            session.add_all(attachment_rows)
-            session.add(
-                AuditLog(
-                    actor_kind=actor.kind,
-                    actor_id=actor.subject_id,
-                    action="import.create",
-                    object_type="import_job",
-                    object_id=job.id,
-                    project_id=job.project_id,
-                    outcome="SUCCESS",
-                    metadata_json={
-                        "actor_role": None,
-                        "attachment_count": len(attachment_rows),
-                        "attachment_kinds": [row.kind.value for row in attachment_rows],
-                        "manifest_fingerprint": manifest_fingerprint,
-                        "status": ImportStatus.UPLOADING.value,
-                    },
-                    request_id=request_id,
-                    event_key=uuid5(NAMESPACE_URL, f"superboss:import-create:{job.id}"),
-                )
+            for declaration, upload in zip(command.attachments, uploads, strict=True)
+        ]
+        session.add_all(attachment_rows)
+        session.add(
+            AuditLog(
+                actor_kind=actor.kind,
+                actor_id=actor.subject_id,
+                action="import.create",
+                object_type="import_job",
+                object_id=job.id,
+                project_id=job.project_id,
+                outcome="SUCCESS",
+                metadata_json={
+                    "actor_role": None,
+                    "attachment_count": len(attachment_rows),
+                    "attachment_kinds": [row.kind.value for row in attachment_rows],
+                    "manifest_fingerprint": manifest_fingerprint,
+                    "status": ImportStatus.UPLOADING.value,
+                },
+                request_id=request_id,
+                event_key=uuid5(NAMESPACE_URL, f"superboss:import-create:{job.id}"),
             )
-            await session.commit()
-            return ImportJobResult(
-                id=job.id,
-                status=job.status,
-                result_code=job.result_code,
-                submitted_at=job.submitted_at,
-                attachments=tuple(self._attachment_result(row) for row in attachment_rows),
-            )
+        )
+        await session.flush()
+        return ImportJobResult(
+            id=job.id,
+            status=job.status,
+            result_code=job.result_code,
+            submitted_at=job.submitted_at,
+            updated_at=job.updated_at,
+            attachments=tuple(self._attachment_result(row) for row in attachment_rows),
+        )
 
     async def _matching_result(
         self,
@@ -1149,6 +1169,7 @@ class ImportService:
             status=job.status,
             result_code=job.result_code,
             submitted_at=job.submitted_at,
+            updated_at=job.updated_at,
             attachments=tuple(self._attachment_result(row) for row in attachments),
         )
 
@@ -1169,6 +1190,15 @@ class ImportService:
     ) -> str:
         material = f"{device_id}\x1f{idempotency_key}\x1f{kind.value}".encode()
         return f"import-{hashlib.sha256(material).hexdigest()}"
+
+    @staticmethod
+    def _create_lock_key(device_id: UUID, idempotency_key: str) -> int:
+        material = f"{device_id}\x1f{idempotency_key}".encode()
+        return int.from_bytes(
+            hashlib.sha256(material).digest()[:8],
+            byteorder="big",
+            signed=True,
+        )
 
     @staticmethod
     def _constraint_name(error: IntegrityError) -> str | None:

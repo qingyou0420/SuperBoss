@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import event, func, select
+from sqlalchemy import event, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from superboss.core.actors import Actor
@@ -73,6 +73,43 @@ class ProbeTrackingStorage(InMemoryObjectStorage):
     ) -> Any:
         self.probe_calls.append("complete")
         return await super().complete_multipart(object_key, multipart_id, parts)
+
+
+class FirstMultipartCallBarrierStorage(InMemoryObjectStorage):
+    """Hold only the first provider create while a changed request competes."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_call_entered = asyncio.Event()
+        self.followup_call_entered = asyncio.Event()
+        self.release_first_call = asyncio.Event()
+
+    async def create_multipart(self, object_key: str, content_type: str) -> str:
+        multipart_id = await super().create_multipart(object_key, content_type)
+        if self.create_calls == 1:
+            self.first_call_entered.set()
+            await self.release_first_call.wait()
+        else:
+            self.followup_call_entered.set()
+        return multipart_id
+
+
+async def wait_for_advisory_lock_contender(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Let a future serialized implementation release the one-sided provider gate."""
+    while True:
+        async with session_factory() as session:
+            waiting = await session.scalar(
+                text(
+                    "SELECT EXISTS ("
+                    "SELECT 1 FROM pg_locks "
+                    "WHERE locktype = 'advisory' AND NOT granted)"
+                )
+            )
+        if waiting:
+            return
+        await asyncio.sleep(0.01)
 
 
 def import_contract() -> tuple[ModuleType, ModuleType, ModuleType]:
@@ -379,6 +416,124 @@ async def test_concurrent_same_manifest_has_one_job_attachment_file_and_upload_s
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("race_round", range(3))
+@pytest.mark.parametrize(
+    "variant",
+    ("different_projects", "same_project_different_kinds"),
+)
+async def test_concurrent_changed_manifest_has_no_losing_upload_set(
+    db_session: AsyncSession,
+    active_owner: Any,
+    session_factory: async_sessionmaker[AsyncSession],
+    variant: str,
+    race_round: int,
+) -> None:
+    """The parent key must bind before either changed request provisions children."""
+    models, _schemas, _service = import_contract()
+    first_project, device, actor = await seed_device_actor(
+        db_session,
+        active_owner,
+        name=f"Changed manifest race {variant} {race_round}",
+    )
+    if variant == "different_projects":
+        second_project = Project(name=f"Changed race second project {race_round}")
+        db_session.add(second_project)
+        await db_session.flush()
+        db_session.add(
+            DeviceProjectGrant(device_id=device.id, project_id=second_project.id)
+        )
+        await db_session.commit()
+        actor = Actor(
+            "device",
+            device.id,
+            None,
+            frozenset({first_project.id, second_project.id}),
+            ALL_IMPORT_SCOPES,
+        )
+        first_command = command_for(first_project.id)
+        second_command = command_for(second_project.id)
+    else:
+        first_command = command_for(first_project.id, two_attachments=True)
+        second_command = command_for(first_project.id)
+
+    storage = FirstMultipartCallBarrierStorage()
+    key = f"changed-race-{variant}-{race_round}"
+
+    async def create(command: Any) -> Any:
+        return await service_for(session_factory, storage).create(
+            actor,
+            command,
+            key,
+            request_id=uuid4(),
+        )
+
+    async def race() -> tuple[Any, Any]:
+        first_task = asyncio.create_task(create(first_command))
+        await storage.first_call_entered.wait()
+        second_task = asyncio.create_task(create(second_command))
+        provider_contender = asyncio.create_task(storage.followup_call_entered.wait())
+        advisory_contender = asyncio.create_task(
+            wait_for_advisory_lock_contender(session_factory)
+        )
+        try:
+            ready, _pending = await asyncio.wait(
+                {provider_contender, advisory_contender},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if provider_contender in ready:
+                await second_task
+            storage.release_first_call.set()
+            first, second = await asyncio.gather(
+                first_task,
+                second_task,
+                return_exceptions=True,
+            )
+            return first, second
+        finally:
+            storage.release_first_call.set()
+            for waiter in (provider_contender, advisory_contender):
+                waiter.cancel()
+            await asyncio.gather(
+                provider_contender,
+                advisory_contender,
+                return_exceptions=True,
+            )
+
+    first, second = await asyncio.wait_for(race(), timeout=10)
+    results = (first, second)
+    successes = [result for result in results if not isinstance(result, BaseException)]
+    conflicts = [result for result in results if isinstance(result, DomainError)]
+    assert len(successes) == 1
+    assert len(conflicts) == 1
+    assert conflicts[0].status_code == 409
+    assert conflicts[0].code == "IMPORT_IDEMPOTENCY_CONFLICT"
+    winner = successes[0]
+    expected_children = len(winner.attachments)
+
+    async with session_factory() as session:
+        jobs = list(await session.scalars(select(models.ImportJob)))
+        attachments = list(await session.scalars(select(models.ImportAttachment)))
+        files = list(await session.scalars(select(File)))
+        uploads = list(await session.scalars(select(Upload)))
+        lifecycles = list(await session.scalars(select(FileUploadLifecycle)))
+        audits = list(
+            await session.scalars(
+                select(AuditLog).where(AuditLog.action == "import.create")
+            )
+        )
+
+    assert len(jobs) == len(audits) == 1
+    assert jobs[0].id == winner.id
+    assert len(attachments) == len(files) == len(uploads) == len(lifecycles) == (
+        expected_children
+    )
+    assert {row.file_id for row in attachments} == {row.id for row in files}
+    assert {row.upload_id for row in attachments} == {row.id for row in uploads}
+    assert {row.multipart_id for row in uploads} == set(storage.active)
+    assert storage.create_calls == expected_children
+
+
+@pytest.mark.asyncio
 async def test_partial_provider_failure_reuses_deterministic_child_uploads_on_retry(
     db_session: AsyncSession,
     active_owner: Any,
@@ -665,6 +820,68 @@ async def test_create_requires_an_exact_device_actor_scope_and_current_project(
     ):
         assert forbidden_coordinate not in lowered_denial
     assert storage.create_calls == 0 and storage.expiries == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("project_case", ["existing_ungranted", "unknown"])
+async def test_create_project_denial_is_uniform_and_uses_only_resolved_audit_fk(
+    db_session: AsyncSession,
+    active_owner: Any,
+    session_factory: async_sessionmaker[AsyncSession],
+    project_case: str,
+) -> None:
+    """A client UUID must not turn mandatory denial evidence into an FK oracle."""
+    models, _schemas, _service = import_contract()
+    _granted_project, _device, actor = await seed_device_actor(
+        db_session,
+        active_owner,
+        name=f"Create denied target {project_case}",
+    )
+    if project_case == "existing_ungranted":
+        denied_project = Project(name=f"Existing ungranted {uuid4()}")
+        db_session.add(denied_project)
+        await db_session.commit()
+        target_project_id = denied_project.id
+        expected_audit_project_id: UUID | None = denied_project.id
+    else:
+        target_project_id = uuid4()
+        expected_audit_project_id = None
+    command = command_for(target_project_id)
+    storage = InMemoryObjectStorage()
+    request_id = uuid4()
+
+    with pytest.raises(DomainError) as denied:
+        await service_for(session_factory, storage).create(
+            actor,
+            command,
+            f"project-denied-{project_case}",
+            request_id=request_id,
+        )
+
+    assert denied.value.status_code == 403
+    assert denied.value.code == "IMPORT_CREATE_FORBIDDEN"
+    async with session_factory() as session:
+        assert await session.scalar(select(func.count()).select_from(models.ImportJob)) == 0
+        assert await session.scalar(select(func.count()).select_from(models.ImportAttachment)) == 0
+        assert await session.scalar(select(func.count()).select_from(File)) == 0
+        assert await session.scalar(select(func.count()).select_from(Upload)) == 0
+        assert await session.scalar(select(func.count()).select_from(FileUploadLifecycle)) == 0
+        audits = list(
+            await session.scalars(
+                select(AuditLog).where(
+                    AuditLog.request_id == request_id,
+                    AuditLog.action == "import.create",
+                    AuditLog.outcome == "DENIED",
+                )
+            )
+        )
+    assert len(audits) == 1
+    assert audits[0].project_id == expected_audit_project_id
+    serialized_audit = json.dumps(audits[0].metadata_json, ensure_ascii=False)
+    assert str(target_project_id) not in serialized_audit
+    assert command.local_task_id not in serialized_audit
+    assert command.k3_result.suggested_title not in serialized_audit
+    assert storage.create_calls == 0 and storage.active == {}
 
 
 @pytest.mark.asyncio

@@ -13,6 +13,7 @@ from superboss.modules.imports.schemas import (
     ImportAttachmentRead,
     ImportJobCreate,
     ImportJobRead,
+    ImportJobSubmitRead,
     ImportPartUrlRead,
     OwnerImportJobRead,
 )
@@ -109,20 +110,20 @@ async def complete_import_attachment(
 
 @router.post(
     "/device/import-jobs/{job_id}/submit",
-    response_model=ImportJobRead,
+    response_model=ImportJobSubmitRead,
 )
 async def submit_import(
     request: Request,
     job_id: UUID,
     actor: Actor = Depends(get_actor),
     service: ImportService = Depends(get_service),
-) -> ImportJobRead:
+) -> ImportJobSubmitRead:
     result = await service.submit(
         actor,
         job_id,
         request_id=_request_id(request),
     )
-    return ImportJobRead.model_validate(await service.view_job(result.id))
+    return ImportJobSubmitRead.model_validate(result)
 
 
 @router.get(
