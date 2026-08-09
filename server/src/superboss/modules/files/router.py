@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from inspect import isawaitable
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Path, Request, status
@@ -55,6 +56,9 @@ async def complete(
         actor, upload_id, [CompletedPart(p.part_number, p.etag) for p in command.parts]
     )
     await service.session.commit()
+    dispatched = request.app.state.enqueue_file_scan(file.id)
+    if isawaitable(dispatched):
+        await dispatched
     await AuditService(request.app.state.session_factory).record(
         AuditEventInput(
             actor=actor,

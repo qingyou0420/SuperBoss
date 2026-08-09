@@ -264,6 +264,24 @@ def test_owner_part_requires_valid_csrf(file_client, csrf: str | None) -> None:
 
 
 @pytest.mark.asyncio
+async def test_complete_dispatches_after_quarantine_commit(file_client, db_session: AsyncSession) -> None:
+    from uuid import UUID
+    from sqlalchemy import select
+    from superboss.modules.files.models import File, Upload
+    client, storage = file_client; app = client.app; project = Project(name="Complete dispatch"); db_session.add(project); await db_session.commit(); _login(client)
+    observed: list[tuple[UUID, str]] = []
+    async def dispatch(file_id: UUID) -> None:
+        async with app.state.session_factory() as session:
+            file = await session.get(File, file_id); assert file is not None; observed.append((file_id, file.state.value))
+    app.state.enqueue_file_scan = dispatch; storage.complete_size = 2
+    headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "complete-dispatch"}
+    started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 2, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers); upload = await db_session.get(Upload, started.json()["upload_id"]); assert upload is not None
+    response = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json={"parts": [{"part_number": 2, "etag": "b"}, {"part_number": 1, "etag": "a"}]}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))})
+    file = await db_session.get(File, upload.file_id)
+    assert response.status_code == 200 and response.json() == {"file_id": str(upload.file_id), "state": "QUARANTINED"} and file is not None and file.state.value == "QUARANTINED" and storage.completed[upload.multipart_id][0].part_number == 1 and upload.multipart_id not in storage.active and observed == [(upload.file_id, "QUARANTINED")]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("key", ["x", "!" * 255])
 async def test_start_accepts_idempotency_key_boundaries(file_client, db_session: AsyncSession, key: str) -> None:
     client, storage = file_client; project = Project(name=f"Key {len(key)}"); db_session.add(project); await db_session.commit(); _login(client)
