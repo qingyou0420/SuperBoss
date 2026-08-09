@@ -3,6 +3,7 @@
 import hashlib
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from sqlalchemy import and_, select
@@ -14,7 +15,7 @@ from superboss.core.errors import DomainError, ForbiddenError
 from superboss.modules.audit.models import AuditLog
 from superboss.modules.audit.schemas import AuditEventInput
 from superboss.modules.audit.service import AuditService
-from superboss.modules.files.models import File, Upload
+from superboss.modules.files.models import File, FileState, Upload
 from superboss.modules.files.schemas import UploadStart
 from superboss.modules.files.service import FileService, FileUploadConflictError
 from superboss.modules.files.storage import CompletedPart, ObjectStorage
@@ -41,6 +42,20 @@ class ImportAttachmentNotFoundError(DomainError):
         super().__init__("IMPORT_ATTACHMENT_NOT_FOUND", "Import attachment not found", 404)
 
 
+class ImportJobNotFoundError(DomainError):
+    def __init__(self) -> None:
+        super().__init__("IMPORT_JOB_NOT_FOUND", "Import job not found", 404)
+
+
+class ImportAttachmentsIncompleteError(DomainError):
+    def __init__(self) -> None:
+        super().__init__(
+            "IMPORT_ATTACHMENTS_INCOMPLETE",
+            "Import attachments are incomplete",
+            409,
+        )
+
+
 @dataclass(frozen=True)
 class ImportAttachmentResult:
     id: UUID
@@ -53,6 +68,8 @@ class ImportAttachmentResult:
 class ImportJobResult:
     id: UUID
     status: ImportStatus
+    result_code: str | None
+    submitted_at: datetime | None
     attachments: tuple[ImportAttachmentResult, ...]
 
 
@@ -60,6 +77,24 @@ class ImportJobResult:
 class _AttachmentUploadTarget:
     project_id: UUID
     upload_id: UUID
+
+
+@dataclass(frozen=True)
+class _SubmitTarget:
+    project_id: UUID
+
+
+@dataclass(frozen=True)
+class _FileObservation:
+    kind: AttachmentKind
+    state: FileState
+    sha256: str
+
+
+@dataclass(frozen=True)
+class _ImportEvaluation:
+    status: ImportStatus
+    result_code: str | None
 
 
 class ImportService:
@@ -310,6 +345,326 @@ class ImportService:
             )
         )
 
+    async def submit(
+        self,
+        actor: Actor,
+        job_id: UUID,
+        *,
+        request_id: UUID,
+    ) -> ImportJobResult:
+        target = await self._preflight_submit(actor, job_id, request_id)
+        denial: DomainError | None = None
+        denial_project_id: UUID | None = target.project_id
+        result: ImportJobResult | None = None
+
+        async with self.session_factory() as session, session.begin():
+            job = await session.scalar(
+                select(ImportJob).where(ImportJob.id == job_id).with_for_update()
+            )
+            if job is None or job.device_id != actor.subject_id:
+                denial = ImportJobNotFoundError()
+                denial_project_id = None
+            elif job.project_id != target.project_id or job.project_id not in actor.project_ids:
+                denial = ForbiddenError(
+                    "IMPORT_SUBMIT_FORBIDDEN",
+                    "Import submission is not permitted",
+                )
+                denial_project_id = job.project_id
+            elif job.status in {
+                ImportStatus.RECEIVED,
+                ImportStatus.REJECTED,
+                ImportStatus.CONFLICT,
+            }:
+                result = await self._job_result(session, job)
+            else:
+                observations = await self._file_observations(session, job.id)
+                if job.status == ImportStatus.UPLOADING and any(
+                    observation.state == FileState.UPLOADING
+                    for observation in observations
+                ):
+                    denial = ImportAttachmentsIncompleteError()
+                else:
+                    evaluation = self._evaluate_files(job, observations)
+                    if (
+                        job.status == ImportStatus.SCANNING
+                        and evaluation.status == ImportStatus.SCANNING
+                    ):
+                        result = await self._job_result(session, job)
+                    else:
+                        self._apply_transition(
+                            session,
+                            job,
+                            evaluation,
+                            action="import.submit",
+                            actor_kind="device",
+                            actor_id=actor.subject_id,
+                            request_id=request_id,
+                        )
+                        result = await self._job_result(session, job)
+
+        if denial is not None:
+            await self._record_submit_denial(
+                actor,
+                job_id,
+                project_id=denial_project_id,
+                request_id=request_id,
+                error=denial,
+            )
+            raise denial
+        assert result is not None
+        return result
+
+    async def _preflight_submit(
+        self,
+        actor: Actor,
+        job_id: UUID,
+        request_id: UUID,
+    ) -> _SubmitTarget:
+        if (
+            actor.kind != "device"
+            or actor.role is not None
+            or "imports:submit" not in actor.scopes
+        ):
+            forbidden = ForbiddenError(
+                "IMPORT_SUBMIT_FORBIDDEN",
+                "Import submission is not permitted",
+            )
+            await self._record_submit_denial(
+                actor,
+                job_id,
+                project_id=None,
+                request_id=request_id,
+                error=forbidden,
+            )
+            raise forbidden
+
+        async with self.session_factory() as session:
+            row = (
+                await session.execute(
+                    select(ImportJob.device_id, ImportJob.project_id).where(
+                        ImportJob.id == job_id
+                    )
+                )
+            ).one_or_none()
+        if row is None or row.device_id != actor.subject_id:
+            not_found = ImportJobNotFoundError()
+            await self._record_submit_denial(
+                actor,
+                job_id,
+                project_id=None,
+                request_id=request_id,
+                error=not_found,
+            )
+            raise not_found
+        if row.project_id not in actor.project_ids:
+            forbidden = ForbiddenError(
+                "IMPORT_SUBMIT_FORBIDDEN",
+                "Import submission is not permitted",
+            )
+            await self._record_submit_denial(
+                actor,
+                job_id,
+                project_id=row.project_id,
+                request_id=request_id,
+                error=forbidden,
+            )
+            raise forbidden
+        return _SubmitTarget(project_id=row.project_id)
+
+    async def _record_submit_denial(
+        self,
+        actor: Actor,
+        job_id: UUID,
+        *,
+        project_id: UUID | None,
+        request_id: UUID,
+        error: DomainError,
+    ) -> None:
+        await AuditService(self.session_factory).record(
+            AuditEventInput(
+                actor=actor,
+                action="import.submit",
+                object_type="import_job",
+                object_id=job_id,
+                project_id=project_id,
+                outcome="DENIED",
+                request_id=request_id,
+                metadata={"error_code": error.code, "job_id": str(job_id)},
+            )
+        )
+
+    async def reconcile_file(self, file_id: UUID) -> None:
+        async with self.session_factory() as session:
+            job_ids = sorted(
+                set(
+                    (
+                        await session.scalars(
+                            select(ImportAttachment.job_id).where(
+                                ImportAttachment.file_id == file_id
+                            )
+                        )
+                    ).all()
+                ),
+                key=str,
+            )
+        if not job_ids:
+            return
+
+        async with self.session_factory() as session, session.begin():
+            jobs = list(
+                await session.scalars(
+                    select(ImportJob)
+                    .where(ImportJob.id.in_(job_ids))
+                    .order_by(ImportJob.id)
+                    .with_for_update()
+                )
+            )
+            for job in jobs:
+                if job.status != ImportStatus.SCANNING:
+                    continue
+                observations = await self._file_observations(session, job.id)
+                evaluation = self._evaluate_files(job, observations)
+                if evaluation.status == ImportStatus.SCANNING:
+                    continue
+                event_key = self._transition_event_key(
+                    "import.reconcile", job.id, evaluation.status
+                )
+                self._apply_transition(
+                    session,
+                    job,
+                    evaluation,
+                    action="import.reconcile",
+                    actor_kind="system",
+                    actor_id=None,
+                    request_id=event_key,
+                )
+
+    @staticmethod
+    async def _file_observations(
+        session: AsyncSession,
+        job_id: UUID,
+    ) -> list[_FileObservation]:
+        rows = (
+            await session.execute(
+                select(ImportAttachment.kind, File.state, File.sha256)
+                .select_from(ImportAttachment)
+                .join(
+                    File,
+                    and_(
+                        File.id == ImportAttachment.file_id,
+                        File.project_id == ImportAttachment.project_id,
+                    ),
+                )
+                .where(ImportAttachment.job_id == job_id)
+                .order_by(ImportAttachment.kind, ImportAttachment.id)
+            )
+        ).all()
+        return [
+            _FileObservation(kind=row.kind, state=row.state, sha256=row.sha256)
+            for row in rows
+        ]
+
+    @staticmethod
+    def _evaluate_files(
+        job: ImportJob,
+        observations: list[_FileObservation],
+    ) -> _ImportEvaluation:
+        states = {observation.state for observation in observations}
+        if FileState.INFECTED in states:
+            return _ImportEvaluation(
+                ImportStatus.REJECTED,
+                "ATTACHMENT_INFECTED",
+            )
+        if FileState.FAILED in states:
+            return _ImportEvaluation(
+                ImportStatus.REJECTED,
+                "ATTACHMENT_SCAN_FAILED",
+            )
+        if not observations or states != {FileState.CLEAN}:
+            return _ImportEvaluation(ImportStatus.SCANNING, None)
+        original = next(
+            (
+                observation
+                for observation in observations
+                if observation.kind == AttachmentKind.ORIGINAL
+            ),
+            None,
+        )
+        if (
+            job.base_sha256 is not None
+            and original is not None
+            and original.sha256 != job.base_sha256
+        ):
+            return _ImportEvaluation(
+                ImportStatus.CONFLICT,
+                "BASE_SHA256_MISMATCH",
+            )
+        return _ImportEvaluation(ImportStatus.RECEIVED, None)
+
+    @classmethod
+    def _apply_transition(
+        cls,
+        session: AsyncSession,
+        job: ImportJob,
+        evaluation: _ImportEvaluation,
+        *,
+        action: str,
+        actor_kind: str,
+        actor_id: UUID | None,
+        request_id: UUID,
+    ) -> None:
+        now = datetime.now(UTC)
+        job.status = evaluation.status
+        job.result_code = evaluation.result_code
+        job.submitted_at = job.submitted_at or now
+        job.updated_at = now
+        event_key = cls._transition_event_key(action, job.id, evaluation.status)
+        session.add(
+            AuditLog(
+                actor_kind=actor_kind,
+                actor_id=actor_id,
+                action=action,
+                object_type="import_job",
+                object_id=job.id,
+                project_id=job.project_id,
+                outcome="SUCCESS",
+                metadata_json={
+                    "actor_role": None,
+                    "status": evaluation.status.value,
+                    "result_code": evaluation.result_code,
+                },
+                request_id=request_id,
+                event_key=event_key,
+            )
+        )
+
+    @staticmethod
+    def _transition_event_key(action: str, job_id: UUID, status: ImportStatus) -> UUID:
+        return uuid5(
+            NAMESPACE_URL,
+            f"superboss:{action}:{job_id}:{status.value}",
+        )
+
+    async def _job_result(
+        self,
+        session: AsyncSession,
+        job: ImportJob,
+    ) -> ImportJobResult:
+        attachments = list(
+            await session.scalars(
+                select(ImportAttachment)
+                .where(ImportAttachment.job_id == job.id)
+                .order_by(ImportAttachment.kind, ImportAttachment.id)
+            )
+        )
+        return ImportJobResult(
+            id=job.id,
+            status=job.status,
+            result_code=job.result_code,
+            submitted_at=job.submitted_at,
+            attachments=tuple(self._attachment_result(row) for row in attachments),
+        )
+
     @staticmethod
     def _validate_idempotency_key(idempotency_key: str) -> None:
         if not re.fullmatch(r"[!-~]{1,255}", idempotency_key):
@@ -449,6 +804,8 @@ class ImportService:
             return ImportJobResult(
                 id=job.id,
                 status=job.status,
+                result_code=job.result_code,
+                submitted_at=job.submitted_at,
                 attachments=tuple(self._attachment_result(row) for row in attachment_rows),
             )
 
@@ -470,6 +827,8 @@ class ImportService:
         return ImportJobResult(
             id=job.id,
             status=job.status,
+            result_code=job.result_code,
+            submitted_at=job.submitted_at,
             attachments=tuple(self._attachment_result(row) for row in attachments),
         )
 

@@ -1128,23 +1128,358 @@ async def test_submit_refuses_any_attachment_still_uploading_without_state_chang
         actor, command_for(project.id), "incomplete-submit", request_id=uuid4()
     )
     provider_counts = (storage.create_calls, storage.complete_calls, len(storage.expiries))
+    request_id = uuid4()
 
     with pytest.raises(DomainError) as incomplete:
-        await service.submit(actor, job.id, request_id=uuid4())
+        await service.submit(actor, job.id, request_id=request_id)
 
     assert incomplete.value.status_code == 409
+    assert incomplete.value.code == "IMPORT_ATTACHMENTS_INCOMPLETE"
     async with session_factory() as session:
         saved = await session.get(models.ImportJob, job.id)
         denials = list(
             await session.scalars(
                 select(AuditLog).where(
+                    AuditLog.action == "import.submit",
                     AuditLog.object_id == job.id,
+                    AuditLog.outcome == "DENIED",
+                    AuditLog.request_id == request_id,
+                )
+            )
+        )
+    assert saved is not None and saved.status == models.ImportStatus.UPLOADING
+    assert saved.submitted_at is None and len(denials) == 1
+    assert set(denials[0].metadata_json) <= {"actor_role", "error_code", "job_id"}
+    assert (storage.create_calls, storage.complete_calls, len(storage.expiries)) == provider_counts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "actor_case",
+    [
+        "valid_exact_scope",
+        "browser",
+        "device_role",
+        "scope",
+        "project",
+        "second_device",
+        "unknown_job",
+    ],
+)
+async def test_submit_requires_exact_scope_current_project_and_job_owner(
+    db_session: AsyncSession,
+    active_owner: Any,
+    session_factory: async_sessionmaker[AsyncSession],
+    actor_case: str,
+) -> None:
+    """Submit is a device-only owned-job boundary with one safe denial event."""
+    models, _schemas, _service = import_contract()
+    project, device, creator = await seed_device_actor(
+        db_session, active_owner, name=f"Submit authorization {actor_case}"
+    )
+    storage = InMemoryObjectStorage()
+    service = service_for(session_factory, storage)
+    job = await service.create(
+        creator,
+        command_for(project.id),
+        f"submit-authorization-{actor_case}",
+        request_id=uuid4(),
+    )
+    await set_attachment_states(
+        session_factory,
+        models,
+        job.id,
+        {"K3_RAW": "CLEAN"},
+        scan_results={"K3_RAW": "CLEAN"},
+    )
+    actor = Actor(
+        "device",
+        device.id,
+        None,
+        frozenset({project.id}),
+        frozenset({"imports:submit"}),
+    )
+    job_id = job.id
+    if actor_case == "browser":
+        actor = Actor(
+            "user", active_owner.id, Role.OWNER, frozenset({project.id}), frozenset()
+        )
+    elif actor_case == "device_role":
+        actor = Actor("device", device.id, Role.OWNER, actor.project_ids, actor.scopes)
+    elif actor_case == "scope":
+        actor = Actor(
+            "device", device.id, None, actor.project_ids, frozenset({"imports:upload"})
+        )
+    elif actor_case == "project":
+        actor = Actor("device", device.id, None, frozenset(), actor.scopes)
+    elif actor_case == "second_device":
+        _project, _device, foreign_actor = await seed_device_actor(
+            db_session, active_owner, name="Foreign submit device"
+        )
+        actor = Actor(
+            "device",
+            foreign_actor.subject_id,
+            None,
+            frozenset({project.id}),
+            frozenset({"imports:submit"}),
+        )
+    elif actor_case == "unknown_job":
+        job_id = uuid4()
+
+    request_id = uuid4()
+    provider_counts = (storage.create_calls, storage.complete_calls, len(storage.expiries))
+    if actor_case == "valid_exact_scope":
+        submitted = await service.submit(actor, job_id, request_id=request_id)
+        assert submitted.status == models.ImportStatus.RECEIVED
+        async with session_factory() as session:
+            success = list(
+                await session.scalars(
+                    select(AuditLog).where(
+                        AuditLog.action == "import.submit",
+                        AuditLog.object_id == job.id,
+                        AuditLog.outcome == "SUCCESS",
+                    )
+                )
+            )
+        assert len(success) == 1
+    else:
+        with pytest.raises(DomainError) as denied:
+            await service.submit(actor, job_id, request_id=request_id)
+        if actor_case in {"second_device", "unknown_job"}:
+            assert denied.value.status_code == 404
+            assert denied.value.code == "IMPORT_JOB_NOT_FOUND"
+        else:
+            assert denied.value.status_code == 403
+            assert denied.value.code == "IMPORT_SUBMIT_FORBIDDEN"
+        async with session_factory() as session:
+            denial = await session.scalar(
+                select(AuditLog).where(
+                    AuditLog.action == "import.submit",
+                    AuditLog.request_id == request_id,
+                    AuditLog.outcome == "DENIED",
+                )
+            )
+            saved = await session.get(models.ImportJob, job.id)
+            object_keys = list(await session.scalars(select(File.object_key)))
+        assert denial is not None
+        assert saved is not None and saved.status == models.ImportStatus.UPLOADING
+        assert set(denial.metadata_json) <= {"actor_role", "error_code", "job_id"}
+        serialized = json.dumps(denial.metadata_json, ensure_ascii=False).casefold()
+        for unsafe in (
+            "authorization",
+            "cookie",
+            "access_token",
+            "refresh_token",
+            "object_key",
+            "multipart_id",
+            *object_keys,
+            *storage.active,
+        ):
+            assert unsafe.casefold() not in serialized
+    assert (storage.create_calls, storage.complete_calls, len(storage.expiries)) == provider_counts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("file_state", "expected_status"),
+    [("QUARANTINED", "SCANNING"), ("CLEAN", "RECEIVED")],
+)
+async def test_submit_success_audit_failure_rolls_back_transition_then_recovers_once(
+    db_session: AsyncSession,
+    active_owner: Any,
+    session_factory: async_sessionmaker[AsyncSession],
+    file_state: str,
+    expected_status: str,
+) -> None:
+    """Neither a waiting nor terminal submit state may commit without its success evidence."""
+    models, _schemas, _service = import_contract()
+    project, device, creator = await seed_device_actor(
+        db_session, active_owner, name=f"Submit success audit {expected_status}"
+    )
+    storage = InMemoryObjectStorage()
+    service = service_for(session_factory, storage)
+    job = await service.create(
+        creator,
+        command_for(project.id),
+        f"submit-success-audit-{expected_status}",
+        request_id=uuid4(),
+    )
+    file_ids = await set_attachment_states(
+        session_factory,
+        models,
+        job.id,
+        {"K3_RAW": file_state},
+        scan_results={"K3_RAW": "CLEAN"} if file_state == "CLEAN" else None,
+    )
+    submitter = Actor(
+        "device",
+        device.id,
+        None,
+        frozenset({project.id}),
+        frozenset({"imports:submit"}),
+    )
+    provider_counts = (storage.create_calls, storage.complete_calls, len(storage.expiries))
+
+    def fail_submit_success(_mapper: object, _connection: object, target: AuditLog) -> None:
+        if (
+            target.action == "import.submit"
+            and target.object_id == job.id
+            and target.outcome == "SUCCESS"
+        ):
+            raise RuntimeError("audit unavailable")
+
+    event.listen(AuditLog, "before_insert", fail_submit_success)
+    try:
+        with pytest.raises(RuntimeError, match="audit unavailable"):
+            await service.submit(submitter, job.id, request_id=uuid4())
+    finally:
+        event.remove(AuditLog, "before_insert", fail_submit_success)
+
+    async with session_factory() as session:
+        rolled_back = await session.get(models.ImportJob, job.id)
+        file = await session.get(File, file_ids["K3_RAW"])
+        success_before_retry = list(
+            await session.scalars(
+                select(AuditLog).where(
+                    AuditLog.action == "import.submit",
+                    AuditLog.object_id == job.id,
+                    AuditLog.outcome == "SUCCESS",
+                )
+            )
+        )
+    assert rolled_back is not None
+    assert rolled_back.status == models.ImportStatus.UPLOADING
+    assert rolled_back.submitted_at is None
+    assert file is not None and file.state.value == file_state
+    assert success_before_retry == []
+    assert (storage.create_calls, storage.complete_calls, len(storage.expiries)) == provider_counts
+
+    recovered = await service.submit(submitter, job.id, request_id=uuid4())
+
+    async with session_factory() as session:
+        saved = await session.get(models.ImportJob, job.id)
+        success_after_retry = list(
+            await session.scalars(
+                select(AuditLog).where(
+                    AuditLog.action == "import.submit",
+                    AuditLog.object_id == job.id,
+                    AuditLog.outcome == "SUCCESS",
+                )
+            )
+        )
+    assert recovered.status == getattr(models.ImportStatus, expected_status)
+    assert saved is not None and saved.status == getattr(models.ImportStatus, expected_status)
+    assert saved.submitted_at is not None
+    assert len(success_after_retry) == 1
+    assert success_after_retry[0].metadata_json.get("status") == expected_status
+    assert (storage.create_calls, storage.complete_calls, len(storage.expiries)) == provider_counts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("denial_case", "expected_status", "expected_code"),
+    [
+        ("scope", 403, "IMPORT_SUBMIT_FORBIDDEN"),
+        ("incomplete", 409, "IMPORT_ATTACHMENTS_INCOMPLETE"),
+    ],
+)
+async def test_submit_denial_audit_failure_preserves_state_then_records_once(
+    db_session: AsyncSession,
+    active_owner: Any,
+    session_factory: async_sessionmaker[AsyncSession],
+    denial_case: str,
+    expected_status: int,
+    expected_code: str,
+) -> None:
+    """Mandatory denial evidence fails before mutation or I/O and leaves a clean retry."""
+    models, _schemas, _service = import_contract()
+    project, device, creator = await seed_device_actor(
+        db_session, active_owner, name=f"Submit denial audit {denial_case}"
+    )
+    storage = InMemoryObjectStorage()
+    service = service_for(session_factory, storage)
+    job = await service.create(
+        creator,
+        command_for(project.id),
+        f"submit-denial-audit-{denial_case}",
+        request_id=uuid4(),
+    )
+    actor = Actor(
+        "device",
+        device.id,
+        None,
+        frozenset({project.id}),
+        frozenset({"imports:submit"}),
+    )
+    if denial_case == "scope":
+        actor = Actor(
+            "device", device.id, None, actor.project_ids, frozenset({"imports:create"})
+        )
+    request_id = uuid4()
+    provider_counts = (storage.create_calls, storage.complete_calls, len(storage.expiries))
+
+    def fail_submit_denial(_mapper: object, _connection: object, target: AuditLog) -> None:
+        if (
+            target.action == "import.submit"
+            and target.object_id == job.id
+            and target.outcome == "DENIED"
+        ):
+            raise RuntimeError("audit unavailable")
+
+    event.listen(AuditLog, "before_insert", fail_submit_denial)
+    try:
+        with pytest.raises(RuntimeError, match="audit unavailable"):
+            await service.submit(actor, job.id, request_id=request_id)
+    finally:
+        event.remove(AuditLog, "before_insert", fail_submit_denial)
+
+    async with session_factory() as session:
+        saved = await session.get(models.ImportJob, job.id)
+        files = list(
+            await session.scalars(
+                select(File)
+                .join(
+                    models.ImportAttachment,
+                    models.ImportAttachment.file_id == File.id,
+                )
+                .where(models.ImportAttachment.job_id == job.id)
+            )
+        )
+        failed_audits = list(
+            await session.scalars(
+                select(AuditLog).where(
+                    AuditLog.action == "import.submit",
+                    AuditLog.object_id == job.id,
+                    AuditLog.request_id == request_id,
+                )
+            )
+        )
+    assert saved is not None and saved.status == models.ImportStatus.UPLOADING
+    assert saved.submitted_at is None
+    assert files and {file.state for file in files} == {FileState.UPLOADING}
+    assert failed_audits == []
+    assert (storage.create_calls, storage.complete_calls, len(storage.expiries)) == provider_counts
+
+    with pytest.raises(DomainError) as denied:
+        await service.submit(actor, job.id, request_id=request_id)
+
+    assert denied.value.status_code == expected_status
+    assert denied.value.code == expected_code
+    async with session_factory() as session:
+        saved = await session.get(models.ImportJob, job.id)
+        denials = list(
+            await session.scalars(
+                select(AuditLog).where(
+                    AuditLog.action == "import.submit",
+                    AuditLog.object_id == job.id,
+                    AuditLog.request_id == request_id,
                     AuditLog.outcome == "DENIED",
                 )
             )
         )
     assert saved is not None and saved.status == models.ImportStatus.UPLOADING
     assert saved.submitted_at is None and len(denials) == 1
+    assert denials[0].metadata_json.get("error_code") == expected_code
     assert (storage.create_calls, storage.complete_calls, len(storage.expiries)) == provider_counts
 
 
@@ -1170,23 +1505,34 @@ async def test_submit_commits_scanning_while_any_completed_attachment_is_not_ter
         session_factory, models, job.id, {"K3_RAW": file_state}
     )
 
-    submitted = await service.submit(actor, job.id, request_id=uuid4())
+    request_id = uuid4()
+    submitted = await service.submit(actor, job.id, request_id=request_id)
 
     assert submitted.status == models.ImportStatus.SCANNING
     assert submitted.submitted_at is not None
     assert submitted.submitted_at.tzinfo is not None
+    async with session_factory() as session:
+        audit = await session.scalar(
+            select(AuditLog).where(
+                AuditLog.action == "import.submit",
+                AuditLog.object_id == job.id,
+                AuditLog.request_id == request_id,
+                AuditLog.outcome == "SUCCESS",
+            )
+        )
+    assert audit is not None and audit.metadata_json.get("status") == "SCANNING"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("base_sha256", "expected_status"),
+    ("actual_original_sha256", "expected_status"),
     [("a" * 64, "RECEIVED"), ("c" * 64, "CONFLICT")],
 )
 async def test_all_clean_files_receive_unless_verified_original_conflicts_with_base(
     db_session: AsyncSession,
     active_owner: Any,
     session_factory: async_sessionmaker[AsyncSession],
-    base_sha256: str,
+    actual_original_sha256: str,
     expected_status: str,
 ) -> None:
     """A clean but stale original must pause as CONFLICT rather than silently win."""
@@ -1195,7 +1541,7 @@ async def test_all_clean_files_receive_unless_verified_original_conflicts_with_b
         db_session, active_owner, name=f"Clean submit {expected_status}"
     )
     payload = manifest_payload(project.id, two_attachments=True)
-    payload["base_sha256"] = base_sha256
+    payload["base_sha256"] = "a" * 64
     command = schemas.ImportJobCreate.model_validate(payload)
     service = service_for(session_factory, InMemoryObjectStorage())
     job = await service.create(
@@ -1208,20 +1554,34 @@ async def test_all_clean_files_receive_unless_verified_original_conflicts_with_b
         {"ORIGINAL": "CLEAN", "K3_RAW": "CLEAN"},
         scan_results={"ORIGINAL": "CLEAN", "K3_RAW": "CLEAN"},
     )
+    async with session_factory() as session, session.begin():
+        original = await session.scalar(
+            select(models.ImportAttachment).where(
+                models.ImportAttachment.job_id == job.id,
+                models.ImportAttachment.kind == models.AttachmentKind.ORIGINAL,
+            )
+        )
+        assert original is not None
+        original_file = await session.get(File, original.file_id)
+        assert original_file is not None
+        original_file.sha256 = actual_original_sha256
 
     submitted = await service.submit(actor, job.id, request_id=uuid4())
 
     assert submitted.status == getattr(models.ImportStatus, expected_status)
     if expected_status == "CONFLICT":
-        assert submitted.result_code is not None
+        assert submitted.result_code == "BASE_SHA256_MISMATCH"
     else:
         assert submitted.result_code is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("file_state", "scan_result"),
-    [("INFECTED", "Eicar-Test-Signature"), ("FAILED", "provider secret")],
+    ("file_state", "scan_result", "expected_result_code"),
+    [
+        ("INFECTED", "Eicar-Test-Signature", "ATTACHMENT_INFECTED"),
+        ("FAILED", "provider secret", "ATTACHMENT_SCAN_FAILED"),
+    ],
 )
 async def test_infected_or_terminal_failed_attachment_rejects_with_safe_server_code(
     db_session: AsyncSession,
@@ -1229,6 +1589,7 @@ async def test_infected_or_terminal_failed_attachment_rejects_with_safe_server_c
     session_factory: async_sessionmaker[AsyncSession],
     file_state: str,
     scan_result: str,
+    expected_result_code: str,
 ) -> None:
     """Raw scanner/provider text must not become a public import result code."""
     models, _schemas, _service = import_contract()
@@ -1250,7 +1611,7 @@ async def test_infected_or_terminal_failed_attachment_rejects_with_safe_server_c
     submitted = await service.submit(actor, job.id, request_id=uuid4())
 
     assert submitted.status == models.ImportStatus.REJECTED
-    assert submitted.result_code is not None and len(submitted.result_code) <= 64
+    assert submitted.result_code == expected_result_code
     assert scan_result.lower() not in submitted.result_code.lower()
 
 
@@ -1406,5 +1767,129 @@ async def test_concurrent_submit_and_reconcile_choose_one_terminal_transition(
     terminal_audits = [
         row for row in audits if row.metadata_json.get("status") == "RECEIVED"
     ]
+    assert saved is not None and saved.status == models.ImportStatus.RECEIVED
+    assert len(terminal_audits) == 1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_file_is_database_only_and_touches_only_referencing_jobs(
+    db_session: AsyncSession,
+    active_owner: Any,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A scan callback may not sweep unrelated scanning imports or touch object storage."""
+    models, _schemas, _service = import_contract()
+    project, _device, actor = await seed_device_actor(
+        db_session, active_owner, name="Referenced reconcile only"
+    )
+    storage = InMemoryObjectStorage()
+    service = service_for(session_factory, storage)
+    target = await service.create(
+        actor, command_for(project.id), "referenced-reconcile", request_id=uuid4()
+    )
+    unrelated = await service.create(
+        actor, command_for(project.id), "unrelated-reconcile", request_id=uuid4()
+    )
+    target_files = await set_attachment_states(
+        session_factory,
+        models,
+        target.id,
+        {"K3_RAW": "CLEAN"},
+        scan_results={"K3_RAW": "CLEAN"},
+    )
+    await set_attachment_states(
+        session_factory,
+        models,
+        unrelated.id,
+        {"K3_RAW": "CLEAN"},
+        scan_results={"K3_RAW": "CLEAN"},
+    )
+    now = datetime.now(UTC)
+    async with session_factory() as session, session.begin():
+        for job_id in (target.id, unrelated.id):
+            saved = await session.get(models.ImportJob, job_id)
+            assert saved is not None
+            saved.status = models.ImportStatus.SCANNING
+            saved.submitted_at = now
+            saved.updated_at = now
+    provider_counts = (storage.create_calls, storage.complete_calls, len(storage.expiries))
+
+    await service.reconcile_file(target_files["K3_RAW"])
+
+    async with session_factory() as session:
+        saved_target = await session.get(models.ImportJob, target.id)
+        saved_unrelated = await session.get(models.ImportJob, unrelated.id)
+        terminal_audits = list(
+            await session.scalars(
+                select(AuditLog).where(
+                    AuditLog.action == "import.reconcile",
+                    AuditLog.outcome == "SUCCESS",
+                )
+            )
+        )
+    assert saved_target is not None and saved_target.status == models.ImportStatus.RECEIVED
+    assert saved_unrelated is not None
+    assert saved_unrelated.status == models.ImportStatus.SCANNING
+    assert len(terminal_audits) == 1 and terminal_audits[0].object_id == target.id
+    assert (storage.create_calls, storage.complete_calls, len(storage.expiries)) == provider_counts
+
+
+@pytest.mark.asyncio
+async def test_two_file_reconciles_share_job_lock_and_emit_one_terminal_evidence(
+    db_session: AsyncSession,
+    active_owner: Any,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Different scan callbacks for one job serialize without deadlock or duplicate evidence."""
+    models, _schemas, _service = import_contract()
+    project, _device, actor = await seed_device_actor(
+        db_session, active_owner, name="Two reconcile race"
+    )
+    storage = InMemoryObjectStorage()
+    job = await service_for(session_factory, storage).create(
+        actor,
+        command_for(project.id, two_attachments=True),
+        "two-reconcile-race",
+        request_id=uuid4(),
+    )
+    file_ids = await set_attachment_states(
+        session_factory,
+        models,
+        job.id,
+        {"ORIGINAL": "CLEAN", "K3_RAW": "CLEAN"},
+        scan_results={"ORIGINAL": "CLEAN", "K3_RAW": "CLEAN"},
+    )
+    now = datetime.now(UTC)
+    async with session_factory() as session, session.begin():
+        saved = await session.get(models.ImportJob, job.id)
+        assert saved is not None
+        saved.status = models.ImportStatus.SCANNING
+        saved.submitted_at = now
+        saved.updated_at = now
+    barrier = asyncio.Barrier(2)
+
+    async def reconcile(file_id: UUID) -> None:
+        await barrier.wait()
+        await service_for(session_factory, storage).reconcile_file(file_id)
+
+    await asyncio.wait_for(
+        asyncio.gather(
+            reconcile(file_ids["ORIGINAL"]),
+            reconcile(file_ids["K3_RAW"]),
+        ),
+        timeout=10,
+    )
+
+    async with session_factory() as session:
+        saved = await session.get(models.ImportJob, job.id)
+        terminal_audits = list(
+            await session.scalars(
+                select(AuditLog).where(
+                    AuditLog.action == "import.reconcile",
+                    AuditLog.object_id == job.id,
+                    AuditLog.outcome == "SUCCESS",
+                )
+            )
+        )
     assert saved is not None and saved.status == models.ImportStatus.RECEIVED
     assert len(terminal_audits) == 1
