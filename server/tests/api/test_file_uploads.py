@@ -32,3 +32,19 @@ def test_upload_rejects_uppercase_sha256() -> None:
             category="资料",
             file_date="2026-08-09",
         )
+
+
+@pytest.mark.parametrize("value", [" ", "a\r\nb", "\x00name"])
+def test_upload_rejects_control_or_blank_file_metadata(value: str) -> None:
+    """Dropping text hygiene would permit headers/keys with control characters."""
+    from superboss.modules.files.schemas import UploadStart
+
+    with pytest.raises(ValidationError):
+        UploadStart(
+            project_id="00000000-0000-0000-0000-000000000001",
+            filename=value,
+            size_bytes=1,
+            sha256="0" * 64,
+            category="资料",
+            file_date="2026-08-09",
+        )

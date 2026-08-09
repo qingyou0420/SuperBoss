@@ -1,3 +1,4 @@
+import hashlib
 import re
 from collections.abc import Awaitable, Callable
 from uuid import UUID, uuid4
@@ -46,32 +47,23 @@ class FileService:
         value = re.sub(r"[^\\w.\-\u4e00-\u9fff]", "_", value, flags=re.UNICODE).strip("._")
         return value or fallback
 
-    async def start_upload(self, actor: Actor, command: UploadStart, idempotency_key: str) -> Upload:
+    async def start_upload(
+        self, actor: Actor, command: UploadStart, idempotency_key: str
+    ) -> Upload:
         require_project_access(actor, command.project_id)
         if not 1 <= len(idempotency_key) <= 255:
             raise ValueError("invalid Idempotency-Key")
         existing = await self.session.scalar(
             select(Upload).where(
                 Upload.project_id == command.project_id,
+                Upload.uploader_kind == actor.kind,
                 Upload.uploader_id == actor.subject_id,
                 Upload.idempotency_key == idempotency_key,
             )
         )
         if existing:
             old = await self.session.get(File, existing.file_id)
-            if old is None or (
-                old.filename,
-                old.category,
-                old.file_date,
-                old.size_bytes,
-                old.sha256,
-            ) != (
-                command.filename,
-                command.category,
-                command.file_date,
-                command.size_bytes,
-                command.sha256,
-            ):
+            if old is None or existing.metadata_fingerprint != self._fingerprint(command):
                 raise ConflictError()
             return existing
         file_id = uuid4()
@@ -89,17 +81,35 @@ class FileService:
             size_bytes=command.size_bytes,
             sha256=command.sha256,
             uploader_id=actor.subject_id,
+            uploader_kind=actor.kind,
+            content_type=command.content_type,
         )
         upload = Upload(
             file_id=file_id,
             project_id=command.project_id,
             uploader_id=actor.subject_id,
+            uploader_kind=actor.kind,
+            metadata_fingerprint=self._fingerprint(command),
             idempotency_key=idempotency_key,
             multipart_id=multipart_id,
         )
         self.session.add_all([file, upload])
         await self.session.flush()
         return upload
+
+    @staticmethod
+    def _fingerprint(command: UploadStart) -> str:
+        material = "\x1f".join(
+            (
+                command.filename,
+                command.category,
+                command.file_date.isoformat(),
+                str(command.size_bytes),
+                command.sha256,
+                command.content_type,
+            )
+        )
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
     async def presign_download(self, actor: Actor, file_id: UUID) -> str:
         file = await self.session.get(File, file_id)
