@@ -238,6 +238,18 @@ async def test_part_rejects_quarantined_file(file_client, db_session: AsyncSessi
 
 
 @pytest.mark.asyncio
+async def test_foreign_staff_cannot_presign_upload_part(file_client, db_session: AsyncSession) -> None:
+    from superboss.modules.files.models import File, Upload
+    client, storage = file_client; target, assigned = Project(name="Part target"), Project(name="Part assigned"); staff = User(wecom_userid="staff-1", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
+    db_session.add_all([target, assigned, staff]); await db_session.flush(); db_session.add(ProjectMember(project_id=assigned.id, user_id=staff.id)); await db_session.commit(); _login(client)
+    headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "foreign-part"}
+    started = client.post("/api/v1/files/uploads", json={"project_id": str(target.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers); upload = await db_session.get(Upload, started.json()["upload_id"]); assert upload is not None
+    client.cookies.clear(); begin = client.get("/api/v1/auth/wecom/start"); client.get("/api/v1/auth/wecom/callback", params={"code": "staff-code", "state": begin.json()["state"]})
+    before = list(storage.expiries); response = client.post(f"/api/v1/files/uploads/{upload.id}/parts/1", headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); file = await db_session.get(File, upload.file_id)
+    assert response.status_code == 403 and response.json()["error"]["code"] == "PROJECT_FORBIDDEN" and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and storage.expiries == before and file is not None and file.state.value == "UPLOADING"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("key", ["x", "!" * 255])
 async def test_start_accepts_idempotency_key_boundaries(file_client, db_session: AsyncSession, key: str) -> None:
     client, storage = file_client; project = Project(name=f"Key {len(key)}"); db_session.add(project); await db_session.commit(); _login(client)
