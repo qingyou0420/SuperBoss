@@ -14,8 +14,8 @@ from testcontainers.community.postgres import PostgresContainer
 
 from superboss.core.config import Settings
 from superboss.modules.audit.models import AuditLog
-from superboss.modules.files.models import File, Upload
 from superboss.modules.auth.models import AuthSession, OAuthState
+from superboss.modules.files.models import File, Upload
 from superboss.modules.projects.models import Project, ProjectMember
 from superboss.modules.users.models import Role, User, UserStatus
 

@@ -51,6 +51,17 @@ async def test_assigned_staff_starts_upload(file_client, db_session: AsyncSessio
     assert response.status_code == 201
     file = await db_session.get(File, response.json()["file_id"])
     assert file is not None and file.project_id == project.id and file.uploader_id == staff.id and file.uploader_kind == "user"
+
+
+@pytest.mark.asyncio
+async def test_foreign_staff_cannot_start_upload(file_client, db_session: AsyncSession) -> None:
+    client, storage = file_client
+    staff = User(wecom_userid="foreign-staff", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
+    target, assigned = Project(name="Foreign target"), Project(name="Foreign assigned")
+    db_session.add_all([staff, target, assigned]); await db_session.flush(); db_session.add(ProjectMember(project_id=assigned.id, user_id=staff.id)); await db_session.commit()
+    started = client.get("/api/v1/auth/wecom/start"); client.get("/api/v1/auth/wecom/callback", params={"code": "staff-code", "state": started.json()["state"]})
+    response = client.post("/api/v1/files/uploads", json={"project_id": str(target.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "foreign-start"})
+    assert response.status_code == 403 and response.json()["error"]["code"] == "PROJECT_FORBIDDEN" and storage.active == {}
 from pydantic import ValidationError
 
 

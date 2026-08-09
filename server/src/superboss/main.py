@@ -56,7 +56,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return response
 
     def is_authenticated_write_path(path: str) -> bool:
-        return path == "/api/v1/projects" or path.startswith("/api/v1/projects/") or path == "/api/v1/files" or path.startswith("/api/v1/files/")
+        return path in {"/api/v1/projects", "/api/v1/files"} or path.startswith(
+            ("/api/v1/projects/", "/api/v1/files/")
+        )
 
     @app.exception_handler(DomainError)
     async def handle_domain_error(request: Request, error: DomainError) -> JSONResponse:
