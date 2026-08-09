@@ -58,7 +58,9 @@ async def test_records_denied_foreign_project_read_with_response_request_id(
     response = client.get(f"/api/v1/projects/{foreign_project.id}")
 
     assert response.status_code == 403
-    event = await _latest_event(db_session)
+    events = list((await db_session.scalars(select(AuditLog))).all())
+    assert len(events) == 1
+    event = events[0]
     assert event.action == "project.read"
     assert event.outcome == "DENIED"
     assert event.project_id == foreign_project.id
@@ -67,6 +69,54 @@ async def test_records_denied_foreign_project_read_with_response_request_id(
     assert event.actor_kind == "user"
     assert event.actor_id == staff.id
     assert event.request_id == UUID(response.headers["X-Request-ID"])
+
+
+@pytest.mark.asyncio
+async def test_staff_create_denial_is_durable_once_with_complete_context(
+    client: TestClient, db_session: AsyncSession
+) -> None:
+    """A rolled-back staff create attempt must still leave exactly one accountable denial event."""
+    staff = User(wecom_userid="staff-1", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
+    db_session.add(staff)
+    await db_session.commit()
+    _login(client, "staff-code")
+    request_id = UUID("a0b56e3a-33c8-4bd3-a955-47bdb5f36c53")
+    response = client.post(
+        "/api/v1/projects",
+        json={"name": "Forbidden create"},
+        headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "X-Request-ID": str(request_id)},
+    )
+    assert response.status_code == 403
+    events = list((await db_session.scalars(select(AuditLog).where(AuditLog.request_id == request_id))).all())
+    assert len(events) == 1
+    event = events[0]
+    assert (event.action, event.outcome, event.actor_kind, event.actor_id) == (
+        "project.create", "DENIED", "user", staff.id
+    )
+    assert event.object_type == "project" and event.object_id is None and event.project_id is None
+    assert event.request_id == UUID(response.headers["X-Request-ID"])
+    assert await db_session.scalar(select(Project).where(Project.name == "Forbidden create")) is None
+
+
+@pytest.mark.asyncio
+async def test_failed_project_requests_do_not_create_success_audits(
+    client: TestClient, db_session: AsyncSession
+) -> None:
+    """A conflict, missing target, or validation failure must not masquerade as success in history."""
+    db_session.add(Project(name="Existing"))
+    await db_session.commit()
+    _login(client, "owner-code")
+    csrf = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}
+    cases = [
+        ("post", "/api/v1/projects", {**csrf, "X-Request-ID": "b3e4cc05-08ae-4f72-a1c6-49b0a00d42df"}, {"name": "Existing"}, 409),
+        ("get", f"/api/v1/projects/{UUID('c1c0f7ae-7169-4850-a2bf-779fe955fdd1')}", {"X-Request-ID": "7541a873-1c3e-4a9d-bec5-b95045042f45"}, None, 404),
+        ("post", "/api/v1/projects", {**csrf, "X-Request-ID": "6ee23ac7-cbf5-4c98-88c6-59cbc7f36809"}, {"name": ""}, 422),
+    ]
+    for method, path, headers, body, status in cases:
+        response = getattr(client, method)(path, headers=headers, json=body) if body is not None else getattr(client, method)(path, headers=headers)
+        assert response.status_code == status
+        request_id = UUID(headers["X-Request-ID"])
+        assert not list((await db_session.scalars(select(AuditLog).where(AuditLog.request_id == request_id))).all())
 
 
 @pytest.mark.asyncio
@@ -116,3 +166,16 @@ def test_unsafe_unmatched_project_responses_always_have_request_id(
     response = getattr(client, method)(path)
     assert response.status_code == status
     assert UUID(response.headers["X-Request-ID"])
+
+
+@pytest.mark.asyncio
+async def test_non_project_and_unmatched_requests_have_ids_but_no_audit(
+    client: TestClient, db_session: AsyncSession
+) -> None:
+    """Infrastructure and framework traffic is correlatable without polluting audit history."""
+    before = await db_session.scalar(select(AuditLog))
+    assert before is None
+    for method, path in [("get", "/api/v1/health"), ("get", "/favicon.ico"), ("get", "/static/app.css"), ("get", "/missing")]:
+        response = getattr(client, method)(path)
+        assert UUID(response.headers["X-Request-ID"])
+    assert await db_session.scalar(select(AuditLog)) is None
