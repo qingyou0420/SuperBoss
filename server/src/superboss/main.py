@@ -1,9 +1,8 @@
 """FastAPI application factory."""
 
-import re
 import secrets
 from collections.abc import Awaitable, Callable
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -30,8 +29,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def request_id(request: Request) -> str:
         candidate = request.headers.get("X-Request-ID", "")
-        if re.fullmatch(r"[A-Za-z0-9._-]{1,128}", candidate):
-            return candidate
+        try:
+            return str(UUID(candidate))
+        except (TypeError, ValueError, AttributeError):
+            pass
         return str(uuid4())
 
     def error_response(request: Request, code: str, message: str, status_code: int) -> JSONResponse:
@@ -77,7 +78,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     return error_response(
                         request, "AUTHENTICATION_REQUIRED", "Authentication required", 401
                     )
-                return await call_next(request)
+                response = await call_next(request)
+                response.headers["X-Request-ID"] = request.state.request_id
+                return response
             if not has_browser_credentials and request.url.path.startswith("/api/v1/projects"):
                 return await call_next(request)
             csrf_cookie = request.cookies.get("XSRF-TOKEN")
@@ -88,7 +91,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 or not secrets.compare_digest(csrf_cookie, csrf_header)
             ):
                 return error_response(request, "CSRF_VALIDATION_FAILED", "CSRF validation failed", 403)
-        return await call_next(request)
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request.state.request_id
+        return response
 
     app.include_router(api_router, prefix="/api/v1")
     return app

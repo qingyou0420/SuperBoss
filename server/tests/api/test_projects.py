@@ -186,22 +186,24 @@ def test_project_creation_requires_browser_csrf(api_client: TestClient) -> None:
     )
 
 
-@pytest.mark.parametrize("request_id", ["a", "x" * 128])
-def test_error_request_id_is_trusted_or_replaced(api_client: TestClient, request_id: str) -> None:
-    """Reflecting hostile request IDs enables header/log injection and amplification."""
+@pytest.mark.parametrize("request_id", ["BBA39A39-47BA-4AC5-9250-CCDBA1D7F25E"])
+def test_valid_uuid_request_id_is_canonicalized_and_propagated(
+    api_client: TestClient, request_id: str
+) -> None:
+    """Changing a valid correlation ID breaks tracing across trusted callers."""
     response = api_client.get("/api/v1/projects", headers={"X-Request-ID": request_id})
     _assert_error(response, 401, "AUTHENTICATION_REQUIRED", "Authentication required")
     actual = response.json()["error"]["request_id"]
     assert actual == response.headers["X-Request-ID"]
-    assert actual == request_id
+    assert actual == "bba39a39-47ba-4ac5-9250-ccdba1d7f25e"
 
 
-@pytest.mark.parametrize("request_id", ["x" * 129, "evil\r\nX: y", "\t", "bad\x00id", b"\xe4\xb8\xad\xe6\x96\x87", "   ", "x" * 9000])
+@pytest.mark.parametrize("request_id", ["a", "x" * 128, "x" * 129, "evil\r\nX: y", "\t", "bad\x00id", b"\xe4\xb8\xad\xe6\x96\x87", "   ", "x" * 9000])
 def test_invalid_request_id_is_replaced_with_generated_uuid(api_client: TestClient, request_id: str | bytes) -> None:
     response = api_client.get("/api/v1/projects", headers={"X-Request-ID": request_id})
     _assert_error(response, 401, "AUTHENTICATION_REQUIRED", "Authentication required")
     actual = response.json()["error"]["request_id"]
-    assert re.fullmatch(r"[A-Za-z0-9._-]{1,128}", actual)
+    assert re.fullmatch(r"[0-9a-f-]{36}", actual)
     assert actual != (request_id.decode("utf-8") if isinstance(request_id, bytes) else request_id)
 
 

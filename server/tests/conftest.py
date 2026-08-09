@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from testcontainers.community.postgres import PostgresContainer
 
 from superboss.core.config import Settings
+from superboss.modules.audit.models import AuditLog
 from superboss.modules.auth.models import AuthSession, OAuthState
 from superboss.modules.users.models import Role, User, UserStatus
 
@@ -47,6 +48,7 @@ def postgres_database() -> Iterator[str]:
 async def db_session(postgres_database: str) -> AsyncIterator[AsyncSession]:
     engine = create_async_engine(postgres_database)
     async with engine.begin() as connection:
+        await connection.execute(delete(AuditLog))
         await connection.execute(delete(OAuthState))
         await connection.execute(delete(AuthSession))
         await connection.execute(delete(User))
