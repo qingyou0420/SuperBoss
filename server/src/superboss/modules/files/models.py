@@ -86,6 +86,7 @@ class Upload(Base):
         CheckConstraint("uploader_kind IN ('user','device','system')", name="ck_uploads_uploader_kind"),
         CheckConstraint("char_length(idempotency_key) > 0", name="ck_uploads_idempotency_key"),
         CheckConstraint("metadata_fingerprint ~ '^[0-9a-f]{64}$'", name="ck_uploads_fingerprint"),
+        CheckConstraint("char_length(multipart_id) > 0", name="ck_uploads_multipart_id_not_empty"),
     )
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     file_id: Mapped[UUID] = mapped_column(

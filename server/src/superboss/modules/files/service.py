@@ -106,13 +106,14 @@ class FileService:
         try:
             await self.session.flush()
         except IntegrityError as error:
-            if not self._is_idempotency_conflict(error):
-                raise
+            is_idempotency = self._is_idempotency_conflict(error)
             await self.session.rollback()
             try:
                 await self._storage().abort_multipart(key, multipart_id)
             except Exception:  # noqa: BLE001 -- preserve canonical database outcome
                 file.scan_result = "orphaned_multipart"
+            if not is_idempotency:
+                raise
             winner = await self.session.scalar(
                 select(Upload).where(
                     Upload.project_id == command.project_id,

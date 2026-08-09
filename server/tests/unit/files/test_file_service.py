@@ -377,3 +377,24 @@ async def test_concurrent_different_metadata_conflicts_and_aborts_loser(db_sessi
     assert sum(item is not None for item in results) == 1 and len(storage.active) == 1 and len(storage.aborted) == 1
     saved = await db_session.get(Upload, winner.id)
     assert saved is not None and await db_session.scalar(select(func.count()).select_from(Upload)) == 1
+
+
+@pytest.mark.asyncio
+async def test_non_idempotency_integrity_error_is_not_translated(db_session, active_owner) -> None:
+    from sqlalchemy import func, select
+    from sqlalchemy.exc import IntegrityError
+
+    from superboss.core.errors import ConflictError
+    from superboss.modules.files.models import File, Upload
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileService
+    project = Project(name="Constraint")
+    db_session.add(project); await db_session.flush()
+    storage = InMemoryObjectStorage(created_multipart_id="")
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    with pytest.raises(IntegrityError) as error:
+        await FileService(db_session, storage).start_upload(actor, UploadStart(project_id=project.id, filename="x.pdf", size_bytes=1, sha256="0" * 64, category="资料", file_date="2026-08-09"), "constraint")
+    assert not isinstance(error.value, ConflictError) and "uq_upload_idempotency" not in str(error.value)
+    assert "" in storage.aborted
+    assert await db_session.scalar(select(func.count()).select_from(File)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(Upload)) == 0

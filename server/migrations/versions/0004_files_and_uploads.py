@@ -92,6 +92,7 @@ def upgrade() -> None:
         sa.CheckConstraint("uploader_kind IN ('user','device','system')", name="ck_uploads_uploader_kind"),
         sa.CheckConstraint("char_length(idempotency_key) > 0", name="ck_uploads_idempotency_key"),
         sa.CheckConstraint("metadata_fingerprint ~ '^[0-9a-f]{64}$'", name="ck_uploads_fingerprint"),
+        sa.CheckConstraint("char_length(multipart_id) > 0", name="ck_uploads_multipart_id_not_empty"),
     )
 
 

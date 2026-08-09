@@ -17,10 +17,11 @@ class InMemoryObjectStorage:
     expiries: list[int] = field(default_factory=list)
     complete_error: Exception | None = None
     abort_error: Exception | None = None
+    created_multipart_id: str | None = None
     create_barrier: asyncio.Barrier | None = None
 
     async def create_multipart(self, object_key: str, content_type: str) -> str:
-        upload_id = str(uuid4())
+        upload_id = self.created_multipart_id if self.created_multipart_id is not None else str(uuid4())
         self.active[upload_id] = object_key
         if self.create_barrier is not None:
             await self.create_barrier.wait()
