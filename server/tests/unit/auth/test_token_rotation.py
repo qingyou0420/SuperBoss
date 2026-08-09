@@ -11,7 +11,7 @@ from superboss.core.config import Settings
 from superboss.modules.auth.models import AuthSession
 from superboss.modules.auth.repository import AuthRepository
 from superboss.modules.auth.service import AuthService, InvalidSession
-from superboss.modules.users.models import User
+from superboss.modules.users.models import Role, User
 from superboss.modules.users.repository import UserRepository
 
 
@@ -102,3 +102,16 @@ async def test_concurrent_refresh_rotation_has_exactly_one_winner(
         assert sum(record.revoked_at is None for record in records) == 1
         assert sum(record.refresh_used_at is not None for record in records) == 1
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_old_token_is_rejected_after_authoritative_role_change(
+    db_session: AsyncSession, active_owner: User, test_settings: Settings
+) -> None:
+    """Removing the DB-role comparison would accept this stale OWNER token as current."""
+    service = AuthService(db_session, AuthRepository(db_session), UserRepository(db_session), None, test_settings)
+    pair = await service.issue_session(active_owner)
+    active_owner.role = Role.STAFF
+    await db_session.commit()
+    with pytest.raises(InvalidSession):
+        await service.authenticate_access_token(pair.access_token)
