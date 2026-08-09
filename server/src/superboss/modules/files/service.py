@@ -368,12 +368,8 @@ class FileService:
             and lifecycle.completion_next_attempt_at > now
         ):
             raise FileCompletionPendingError()
-        lifecycle = await self.session.scalar(
-            select(FileUploadLifecycle)
-            .where(FileUploadLifecycle.upload_id == upload_id)
-            .with_for_update()
-        )
-        assert lifecycle is not None
+        upload, file, lifecycle = await self._fresh_active_completion_context(upload_id)
+        assert upload.multipart_id is not None
         within_ambiguity_grace = (
             not just_prepared
             and lifecycle.completion_attempt_count > 0
@@ -400,15 +396,15 @@ class FileService:
                         seconds=self._COMPLETION_AMBIGUITY_GRACE_SECONDS
                     )
                     await self.session.commit()
-                    lifecycle = await self.session.scalar(
-                        select(FileUploadLifecycle)
-                        .where(FileUploadLifecycle.upload_id == upload_id)
-                        .with_for_update()
+                    upload, file, lifecycle = await self._fresh_active_completion_context(
+                        upload_id
                     )
-                    assert lifecycle is not None
+                    assert upload.multipart_id is not None
+                multipart_id = upload.multipart_id
+                assert multipart_id is not None
                 metadata = await asyncio.wait_for(
                     self._storage().complete_multipart(
-                        file.object_key, upload.multipart_id, canonical
+                        file.object_key, multipart_id, canonical
                     ),
                     timeout=self._COMPLETION_EXTERNAL_TIMEOUT_SECONDS,
                 )
@@ -423,10 +419,46 @@ class FileService:
                 if metadata is None:
                     await self._mark_completion_ambiguous(lifecycle)
                     raise FileCompletionPendingError()
+        if metadata is None:
+            raise FileCompletionPendingError()
         if metadata.size_bytes != file.size_bytes:
             await self._fail_upload(file, upload, lifecycle)
             raise FileUploadSizeMismatchError()
         return await self._finalize_completion(file, lifecycle)
+
+    async def _fresh_active_completion_context(
+        self, upload_id: UUID
+    ) -> tuple[Upload, File, FileUploadLifecycle]:
+        """Re-lock current completion rows after a durable attempt commit."""
+        upload = await self.session.get(Upload, upload_id, populate_existing=True)
+        if upload is None:
+            raise FileUploadNotActiveError()
+        file = await self.session.scalar(
+            select(File)
+            .where(File.id == upload.file_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if (
+            file is None
+            or file.project_id != upload.project_id
+            or file.state != FileState.UPLOADING
+            or upload.multipart_id is None
+        ):
+            raise FileUploadNotActiveError()
+        lifecycle = await self.session.scalar(
+            select(FileUploadLifecycle)
+            .where(FileUploadLifecycle.upload_id == upload_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if (
+            lifecycle is None
+            or lifecycle.provision_state != "READY"
+            or lifecycle.completion_state != "PREPARED"
+        ):
+            raise FileUploadNotActiveError()
+        return upload, file, lifecycle
 
     async def _mark_completion_ambiguous(self, lifecycle: FileUploadLifecycle) -> None:
         lifecycle.completion_state = "PREPARED"

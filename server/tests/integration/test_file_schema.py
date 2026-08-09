@@ -191,7 +191,7 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
             check=True,
         )
         tables, constraints, indexes = asyncio.run(catalog())
-        assert asyncio.run(revision()) == "0013_lifecycle_downgrade_guard"
+        assert asyncio.run(revision()) == "0014_prepare_delete_fence"
         assert "trg_files_snapshot_storage_cleanup" in asyncio.run(trigger_names())
         assert {"files", "uploads", "file_upload_lifecycle", "file_lifecycle_outbox", "file_storage_cleanup"} <= set(tables)
         assert asyncio.run(table_columns("files")) == [
@@ -441,7 +441,7 @@ def test_downgrade_blocks_live_file_lifecycle_without_data_loss(
             env=environment,
             check=True,
         )
-        assert asyncio.run(seed())[0] == "0013_lifecycle_downgrade_guard"
+        assert asyncio.run(seed())[0] == "0014_prepare_delete_fence"
         downgrade = subprocess.run(
             [sys.executable, "-m", "alembic", "downgrade", "0005_file_lifecycle"],
             cwd=SERVER_ROOT,
@@ -454,7 +454,7 @@ def test_downgrade_blocks_live_file_lifecycle_without_data_loss(
         assert downgrade.returncode != 0
         assert "SUPERBOSS_FILE_LIFECYCLE_DOWNGRADE_BLOCKED" in output
         revision, tables, rows = asyncio.run(snapshot())
-        assert revision == "0013_lifecycle_downgrade_guard"
+        assert revision == "0014_prepare_delete_fence"
         assert {
             "file_upload_lifecycle",
             "file_lifecycle_outbox",
@@ -667,7 +667,7 @@ def test_downgrade_guard_covers_each_live_lifecycle_shape(
                 result.stdout + result.stderr
             )
             revision, tables, columns, rows = asyncio.run(head_snapshot())
-            assert revision == "0013_lifecycle_downgrade_guard"
+            assert revision == "0014_prepare_delete_fence"
             assert {
                 "file_upload_lifecycle",
                 "file_lifecycle_outbox",

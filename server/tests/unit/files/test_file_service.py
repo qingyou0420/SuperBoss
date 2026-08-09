@@ -1405,6 +1405,8 @@ async def test_database_file_delete_snapshots_cleanup_before_cascade(
     db_session, active_owner
 ) -> None:
     """The database trigger preserves storage coordinates after ORM file deletion."""
+    from datetime import UTC, datetime
+
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -1445,6 +1447,10 @@ async def test_database_file_delete_snapshots_cleanup_before_cascade(
     assert all(job.state == "PENDING" and job.object_key == object_key for job in jobs)
     assert await db_session.get(Upload, upload_id) is None
     factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    assert await FileLifecycleService(factory, storage).reconcile() == 0
+    for job in jobs:
+        job.next_attempt_at = datetime.now(UTC)
+    await db_session.commit()
     assert await FileLifecycleService(factory, storage).reconcile() == 2
     db_session.expire_all()
     jobs = list(
@@ -1459,6 +1465,8 @@ async def test_raw_sql_file_delete_snapshots_active_multipart_cleanup(
     db_session, active_owner
 ) -> None:
     """A raw SQL delete cannot bypass the database cleanup trigger."""
+    from datetime import UTC, datetime
+
     from sqlalchemy import select, text
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -1499,6 +1507,10 @@ async def test_raw_sql_file_delete_snapshots_active_multipart_cleanup(
     assert [job.operation for job in jobs] == ["ABORT_MULTIPART", "DELETE_OBJECT"]
     assert len({(job.operation, job.object_key, job.multipart_id) for job in jobs}) == 2
     factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    assert await FileLifecycleService(factory, storage).reconcile() == 0
+    for job in jobs:
+        job.next_attempt_at = datetime.now(UTC)
+    await db_session.commit()
     assert await FileLifecycleService(factory, storage).reconcile() == 2
     assert storage.active == {}
 
@@ -1508,6 +1520,8 @@ async def test_project_cascade_snapshots_active_and_completed_file_cleanup(
     db_session, active_owner
 ) -> None:
     """Project cascade leaves cleanup for both active multipart and completed object."""
+    from datetime import UTC, datetime
+
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -1550,6 +1564,7 @@ async def test_project_cascade_snapshots_active_and_completed_file_cleanup(
     active_file = await db_session.get(File, active.file_id)
     completed_file = await db_session.get(File, completed.file_id)
     assert active_file is not None and completed_file is not None
+    active_key = active_file.object_key
     completed_key = completed_file.object_key
     await db_session.delete(project)
     await db_session.commit()
@@ -1557,7 +1572,13 @@ async def test_project_cascade_snapshots_active_and_completed_file_cleanup(
     jobs = list(await db_session.scalars(select(FileStorageCleanup)))
     assert len(jobs) == 4 and await storage.stat_object(completed_key) is not None
     factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
-    assert await FileLifecycleService(factory, storage).reconcile() == 4
+    assert await FileLifecycleService(factory, storage).reconcile() == 2
+    active_jobs = [job for job in jobs if job.object_key == active_key]
+    assert len(active_jobs) == 2 and all(job.state == "PENDING" for job in active_jobs)
+    for job in active_jobs:
+        job.next_attempt_at = datetime.now(UTC)
+    await db_session.commit()
+    assert await FileLifecycleService(factory, storage).reconcile() == 2
     assert storage.active == {} and await storage.stat_object(completed_key) is None
 
 
@@ -2768,3 +2789,139 @@ async def test_cleanup_batch_claims_all_rows_before_any_external_work(db_session
     )
     assert Counter(storage.calls) == Counter({key: 1 for key in keys})
     assert all(job.state == "DONE" and job.attempt_count == 1 for job in jobs)
+
+
+@pytest.mark.asyncio
+async def test_delete_before_prepared_commit_cannot_complete_after_cleanup(db_session, active_owner) -> None:
+    """A delete observing NONE cannot finish cleanup before a request completes storage."""
+    import asyncio
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select, text
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from superboss.core.errors import DomainError
+    from superboss.modules.files.models import File, FileStorageCleanup
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileLifecycleService, FileService
+    from superboss.modules.files.storage import CompletedPart
+
+    prepared_flushed = asyncio.Event()
+    prepared_committed = asyncio.Event()
+    allow_prepared_commit = asyncio.Event()
+    allow_request_continue = asyncio.Event()
+
+    class ControlledPrepareSession(AsyncSession):
+        async def commit(self) -> None:
+            if not prepared_flushed.is_set():
+                await self.flush()
+                prepared_flushed.set()
+                await asyncio.wait_for(allow_prepared_commit.wait(), timeout=5)
+                await super().commit()
+                prepared_committed.set()
+                await asyncio.wait_for(allow_request_continue.wait(), timeout=5)
+                return
+            await super().commit()
+
+    base_factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    request_factory = async_sessionmaker(
+        db_session.bind, class_=ControlledPrepareSession, expire_on_commit=False
+    )
+    project = Project(name="Delete before prepared commit")
+    db_session.add(project)
+    await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    storage = InMemoryObjectStorage()
+    upload = await FileService(db_session, storage).start_upload(
+        actor,
+        UploadStart(
+            project_id=project.id,
+            filename="commit-race.pdf",
+            category="docs",
+            file_date="2026-08-09",
+            size_bytes=1,
+            sha256="0" * 64,
+        ),
+        "delete-before-prepared",
+    )
+    file_id, upload_id = upload.file_id, upload.id
+    request_session = request_factory()
+    delete_started = asyncio.Event()
+    delete_pid: list[int] = []
+
+    async def delete_file() -> None:
+        async with base_factory() as delete_session:
+            delete_pid.append(int(await delete_session.scalar(text("SELECT pg_backend_pid()"))))
+            delete_started.set()
+            file = await delete_session.get(File, file_id)
+            assert file is not None
+            await delete_session.delete(file)
+            await delete_session.commit()
+
+    request = asyncio.create_task(
+        FileService(request_session, storage).complete_upload(
+            actor, upload_id, [CompletedPart(1, "etag")]
+        )
+    )
+    deletion: asyncio.Task[None] | None = None
+    try:
+        await asyncio.wait_for(prepared_flushed.wait(), timeout=5)
+        deletion = asyncio.create_task(delete_file())
+        await asyncio.wait_for(delete_started.wait(), timeout=5)
+        for _ in range(300):
+            wait_event = await db_session.scalar(
+                text("SELECT wait_event_type FROM pg_stat_activity WHERE pid = :pid"),
+                {"pid": delete_pid[0]},
+            )
+            if wait_event == "Lock":
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("delete did not reach the lifecycle lock")
+
+        allow_prepared_commit.set()
+        await asyncio.wait_for(prepared_committed.wait(), timeout=5)
+        await asyncio.wait_for(deletion, timeout=5)
+        db_session.expire_all()
+        jobs = list(
+            await db_session.scalars(
+                select(FileStorageCleanup).where(FileStorageCleanup.lifecycle_id == upload_id)
+            )
+        )
+        assert len(jobs) == 2
+        assert await FileLifecycleService(base_factory, storage).reconcile_cleanup() == 0
+        db_session.expire_all()
+        jobs = list(
+            await db_session.scalars(
+                select(FileStorageCleanup).where(FileStorageCleanup.lifecycle_id == upload_id)
+            )
+        )
+        assert all(job.state == "PENDING" and job.next_attempt_at > datetime.now(UTC) for job in jobs)
+
+        allow_request_continue.set()
+        with pytest.raises(DomainError):
+            await asyncio.wait_for(request, timeout=5)
+        assert storage.complete_calls == 0 and storage.objects == {}
+
+        for job in jobs:
+            job.next_attempt_at = datetime.now(UTC)
+        await db_session.commit()
+        assert await FileLifecycleService(base_factory, storage).reconcile_cleanup() == 2
+        db_session.expire_all()
+        jobs = list(
+            await db_session.scalars(
+                select(FileStorageCleanup).where(FileStorageCleanup.lifecycle_id == upload_id)
+            )
+        )
+        assert all(job.state == "DONE" for job in jobs)
+    finally:
+        allow_prepared_commit.set()
+        allow_request_continue.set()
+        if deletion is not None and not deletion.done():
+            await asyncio.wait_for(deletion, timeout=5)
+        if not request.done():
+            try:
+                await asyncio.wait_for(request, timeout=5)
+            except DomainError:
+                pass
+        await request_session.close()
