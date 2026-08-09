@@ -1,5 +1,6 @@
 """HTTP boundaries for least-privilege Kimi device credentials."""
 
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime, timedelta
 from uuid import UUID, uuid4
@@ -8,7 +9,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from superboss.core.config import Settings
@@ -32,7 +33,9 @@ async def device_client(
     db_session: AsyncSession, test_settings: Settings
 ) -> AsyncIterator[TestClient]:
     app = create_app(test_settings, object_storage=InMemoryObjectStorage())
-    with TestClient(app, base_url="https://testserver") as client:
+    with TestClient(
+        app, base_url="https://testserver", raise_server_exceptions=False
+    ) as client:
         yield client
 
 
@@ -483,6 +486,56 @@ async def test_me_uses_live_active_project_names_and_updates_last_used(
 
 
 @pytest.mark.asyncio
+async def test_browser_actor_denied_from_device_me_is_safely_audited(
+    device_client: TestClient, db_session: AsyncSession, active_owner: User
+) -> None:
+    """An authenticated browser probe must not disappear from the denial trail."""
+    request_id = uuid4()
+    await db_session.commit()
+    _login(device_client)
+
+    response = device_client.get(
+        "/api/v1/device-auth/me", headers={"X-Request-ID": str(request_id)}
+    )
+
+    _assert_error(response, 401, "AUTHENTICATION_REQUIRED")
+    denied = await db_session.scalar(
+        select(AuditLog).where(
+            AuditLog.request_id == request_id,
+            AuditLog.action == "device.me",
+            AuditLog.outcome == "DENIED",
+        )
+    )
+    assert denied is not None
+    assert denied.actor_kind == "user" and denied.actor_id == active_owner.id
+    assert denied.metadata_json == {
+        "actor_role": "OWNER",
+        "reason": "DEVICE_CREDENTIAL_REQUIRED",
+    }
+    serialized = str(denied.metadata_json).lower()
+    assert all(secret not in serialized for secret in ("authorization", "token", "hash"))
+
+
+def test_browser_device_me_denial_does_not_succeed_when_audit_fails(
+    device_client: TestClient,
+) -> None:
+    """Returning 401 without mandatory evidence would make authenticated probes invisible."""
+    _login(device_client)
+
+    def fail_denial(_mapper: object, _connection: object, target: AuditLog) -> None:
+        if target.action == "device.me" and target.outcome == "DENIED":
+            raise RuntimeError("audit unavailable")
+
+    event.listen(AuditLog, "before_insert", fail_denial)
+    try:
+        response = device_client.get("/api/v1/device-auth/me")
+    finally:
+        event.remove(AuditLog, "before_insert", fail_denial)
+
+    _assert_error(response, 500, "REQUEST_FAILED")
+
+
+@pytest.mark.asyncio
 async def test_delete_is_csrf_protected_idempotent_and_revokes_all_credentials(
     device_client: TestClient, db_session: AsyncSession, active_owner: User
 ) -> None:
@@ -565,6 +618,58 @@ async def test_invalid_reused_and_expired_pair_credentials_share_one_safe_401(
     assert all(raw not in str(response.json()) for raw, response in zip(
         ("invalid", replay.raw_code, expired.raw_code), responses, strict=True
     ))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "body", "action"),
+    [
+        (
+            "/api/v1/device-auth/pair",
+            {"pairing_code": "\ud800" * 32, "device_name": "Unicode-PC"},
+            "device.pair",
+        ),
+        (
+            "/api/v1/device-auth/refresh",
+            {"refresh_token": "\ud800" * 32},
+            "device.refresh",
+        ),
+    ],
+)
+async def test_unpaired_unicode_surrogate_credentials_share_safe_401_and_denied_audit(
+    device_client: TestClient,
+    db_session: AsyncSession,
+    path: str,
+    body: dict[str, str],
+    action: str,
+) -> None:
+    """Every JSON string must stay inside the uniform invalid-credential boundary."""
+    request_id = uuid4()
+    response = device_client.post(
+        path,
+        content=json.dumps(body, ensure_ascii=True).encode("ascii"),
+        headers={
+            "Content-Type": "application/json",
+            "X-Request-ID": str(request_id),
+        },
+    )
+
+    _assert_error(response, 401, "AUTHENTICATION_REQUIRED")
+    denied = await db_session.scalar(
+        select(AuditLog).where(
+            AuditLog.request_id == request_id,
+            AuditLog.action == action,
+            AuditLog.outcome == "DENIED",
+        )
+    )
+    assert denied is not None
+    assert denied.actor_kind == "system" and denied.actor_id is None
+    assert denied.metadata_json == {
+        "actor_role": None,
+        "reason": "INVALID_CREDENTIAL",
+    }
+    serialized = str(denied.metadata_json).lower()
+    assert all(secret not in serialized for secret in ("authorization", "token", "hash"))
 
 
 @pytest.mark.asyncio
@@ -654,3 +759,112 @@ async def test_request_validation_and_device_name_normalization(
         headers={"Authorization": f"Bearer {paired.json()['access_token']}"},
     )
     assert me.status_code == 200 and me.json()["name"] == "Owner-PC"
+
+
+@pytest.mark.asyncio
+async def test_invalid_device_name_is_audited_without_consuming_pairing_code(
+    device_client: TestClient, db_session: AsyncSession, active_owner: User
+) -> None:
+    """Schema-first rejection would omit failed-pair evidence for a real unused code."""
+    project = Project(name="Invalid device name audit")
+    db_session.add(project)
+    await db_session.commit()
+    service = await _device_service(device_client, db_session)
+    code = await service.create_pairing_code(
+        active_owner.id, [project.id], request_id=uuid4()
+    )
+    request_id = uuid4()
+
+    response = device_client.post(
+        "/api/v1/device-auth/pair",
+        json={"pairing_code": code.raw_code, "device_name": "   "},
+        headers={"X-Request-ID": str(request_id)},
+    )
+
+    _assert_error(response, 422, "VALIDATION_ERROR")
+    pairing = await db_session.scalar(
+        select(DevicePairingCode).where(
+            DevicePairingCode.code_hash == hash_token(code.raw_code)
+        )
+    )
+    denied = await db_session.scalar(
+        select(AuditLog).where(
+            AuditLog.request_id == request_id,
+            AuditLog.action == "device.pair",
+            AuditLog.outcome == "DENIED",
+        )
+    )
+    assert pairing is not None and pairing.used_at is None
+    assert denied is not None
+    assert denied.actor_kind == "system" and denied.actor_id is None
+    assert denied.metadata_json == {"actor_role": None, "reason": "INVALID_REQUEST"}
+    serialized = str(denied.metadata_json).lower()
+    assert code.raw_code not in serialized
+    assert all(secret not in serialized for secret in ("authorization", "token", "hash"))
+
+
+@pytest.mark.asyncio
+async def test_invalid_device_name_does_not_return_422_when_denial_audit_fails(
+    device_client: TestClient, db_session: AsyncSession, active_owner: User
+) -> None:
+    """A failed mandatory denial write must propagate while leaving the code unused."""
+    project = Project(name="Invalid name audit fault")
+    db_session.add(project)
+    await db_session.commit()
+    service = await _device_service(device_client, db_session)
+    code = await service.create_pairing_code(
+        active_owner.id, [project.id], request_id=uuid4()
+    )
+
+    def fail_denial(_mapper: object, _connection: object, target: AuditLog) -> None:
+        if target.action == "device.pair" and target.outcome == "DENIED":
+            raise RuntimeError("audit unavailable")
+
+    event.listen(AuditLog, "before_insert", fail_denial)
+    try:
+        response = device_client.post(
+            "/api/v1/device-auth/pair",
+            json={"pairing_code": code.raw_code, "device_name": "PC\x00x"},
+        )
+    finally:
+        event.remove(AuditLog, "before_insert", fail_denial)
+
+    _assert_error(response, 500, "REQUEST_FAILED")
+    pairing = await db_session.scalar(
+        select(DevicePairingCode).where(
+            DevicePairingCode.code_hash == hash_token(code.raw_code)
+        )
+    )
+    assert pairing is not None and pairing.used_at is None
+
+
+@pytest.mark.asyncio
+async def test_reused_request_id_cannot_suppress_distinct_device_use_events(
+    device_client: TestClient, db_session: AsyncSession, active_owner: User
+) -> None:
+    """A client-controlled correlation ID must not deduplicate separate successful uses."""
+    project = Project(name="Repeated request ID use audit")
+    db_session.add(project)
+    await db_session.commit()
+    pair = await _pair_device(device_client, db_session, active_owner.id, project.id)
+    request_id = uuid4()
+    headers = {
+        "Authorization": f"Bearer {pair.access_token}",
+        "X-Request-ID": str(request_id),
+    }
+
+    first = device_client.get("/api/v1/device-auth/me", headers=headers)
+    second = device_client.get("/api/v1/device-auth/me", headers=headers)
+
+    assert first.status_code == second.status_code == 200
+    events = list(
+        await db_session.scalars(
+            select(AuditLog).where(
+                AuditLog.request_id == request_id,
+                AuditLog.action == "device.use",
+                AuditLog.outcome == "SUCCESS",
+            )
+        )
+    )
+    assert len(events) == 2
+    assert all(event.actor_id == pair.device_id for event in events)

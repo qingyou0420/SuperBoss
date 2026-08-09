@@ -19,11 +19,68 @@ from superboss.modules.projects.models import Project
 from superboss.modules.users.models import User
 
 SERVER_ROOT = Path(__file__).resolve().parents[2]
+_DEVICE_TABLES = {
+    "device_pairing_codes",
+    "device_pairing_projects",
+    "device_connections",
+    "device_sessions",
+    "device_project_grants",
+    "device_scope_grants",
+}
 
 
 def _database_url(database_url: str, database_name: str) -> str:
     parsed = urlsplit(database_url)
     return urlunsplit((parsed.scheme, parsed.netloc, f"/{database_name}", "", ""))
+
+
+async def _device_catalog(
+    connection: asyncpg.Connection,
+) -> tuple[
+    tuple[tuple[str, str, str, str, int], ...],
+    tuple[tuple[str, str, str, str], ...],
+    tuple[tuple[str, str, str], ...],
+]:
+    columns = await connection.fetch(
+        "SELECT table_name, column_name, data_type, is_nullable, ordinal_position "
+        "FROM information_schema.columns "
+        "WHERE table_schema = 'public' AND table_name LIKE 'device_%' "
+        "ORDER BY table_name, ordinal_position"
+    )
+    constraints = await connection.fetch(
+        "SELECT relation.relname, constraint_.conname, constraint_.contype, "
+        "pg_get_constraintdef(constraint_.oid) AS definition "
+        "FROM pg_constraint AS constraint_ "
+        "JOIN pg_class AS relation ON relation.oid = constraint_.conrelid "
+        "JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace "
+        "WHERE namespace.nspname = 'public' AND relation.relname LIKE 'device_%' "
+        "ORDER BY relation.relname, constraint_.conname"
+    )
+    indexes = await connection.fetch(
+        "SELECT tablename, indexname, indexdef FROM pg_indexes "
+        "WHERE schemaname = 'public' AND tablename LIKE 'device_%' "
+        "ORDER BY tablename, indexname"
+    )
+    return (
+        tuple(
+            (
+                row["table_name"],
+                row["column_name"],
+                row["data_type"],
+                row["is_nullable"],
+                row["ordinal_position"],
+            )
+            for row in columns
+        ),
+        tuple(
+            (row["relname"], row["conname"], row["contype"], row["definition"])
+            for row in constraints
+        ),
+        tuple(
+            (row["tablename"], row["indexname"], row["indexdef"])
+            for row in indexes
+        ),
+    )
 
 
 def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_database: str) -> None:
@@ -185,19 +242,13 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
         asyncio.run(insert_legacy_upload())
 
         subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "alembic",
-                "upgrade",
-                "0015_discover_unbound_multipart",
-            ],
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
             cwd=SERVER_ROOT,
             env=environment,
             check=True,
         )
         tables, constraints, indexes = asyncio.run(catalog())
-        assert asyncio.run(revision()) == "0015_discover_unbound_multipart"
+        assert asyncio.run(revision()) == "0016_device_connections"
         assert "trg_files_snapshot_storage_cleanup" in asyncio.run(trigger_names())
         assert {"files", "uploads", "file_upload_lifecycle", "file_lifecycle_outbox", "file_storage_cleanup"} <= set(tables)
         assert asyncio.run(table_columns("files")) == [
@@ -365,7 +416,16 @@ def test_downgrade_blocks_live_file_lifecycle_without_data_loss(
         finally:
             await connection.close()
 
-    async def seed() -> tuple[str, set[str], int]:
+    async def seed() -> tuple[
+        str,
+        set[str],
+        int,
+        tuple[
+            tuple[tuple[str, str, str, str, int], ...],
+            tuple[tuple[str, str, str, str], ...],
+            tuple[tuple[str, str, str], ...],
+        ],
+    ]:
         connection = await asyncpg.connect(temporary_url.replace("postgresql+asyncpg", "postgresql"))
         try:
             object_key = f"projects/{project_id}/docs/2026-08-09/{file_id}/live.pdf"
@@ -417,11 +477,20 @@ def test_downgrade_blocks_live_file_lifecycle_without_data_loss(
                     "SELECT (SELECT count(*) FROM files) + (SELECT count(*) FROM uploads)"
                 )
             )
-            return revision, tables, rows
+            return revision, tables, rows, await _device_catalog(connection)
         finally:
             await connection.close()
 
-    async def snapshot() -> tuple[str, set[str], int]:
+    async def snapshot() -> tuple[
+        str,
+        set[str],
+        int,
+        tuple[
+            tuple[tuple[str, str, str, str, int], ...],
+            tuple[tuple[str, str, str, str], ...],
+            tuple[tuple[str, str, str], ...],
+        ],
+    ]:
         connection = await asyncpg.connect(temporary_url.replace("postgresql+asyncpg", "postgresql"))
         try:
             revision = str(await connection.fetchval("SELECT version_num FROM alembic_version"))
@@ -436,7 +505,7 @@ def test_downgrade_blocks_live_file_lifecycle_without_data_loss(
                     "SELECT (SELECT count(*) FROM files) + (SELECT count(*) FROM uploads)"
                 )
             )
-            return revision, tables, rows
+            return revision, tables, rows, await _device_catalog(connection)
         finally:
             await connection.close()
 
@@ -445,18 +514,15 @@ def test_downgrade_blocks_live_file_lifecycle_without_data_loss(
     environment["SUPERBOSS_DATABASE_URL"] = temporary_url
     try:
         subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "alembic",
-                "upgrade",
-                "0015_discover_unbound_multipart",
-            ],
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
             cwd=SERVER_ROOT,
             env=environment,
             check=True,
         )
-        assert asyncio.run(seed())[0] == "0015_discover_unbound_multipart"
+        before = asyncio.run(seed())
+        assert before[0] == "0016_device_connections"
+        assert _DEVICE_TABLES <= before[1]
+        assert all(before[3])
         downgrade = subprocess.run(
             [sys.executable, "-m", "alembic", "downgrade", "0005_file_lifecycle"],
             cwd=SERVER_ROOT,
@@ -468,8 +534,10 @@ def test_downgrade_blocks_live_file_lifecycle_without_data_loss(
         output = downgrade.stdout + downgrade.stderr
         assert downgrade.returncode != 0
         assert "SUPERBOSS_FILE_LIFECYCLE_DOWNGRADE_BLOCKED" in output
-        revision, tables, rows = asyncio.run(snapshot())
-        assert revision == "0015_discover_unbound_multipart"
+        after = asyncio.run(snapshot())
+        assert after == before
+        revision, tables, rows, _device_fingerprint = after
+        assert revision == "0016_device_connections"
         assert {
             "file_upload_lifecycle",
             "file_lifecycle_outbox",
@@ -603,7 +671,17 @@ def test_downgrade_guard_covers_each_live_lifecycle_shape(
         finally:
             await connection.close()
 
-    async def head_snapshot() -> tuple[str, set[str], set[str], int]:
+    async def head_snapshot() -> tuple[
+        str,
+        set[str],
+        set[str],
+        int,
+        tuple[
+            tuple[tuple[str, str, str, str, int], ...],
+            tuple[tuple[str, str, str, str], ...],
+            tuple[tuple[str, str, str], ...],
+        ],
+    ]:
         connection = await asyncpg.connect(temporary_url.replace("postgresql+asyncpg", "postgresql"))
         try:
             revision = str(await connection.fetchval("SELECT version_num FROM alembic_version"))
@@ -625,7 +703,7 @@ def test_downgrade_guard_covers_each_live_lifecycle_shape(
                     "SELECT (SELECT count(*) FROM files) + (SELECT count(*) FROM uploads)"
                 )
             )
-            return revision, tables, columns, rows
+            return revision, tables, columns, rows, await _device_catalog(connection)
         finally:
             await connection.close()
 
@@ -678,13 +756,7 @@ def test_downgrade_guard_covers_each_live_lifecycle_shape(
     )
     try:
         subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "alembic",
-                "upgrade",
-                "0015_discover_unbound_multipart",
-            ],
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
             cwd=SERVER_ROOT,
             env=environment,
             check=True,
@@ -692,13 +764,19 @@ def test_downgrade_guard_covers_each_live_lifecycle_shape(
         for shape in unsafe_shapes:
             asyncio.run(reset())
             asyncio.run(seed(shape))
+            before = asyncio.run(head_snapshot())
+            assert before[0] == "0016_device_connections"
+            assert _DEVICE_TABLES <= before[1]
+            assert all(before[4])
             result = downgrade(environment)
             assert result.returncode != 0
             assert "SUPERBOSS_FILE_LIFECYCLE_DOWNGRADE_BLOCKED" in (
                 result.stdout + result.stderr
             )
-            revision, tables, columns, rows = asyncio.run(head_snapshot())
-            assert revision == "0015_discover_unbound_multipart"
+            after = asyncio.run(head_snapshot())
+            assert after == before
+            revision, tables, columns, rows, _device_fingerprint = after
+            assert revision == "0016_device_connections"
             assert {
                 "file_upload_lifecycle",
                 "file_lifecycle_outbox",
@@ -718,6 +796,7 @@ def test_downgrade_guard_covers_each_live_lifecycle_shape(
             "file_lifecycle_outbox",
             "file_storage_cleanup",
         } & tables
+        assert not _DEVICE_TABLES & tables
         assert rows == 2 and nonempty_multipart == 1
     finally:
         asyncio.run(drop_database())

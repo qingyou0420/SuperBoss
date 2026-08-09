@@ -119,7 +119,10 @@ class DeviceService:
     def _credential_hash(raw_credential: str) -> str | None:
         if not isinstance(raw_credential, str) or not 32 <= len(raw_credential) <= 512:
             return None
-        return hash_token(raw_credential)
+        try:
+            return hash_token(raw_credential)
+        except UnicodeEncodeError:
+            return None
 
     @staticmethod
     def _device_name(value: str) -> str:
@@ -182,7 +185,14 @@ class DeviceService:
         )
         await session.flush()
 
-    async def _denied(self, action: str, request_id: UUID, object_id: UUID | None) -> None:
+    async def _denied(
+        self,
+        action: str,
+        request_id: UUID,
+        object_id: UUID | None,
+        *,
+        reason: str = "INVALID_CREDENTIAL",
+    ) -> None:
         async with self.session_factory() as session, session.begin():
             await self._audit(
                 session,
@@ -194,7 +204,7 @@ class DeviceService:
                 object_id=object_id,
                 outcome="DENIED",
                 request_id=request_id,
-                metadata={"reason": "INVALID_CREDENTIAL"},
+                metadata={"reason": reason},
             )
 
     async def create_pairing_code(
@@ -261,7 +271,13 @@ class DeviceService:
     async def pair(
         self, raw_code: str, device_name: str, *, request_id: UUID
     ) -> DeviceTokenPair:
-        normalized_name = self._device_name(device_name)
+        try:
+            normalized_name = self._device_name(device_name)
+        except InvalidDeviceGrant:
+            await self._denied(
+                "device.pair", request_id, None, reason="INVALID_REQUEST"
+            )
+            raise
         credential_hash = self._credential_hash(raw_code)
         now = self._now()
         try:
@@ -517,7 +533,6 @@ class DeviceService:
                 object_id=device.id,
                 outcome="SUCCESS",
                 request_id=request_id,
-                event_key=self._event_key("device-use", request_id),
                 metadata={"state": "ACTIVE"},
             )
             return Actor(

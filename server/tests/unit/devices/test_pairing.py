@@ -557,6 +557,53 @@ async def test_successful_access_updates_last_used_and_appends_safe_use_audit(
 
 
 @pytest.mark.asyncio
+async def test_device_use_audit_failure_rolls_back_last_used(
+    db_session: AsyncSession,
+    active_owner: object,
+    session_factory: async_sessionmaker[AsyncSession],
+    test_settings: object,
+    reference_time: datetime,
+) -> None:
+    """Activity state must not advance when its mandatory use evidence cannot persist."""
+    models, _service = device_contract()
+    _service, pair, _project = await paired_fixture(
+        db_session,
+        active_owner,
+        session_factory,
+        test_settings,
+        reference_time,
+        "Device use audit rollback",
+    )
+    service = service_for(
+        session_factory, test_settings, reference_time + timedelta(minutes=1)
+    )
+
+    def fail_use(_mapper: object, _connection: object, target: AuditLog) -> None:
+        if target.action == "device.use":
+            raise RuntimeError("audit unavailable")
+
+    event.listen(AuditLog, "before_insert", fail_use)
+    try:
+        with pytest.raises(RuntimeError, match="audit unavailable"):
+            await service.authenticate_access_token(pair.access_token, request_id=uuid4())
+    finally:
+        event.remove(AuditLog, "before_insert", fail_use)
+
+    async with session_factory() as session:
+        device = await session.get(models.DeviceConnection, pair.device_id)
+        use_events = list(
+            await session.scalars(
+                select(AuditLog).where(
+                    AuditLog.action == "device.use",
+                    AuditLog.actor_id == pair.device_id,
+                )
+            )
+        )
+    assert device is not None and device.last_used_at is None
+    assert use_events == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "case",
     [

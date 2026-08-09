@@ -5,8 +5,6 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from superboss.modules.devices.service import InvalidDeviceGrant, normalize_device_name
-
 
 class PairingCodeCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -31,14 +29,6 @@ class DevicePair(BaseModel):
 
     pairing_code: str
     device_name: str
-
-    @field_validator("device_name")
-    @classmethod
-    def canonical_device_name(cls, value: str) -> str:
-        try:
-            return normalize_device_name(value)
-        except InvalidDeviceGrant as error:
-            raise ValueError("Device name is invalid") from error
 
 
 class DeviceRefresh(BaseModel):

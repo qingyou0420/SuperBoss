@@ -184,6 +184,16 @@ async def device_me(
         or request.cookies.get("access_token") is not None
         or request.cookies.get("refresh_token") is not None
     ):
+        await AuditService(request.app.state.session_factory).record(
+            AuditEventInput(
+                actor=actor,
+                action="device.me",
+                object_type="device",
+                outcome="DENIED",
+                request_id=_request_id(request),
+                metadata={"reason": "DEVICE_CREDENTIAL_REQUIRED"},
+            )
+        )
         raise UnauthenticatedError()
     try:
         device = await service.get_device(actor.subject_id)
