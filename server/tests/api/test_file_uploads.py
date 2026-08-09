@@ -56,7 +56,7 @@ async def test_assigned_staff_starts_upload(file_client, db_session: AsyncSessio
 @pytest.mark.asyncio
 async def test_foreign_staff_cannot_start_upload(file_client, db_session: AsyncSession) -> None:
     client, storage = file_client
-    staff = User(wecom_userid="foreign-staff", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
+    staff = User(wecom_userid="staff-1", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
     target, assigned = Project(name="Foreign target"), Project(name="Foreign assigned")
     db_session.add_all([staff, target, assigned]); await db_session.flush(); db_session.add(ProjectMember(project_id=assigned.id, user_id=staff.id)); await db_session.commit()
     started = client.get("/api/v1/auth/wecom/start"); client.get("/api/v1/auth/wecom/callback", params={"code": "staff-code", "state": started.json()["state"]})
