@@ -10,11 +10,12 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 import pytest_asyncio
-from fastapi import Depends, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from starlette.routing import Mount
 
 from superboss.core.actors import Actor
 from superboss.core.config import Settings
@@ -192,7 +193,8 @@ async def test_non_project_and_unmatched_requests_have_ids_but_no_audit(
     """Infrastructure and framework traffic is correlatable without polluting audit history."""
     before = await db_session.scalar(select(AuditLog))
     assert before is None
-    for method, path in [("get", "/api/v1/health"), ("get", "/favicon.ico"), ("get", "/static/app.css"), ("get", "/missing")]:
+    assert not any(isinstance(route, Mount) and route.name == "static" for route in client.app.routes)
+    for method, path in [("get", "/api/v1/health/live"), ("get", "/favicon.ico"), ("get", "/static/app.css"), ("get", "/missing")]:
         response = getattr(client, method)(path)
         assert UUID(response.headers["X-Request-ID"])
     assert await db_session.scalar(select(AuditLog)) is None
@@ -338,9 +340,47 @@ async def test_concurrent_request_ids_keep_audit_actors_isolated(
         assert await db_session.scalar(select(User)) is None
 
 
+_UNSAFE_ALLOWLIST = {
+    ("POST", "/api/v1/auth/refresh", "superboss.modules.auth.router", "refresh"),
+    ("POST", "/api/v1/auth/logout", "superboss.modules.auth.router", "logout"),
+    ("POST", "/api/v1/projects", "superboss.modules.projects.router", "create_project"),
+}
+
+
+def _unsafe_routes(app: FastAPI) -> set[tuple[str, str, str, str]]:
+    found: set[tuple[str, str, str, str]] = set()
+
+    def visit(routes: object, prefix: str = "") -> None:
+        for route in routes:  # type: ignore[union-attr]
+            if isinstance(route, APIRoute):
+                for method in route.methods & {"POST", "PUT", "PATCH", "DELETE"}:
+                    found.add((method, prefix + route.path, route.endpoint.__module__, route.endpoint.__name__))
+            elif hasattr(route, "original_router"):
+                context = route.include_context
+                visit(route.original_router.routes, prefix + context.prefix)
+
+    visit(app.routes)
+    return found
+
+
+def _assert_audit_mutation_free(source: str) -> None:
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            name = node.name.lower()
+            assert not (
+                name.startswith(("delete", "update", "remove", "purge"))
+                and any(word in name for word in ("audit", "event", "log"))
+            )
+        if isinstance(node, ast.Call):
+            rendered = ast.unparse(node)
+            assert "delete(AuditLog" not in rendered and "update(AuditLog" not in rendered
+            assert "DELETE FROM AUDIT_LOGS" not in rendered.upper() and "UPDATE AUDIT_LOGS" not in rendered.upper()
+
+
 @pytest.mark.asyncio
 async def test_audit_is_append_only_at_route_and_source_boundaries(
-    client: TestClient, db_session: AsyncSession
+    db_session: AsyncSession, test_settings: Settings
 ) -> None:
     """No unsafe route or audit implementation may update/delete a durable event."""
     seed = AuditLog(
@@ -358,20 +398,25 @@ async def test_audit_is_append_only_at_route_and_source_boundaries(
     await db_session.commit()
     seed_id = seed.id
     expected = (seed.actor_kind, seed.action, seed.object_type, seed.outcome, seed.metadata_json, seed.request_id)
+    app = create_app(test_settings)
     try:
-        unsafe = {"POST", "PUT", "PATCH", "DELETE"}
-        for route in client.app.routes:
-            if not isinstance(route, APIRoute) or not (route.methods & unsafe):
-                continue
-            endpoint_module = route.endpoint.__module__
-            parameter_text = str(inspect.signature(route.endpoint))
-            assert not endpoint_module.startswith("superboss.modules.audit")
-            assert "AuditLog" not in parameter_text and "AuditService" not in parameter_text
-        _login(client, "owner-code")
-        csrf = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}
-        for method, path in [("post", "/api/v1/audit"), ("put", "/api/v1/events/1"), ("delete", "/api/v1/logs/1")]:
-            response = getattr(client, method)(path, headers=csrf)
-            assert response.status_code in {404, 405}
+        assert _unsafe_routes(app) == _UNSAFE_ALLOWLIST
+        for route in app.routes:
+            if isinstance(route, APIRoute) and route.methods & {"POST", "PUT", "PATCH", "DELETE"}:
+                parameter_text = str(inspect.signature(route.endpoint))
+                assert "AuditLog" not in parameter_text and "AuditService" not in parameter_text
+        with TestClient(app, base_url="https://testserver") as test_client:
+            _login(test_client, "owner-code")
+            csrf = {"X-CSRF-Token": str(test_client.cookies.get("XSRF-TOKEN"))}
+            assert test_client.post("/api/v1/auth/refresh", headers=csrf).status_code == 204
+            csrf = {"X-CSRF-Token": str(test_client.cookies.get("XSRF-TOKEN"))}
+            assert test_client.post("/api/v1/auth/logout", headers=csrf).status_code == 204
+            _login(test_client, "owner-code")
+            assert test_client.post("/api/v1/projects", json={"name": "Append route"}, headers={"X-CSRF-Token": str(test_client.cookies.get("XSRF-TOKEN"))}).status_code == 201
+            csrf = {"X-CSRF-Token": str(test_client.cookies.get("XSRF-TOKEN"))}
+            for method, path in [("post", "/api/v1/audit"), ("put", "/api/v1/events/1"), ("delete", "/api/v1/logs/1")]:
+                response = getattr(test_client, method)(path, headers=csrf)
+                assert response.status_code in {404, 405}
         db_session.expire_all()
         unchanged = await db_session.get(AuditLog, seed_id)
         assert unchanged is not None
@@ -380,16 +425,25 @@ async def test_audit_is_append_only_at_route_and_source_boundaries(
             name for name, value in inspect.getmembers(AuditService, inspect.isfunction) if not name.startswith("_")
         }
         assert public_methods == {"record"}
-        audit_root = Path(__file__).resolve().parents[2] / "src" / "superboss" / "modules" / "audit"
-        for source in audit_root.glob("*.py"):
-            tree = ast.parse(source.read_text(encoding="utf-8"))
-            for node in ast.walk(tree):
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    assert "update" not in node.name.lower() and "delete" not in node.name.lower()
-                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-                    assert node.func.attr not in {"update", "delete"}
+        source_root = Path(__file__).resolve().parents[2] / "src" / "superboss"
+        for source in source_root.rglob("*.py"):
+            _assert_audit_mutation_free(source.read_text(encoding="utf-8"))
     finally:
         await db_session.rollback()
         await db_session.execute(delete(AuditLog))
         await db_session.commit()
         assert await db_session.scalar(select(AuditLog)) is None
+
+
+def test_audit_guard_rejects_synthetic_mutation_variants() -> None:
+    """The source and route guards must fail on realistic future audit mutations."""
+    for source in (
+        "from sqlalchemy import delete\ndef delete_event():\n delete(AuditLog)",
+        "from sqlalchemy import text\ndef run():\n text('DELETE FROM audit_logs')",
+        "def update_audit_log():\n pass",
+    ):
+        with pytest.raises(AssertionError):
+            _assert_audit_mutation_free(source)
+    _assert_audit_mutation_free("def record():\n session.add(AuditLog())")
+    with pytest.raises(AssertionError):
+        assert _UNSAFE_ALLOWLIST == _UNSAFE_ALLOWLIST | {("DELETE", "/events", "x", "x")}
