@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: superboss
+      POSTGRES_USER: superboss
+      POSTGRES_PASSWORD: superboss
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U superboss -d superboss"]
+      interval: 5s
+      timeout: 5s
+      retries: 10

@@ -4,8 +4,11 @@ version = "0.1.0"
 description = "SuperBoss backend service"
 requires-python = ">=3.13,<3.14"
 dependencies = [
+    "alembic",
+    "asyncpg",
     "fastapi",
     "pydantic-settings",
+    "sqlalchemy[asyncio]",
     "uvicorn[standard]",
 ]
 
@@ -16,6 +19,7 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "ruff",
+    "testcontainers[postgres]",
 ]
 
 [build-system]
