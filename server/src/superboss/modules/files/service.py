@@ -310,11 +310,16 @@ class FileService:
         upload = await self.session.get(Upload, upload_id)
         if upload is None:
             raise FileUploadNotFoundError()
-        file = await self.session.get(File, upload.file_id)
-        if file is not None and file.project_id != upload.project_id:
-            raise FileUploadProjectMismatchError()
+        file = await self.session.scalar(
+            select(File)
+            .where(File.id == upload.file_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
         if file is None:
             raise FileUploadNotActiveError()
+        if file.project_id != upload.project_id:
+            raise FileUploadProjectMismatchError()
         lifecycle = await self.session.scalar(
             select(FileUploadLifecycle)
             .where(FileUploadLifecycle.upload_id == upload_id)
@@ -323,7 +328,6 @@ class FileService:
         )
         if lifecycle is None or lifecycle.provision_state != "READY":
             raise FileUploadNotActiveError()
-        await self.session.refresh(file)
         require_project_access(actor, file.project_id)
         if upload.multipart_id is None:
             raise FileUploadNotActiveError()
@@ -752,14 +756,22 @@ class FileLifecycleService:
                             FileUploadLifecycle.completion_next_attempt_at <= now,
                         ),
                     )
-                    .with_for_update(skip_locked=True)
-                    # A completion attempt commits its lease before storage I/O; do not
-                    # retain additional unlocked ORM rows across that commit.
+                    # Lock order is File then lifecycle. This is only an unclaimed
+                    # candidate; final state is rechecked under those row locks.
                     .limit(1)
                 )
             )
-            for lifecycle in lifecycles:
-                if lifecycle.provision_state == "CANCEL_REQUESTED":
+            for candidate in lifecycles:
+                try:
+                    upload, file, lifecycle = await FileService(
+                        session, self.storage
+                    )._fresh_active_completion_context(candidate.upload_id)
+                except FileUploadNotActiveError:
+                    continue
+                if (
+                    lifecycle.completion_next_attempt_at is not None
+                    and lifecycle.completion_next_attempt_at > now
+                ):
                     continue
                 grace_until = (
                     lifecycle.prepared_at
@@ -773,26 +785,17 @@ class FileLifecycleService:
                     )
                     await session.commit()
                     continue
-                upload = await session.get(Upload, lifecycle.upload_id)
-                file = await session.get(File, lifecycle.file_id)
-                if upload is None or file is None or upload.multipart_id is None:
-                    continue
                 lifecycle.completion_attempt_count += 1
                 lifecycle.completion_next_attempt_at = now + timedelta(
                     seconds=FileService._COMPLETION_AMBIGUITY_GRACE_SECONDS
                 )
                 await session.commit()
-                refreshed_lifecycle = await session.scalar(
-                    select(FileUploadLifecycle)
-                    .where(FileUploadLifecycle.upload_id == lifecycle.upload_id)
-                    .with_for_update()
-                )
-                if (
-                    refreshed_lifecycle is None
-                    or refreshed_lifecycle.completion_state != "PREPARED"
-                ):
+                try:
+                    upload, file, lifecycle = await FileService(
+                        session, self.storage
+                    )._fresh_active_completion_context(candidate.upload_id)
+                except FileUploadNotActiveError:
                     continue
-                lifecycle = refreshed_lifecycle
                 try:
                     metadata = await asyncio.wait_for(
                         self.storage.stat_object(lifecycle.object_key),
@@ -814,14 +817,18 @@ class FileLifecycleService:
                             parts.append(CompletedPart(part_number, etag))
                         if not parts:
                             continue
+                        multipart_id = upload.multipart_id
+                        assert multipart_id is not None
                         metadata = await asyncio.wait_for(
                             self.storage.complete_multipart(
-                                lifecycle.object_key, upload.multipart_id, parts
+                                lifecycle.object_key, multipart_id, parts
                             ),
                             timeout=FileService._COMPLETION_EXTERNAL_TIMEOUT_SECONDS,
                         )
                 except Exception:  # noqa: BLE001
                     await FileService(session, self.storage)._mark_completion_ambiguous(lifecycle)
+                    continue
+                if metadata is None:
                     continue
                 if metadata.size_bytes != lifecycle.declared_size_bytes:
                     await FileService(session, self.storage)._fail_upload(file, upload, lifecycle)

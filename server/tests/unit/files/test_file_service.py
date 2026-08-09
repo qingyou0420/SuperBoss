@@ -2925,3 +2925,264 @@ async def test_delete_before_prepared_commit_cannot_complete_after_cleanup(db_se
             except DomainError:
                 pass
         await request_session.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delete_target", ["file", "project"])
+async def test_due_prepared_replay_and_delete_share_a_safe_lock_order(
+    db_session, active_owner, delete_target: str
+) -> None:
+    """A due replay must not deadlock with raw File or Project deletion."""
+    import asyncio
+    import hashlib
+    import json
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import select, text
+    from sqlalchemy.exc import DBAPIError
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from superboss.modules.files.models import File, FileStorageCleanup, FileUploadLifecycle
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileService
+    from superboss.modules.files.storage import CompletedPart
+
+    entered_fresh_context = asyncio.Event()
+    release_replay = asyncio.Event()
+
+    class BarrierFileService(FileService):
+        async def _fresh_active_completion_context(self, upload_id):
+            entered_fresh_context.set()
+            await asyncio.wait_for(release_replay.wait(), timeout=5)
+            return await super()._fresh_active_completion_context(upload_id)
+
+    project = Project(name=f"Due replay delete {delete_target}")
+    db_session.add(project)
+    await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    storage = InMemoryObjectStorage()
+    parts = [CompletedPart(1, "etag")]
+    upload = await FileService(db_session, storage).start_upload(
+        actor,
+        UploadStart(
+            project_id=project.id,
+            filename="due-replay.pdf",
+            category="docs",
+            file_date="2026-08-09",
+            size_bytes=1,
+            sha256="0" * 64,
+        ),
+        f"due-replay-{delete_target}",
+    )
+    file_id, upload_id = upload.file_id, upload.id
+    lifecycle = await db_session.get(FileUploadLifecycle, upload_id)
+    assert lifecycle is not None
+    canonical = [{"part_number": 1, "etag": "etag"}]
+    lifecycle.completion_state = "PREPARED"
+    lifecycle.parts_digest = hashlib.sha256(
+        json.dumps(canonical, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
+    lifecycle.canonical_parts_json = canonical
+    lifecycle.completion_event_key = uuid4()
+    lifecycle.prepared_at = datetime.now(UTC) - timedelta(seconds=121)
+    lifecycle.completion_attempt_count = 1
+    lifecycle.completion_next_attempt_at = datetime.now(UTC)
+    await db_session.commit()
+
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    delete_started = asyncio.Event()
+    delete_pid: list[int] = []
+
+    async def replay() -> Exception | None:
+        async with factory() as session:
+            try:
+                await BarrierFileService(session, storage).complete_upload(actor, upload_id, parts)
+            except Exception as error:  # noqa: BLE001 -- test captures database outcome
+                await session.rollback()
+                return error
+        return None
+
+    async def delete() -> Exception | None:
+        async with factory() as session:
+            delete_pid.append(int(await session.scalar(text("SELECT pg_backend_pid()"))))
+            delete_started.set()
+            try:
+                if delete_target == "file":
+                    target = await session.get(File, file_id)
+                else:
+                    target = await session.get(Project, project.id)
+                assert target is not None
+                await session.delete(target)
+                await session.commit()
+            except Exception as error:  # noqa: BLE001 -- test captures database outcome
+                await session.rollback()
+                return error
+        return None
+
+    replay_task = asyncio.create_task(replay())
+    delete_task: asyncio.Task[Exception | None] | None = None
+    try:
+        await asyncio.wait_for(entered_fresh_context.wait(), timeout=5)
+        delete_task = asyncio.create_task(delete())
+        await asyncio.wait_for(delete_started.wait(), timeout=5)
+        for _ in range(300):
+            wait_event = await db_session.scalar(
+                text("SELECT wait_event_type FROM pg_stat_activity WHERE pid = :pid"),
+                {"pid": delete_pid[0]},
+            )
+            if wait_event == "Lock":
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("delete did not wait for the lifecycle lock")
+        release_replay.set()
+        replay_error, delete_error = await asyncio.wait_for(
+            asyncio.gather(replay_task, delete_task), timeout=10
+        )
+        assert not any(isinstance(error, DBAPIError) for error in (replay_error, delete_error))
+
+        db_session.expire_all()
+        file = await db_session.get(File, file_id)
+        jobs = list(
+            await db_session.scalars(
+                select(FileStorageCleanup).where(FileStorageCleanup.lifecycle_id == upload_id)
+            )
+        )
+        assert file is not None or jobs
+        assert storage.complete_calls <= 1
+    finally:
+        release_replay.set()
+        if delete_task is not None and not delete_task.done():
+            await asyncio.wait_for(delete_task, timeout=10)
+        if not replay_task.done():
+            await asyncio.wait_for(replay_task, timeout=10)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delete_target", ["file", "project"])
+async def test_reconcile_due_prepared_and_delete_share_a_safe_lock_order(
+    db_session, active_owner, delete_target: str
+) -> None:
+    """PREPARED maintenance uses the same File-before-lifecycle ordering as replay."""
+    import asyncio
+    import hashlib
+    import json
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import select, text
+    from sqlalchemy.exc import DBAPIError
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from superboss.modules.files.models import File, FileStorageCleanup, FileUploadLifecycle
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileLifecycleService, FileService
+    from superboss.modules.files.storage import ObjectMetadata
+
+    class BlockingStatStorage(InMemoryObjectStorage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def stat_object(self, object_key: str) -> ObjectMetadata | None:
+            self.entered.set()
+            await asyncio.wait_for(self.release.wait(), timeout=5)
+            return await super().stat_object(object_key)
+
+    project = Project(name=f"Maintenance replay delete {delete_target}")
+    db_session.add(project)
+    await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    storage = BlockingStatStorage()
+    upload = await FileService(db_session, storage).start_upload(
+        actor,
+        UploadStart(
+            project_id=project.id,
+            filename="maintenance-replay.pdf",
+            category="docs",
+            file_date="2026-08-09",
+            size_bytes=1,
+            sha256="0" * 64,
+        ),
+        f"maintenance-replay-{delete_target}",
+    )
+    file_id, upload_id = upload.file_id, upload.id
+    lifecycle = await db_session.get(FileUploadLifecycle, upload_id)
+    assert lifecycle is not None
+    canonical = [{"part_number": 1, "etag": "etag"}]
+    lifecycle.completion_state = "PREPARED"
+    lifecycle.parts_digest = hashlib.sha256(
+        json.dumps(canonical, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
+    lifecycle.canonical_parts_json = canonical
+    lifecycle.completion_event_key = uuid4()
+    lifecycle.prepared_at = datetime.now(UTC) - timedelta(seconds=121)
+    lifecycle.completion_attempt_count = 1
+    lifecycle.completion_next_attempt_at = datetime.now(UTC)
+    await db_session.commit()
+
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    delete_started = asyncio.Event()
+    delete_pid: list[int] = []
+
+    async def reconcile() -> Exception | None:
+        try:
+            await FileLifecycleService(factory, storage).reconcile()
+        except Exception as error:  # noqa: BLE001 -- test captures database outcome
+            return error
+        return None
+
+    async def delete() -> Exception | None:
+        async with factory() as session:
+            delete_pid.append(int(await session.scalar(text("SELECT pg_backend_pid()"))))
+            delete_started.set()
+            try:
+                target = (
+                    await session.get(File, file_id)
+                    if delete_target == "file"
+                    else await session.get(Project, project.id)
+                )
+                assert target is not None
+                await session.delete(target)
+                await session.commit()
+            except Exception as error:  # noqa: BLE001 -- test captures database outcome
+                await session.rollback()
+                return error
+        return None
+
+    reconcile_task = asyncio.create_task(reconcile())
+    delete_task: asyncio.Task[Exception | None] | None = None
+    try:
+        await asyncio.wait_for(storage.entered.wait(), timeout=5)
+        delete_task = asyncio.create_task(delete())
+        await asyncio.wait_for(delete_started.wait(), timeout=5)
+        for _ in range(300):
+            wait_event = await db_session.scalar(
+                text("SELECT wait_event_type FROM pg_stat_activity WHERE pid = :pid"),
+                {"pid": delete_pid[0]},
+            )
+            if wait_event == "Lock":
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("delete did not wait for the File lock")
+        storage.release.set()
+        reconcile_error, delete_error = await asyncio.wait_for(
+            asyncio.gather(reconcile_task, delete_task), timeout=10
+        )
+        assert not any(isinstance(error, DBAPIError) for error in (reconcile_error, delete_error))
+        db_session.expire_all()
+        file = await db_session.get(File, file_id)
+        jobs = list(
+            await db_session.scalars(
+                select(FileStorageCleanup).where(FileStorageCleanup.lifecycle_id == upload_id)
+            )
+        )
+        assert file is not None or jobs
+        assert storage.complete_calls <= 1
+    finally:
+        storage.release.set()
+        if delete_task is not None and not delete_task.done():
+            await asyncio.wait_for(delete_task, timeout=10)
+        if not reconcile_task.done():
+            await asyncio.wait_for(reconcile_task, timeout=10)
