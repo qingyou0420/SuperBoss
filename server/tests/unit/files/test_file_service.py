@@ -154,6 +154,30 @@ async def test_part_presign_accepts_s3_boundaries(db_session, active_owner) -> N
     assert storage.expiries == [300, 300]
 
 
+@pytest.mark.asyncio
+async def test_part_missing_upload_fails_closed(db_session, active_owner) -> None:
+    from superboss.core.errors import NotFoundError
+    from superboss.modules.files.service import FileService
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    with pytest.raises(NotFoundError): await FileService(db_session, InMemoryObjectStorage()).presign_part(actor, uuid4(), 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["QUARANTINED", "SCANNING", "CLEAN", "INFECTED", "FAILED"])
+async def test_part_rejects_every_non_uploading_state(db_session, active_owner, state) -> None:
+    from superboss.core.errors import ConflictError
+    from superboss.modules.files.models import FileState
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileService
+    project = Project(name=f"Part {state}"); db_session.add(project); await db_session.flush()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    service = FileService(db_session, InMemoryObjectStorage())
+    upload = await service.start_upload(actor, UploadStart(project_id=project.id, filename="x.pdf", size_bytes=1, sha256="0" * 64, category="资料", file_date="2026-08-09"), f"{state}-key")
+    file = await db_session.get(__import__("superboss.modules.files.models", fromlist=["File"]).File, upload.file_id)
+    assert file is not None; file.state = FileState(state); await db_session.flush()
+    with pytest.raises(ConflictError): await service.presign_part(actor, upload.id, 1)
+
+
 @pytest.mark.parametrize("key", ["x", "!" * 255, "", "x" * 256, " x", "x ", "x\r\ny", "中文"])
 def test_idempotency_key_grammar(key: str) -> None:
     """Header keys are printable ASCII tokens, never whitespace or controls."""
