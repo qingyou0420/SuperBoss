@@ -6,7 +6,7 @@ from superboss.core.config import Settings
 from superboss.main import create_app
 
 
-@pytest.mark.parametrize("secret", ["", "x" * 31])
+@pytest.mark.parametrize("secret", ["", "x" * 31, "x" * 32, "password" * 4, "CHANGE_ME_" * 4])
 def test_staging_and_production_reject_weak_jwt_keys(secret: str) -> None:
     """Removing startup validation would make weak signing keys boot successfully."""
     for environment in ("staging", "production"):

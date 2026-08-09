@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core.config import Settings
@@ -109,19 +110,26 @@ async def wecom_start(
 async def wecom_callback(
     request: Request,
     response: Response,
-    code: str,
+    code: str | None = None,
     state: str | None = None,
     service: AuthService = Depends(get_service),
 ) -> None:
     response.delete_cookie(_OAUTH_STATE_COOKIE, path="/api/v1/auth/wecom")
-    _verify_state(request.app.state.settings, request.cookies.get(_OAUTH_STATE_COOKIE), state)
-    assert state is not None
-    if not await service.auth_repository.consume_oauth_state(hash_token(state), utcnow()):
-        raise HTTPException(400, "Invalid OAuth state")
+    try:
+        _verify_state(request.app.state.settings, request.cookies.get(_OAUTH_STATE_COOKIE), state)
+        if code is None or state is None or not await service.auth_repository.consume_oauth_state(hash_token(state), utcnow()):
+            raise HTTPException(400, "Invalid OAuth state")
+        await service.session.commit()
+    except HTTPException as error:
+        result = JSONResponse({"detail": error.detail}, status_code=error.status_code)
+        result.delete_cookie(_OAUTH_STATE_COOKIE, path="/api/v1/auth/wecom")
+        return result  # type: ignore[return-value]
     try:
         pair = await service.complete_wecom_login(code, state)
-    except (ForbiddenIdentity, WeComError) as error:
-        raise HTTPException(403, "Identity is not authorized") from error
+    except (ForbiddenIdentity, WeComError):
+        result = JSONResponse({"detail": "Identity is not authorized"}, status_code=403)
+        result.delete_cookie(_OAUTH_STATE_COOKIE, path="/api/v1/auth/wecom")
+        return result  # type: ignore[return-value]
     _set_session_cookies(response, pair)
     response.delete_cookie(_OAUTH_STATE_COOKIE, path="/api/v1/auth/wecom")
 

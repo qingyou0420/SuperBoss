@@ -11,6 +11,9 @@ from superboss.api.router import api_router
 from superboss.core.config import Settings, get_settings
 from superboss.core.security import TokenError, decode_access_token
 from superboss.infrastructure.wecom import build_wecom_provider
+from superboss.modules.auth.repository import AuthRepository
+from superboss.modules.auth.service import AuthService, InvalidSession
+from superboss.modules.users.repository import UserRepository
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -27,12 +30,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> Response:
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
             authorization = request.headers.get("Authorization")
-            if authorization is not None and not request.cookies.get("access_token"):
+            if authorization is not None and not (
+                request.cookies.get("access_token") or request.cookies.get("refresh_token")
+            ):
                 if not authorization.startswith("Bearer "):
                     return JSONResponse({"detail": "Invalid bearer token"}, status_code=401)
                 try:
                     decode_access_token(active_settings, authorization.removeprefix("Bearer "))
-                except TokenError:
+                    session = app.state.session_factory()
+                    try:
+                        await AuthService(session, AuthRepository(session), UserRepository(session), None, active_settings).authenticate_access_token(authorization.removeprefix("Bearer "))
+                    finally:
+                        await session.close()
+                except (TokenError, InvalidSession):
                     return JSONResponse({"detail": "Invalid bearer token"}, status_code=401)
                 return await call_next(request)
             csrf_cookie = request.cookies.get("XSRF-TOKEN")

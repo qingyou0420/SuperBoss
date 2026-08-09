@@ -19,8 +19,15 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_secure_jwt_secret(self) -> "Settings":
-        if self.environment in {"staging", "production"} and len(self.jwt_secret.encode()) < 32:
-            raise ValueError("JWT secret must be at least 32 bytes in staging and production")
+        weak = {"change_me", "changeme", "password", "secret", "example"}
+        unique = len(set(self.jwt_secret))
+        if self.environment in {"staging", "production"} and (
+            len(self.jwt_secret.encode()) < 32
+            or self.jwt_secret.lower() in weak
+            or self.jwt_secret.lower().startswith("change_me")
+            or unique < 8
+        ):
+            raise ValueError("JWT secret must be a high-entropy value of at least 32 bytes")
         return self
 
 
