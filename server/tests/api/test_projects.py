@@ -1,6 +1,7 @@
 """Real HTTP and PostgreSQL project authorization tests."""
 
 import asyncio
+import re
 from collections.abc import AsyncIterator
 from uuid import uuid4
 
@@ -49,6 +50,18 @@ def _csrf_headers(client: TestClient) -> dict[str, str]:
     return {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}
 
 
+def _assert_error(response: httpx.Response, status: int, code: str, message: str) -> None:
+    assert response.status_code == status
+    body = response.json()
+    assert set(body) == {"error"}
+    assert set(body["error"]) == {"code", "message", "request_id"}
+    assert body["error"]["code"] == code
+    assert body["error"]["message"] == message
+    assert body["error"]["request_id"]
+    assert body["error"]["request_id"] == response.headers["X-Request-ID"]
+    assert "detail" not in body and "internal" not in str(body).lower()
+
+
 @pytest.mark.asyncio
 async def test_owner_sees_all_projects_and_create_preserves_is_test(
     api_client: TestClient, db_session: AsyncSession
@@ -90,10 +103,10 @@ async def test_staff_sees_only_memberships_and_cannot_create(
     assigned_detail = api_client.get(f"/api/v1/projects/{assigned.id}")
     assert assigned_detail.status_code == 200
     assert assigned_detail.json()["name"] == "Assigned"
-    assert api_client.get(f"/api/v1/projects/{hidden.id}").status_code == 403
-    assert api_client.post(
+    _assert_error(api_client.get(f"/api/v1/projects/{hidden.id}"), 403, "PROJECT_FORBIDDEN", "You cannot access this project")
+    _assert_error(api_client.post(
         "/api/v1/projects", json={"name": "Denied"}, headers=_csrf_headers(api_client)
-    ).status_code == 403
+    ), 403, "PROJECT_CREATE_FORBIDDEN", "You cannot create projects")
 
 
 @pytest.mark.asyncio
@@ -137,21 +150,13 @@ async def test_cookie_actor_precedes_bearer_without_fallback(
 def test_project_errors_have_safe_correlatable_bodies(api_client: TestClient) -> None:
     """Returning framework exceptions would leak inconsistent, uncorrelatable error bodies."""
     response = api_client.get("/api/v1/projects")
-    assert response.status_code == 401
-    assert response.json()["error"] == {
-        "code": "AUTHENTICATION_REQUIRED",
-        "message": "Authentication required",
-        "request_id": response.json()["error"]["request_id"],
-    }
-    assert response.json()["error"]["request_id"]
+    _assert_error(response, 401, "AUTHENTICATION_REQUIRED", "Authentication required")
 
 
 def test_unauthenticated_project_write_uses_401_error_contract(api_client: TestClient) -> None:
     """A CSRF-first response would incorrectly report an anonymous project write as 403."""
     response = api_client.post("/api/v1/projects", json={"name": "Anonymous"})
-    assert response.status_code == 401
-    assert response.json()["error"]["code"] == "AUTHENTICATION_REQUIRED"
-    assert response.json()["error"]["request_id"]
+    _assert_error(response, 401, "AUTHENTICATION_REQUIRED", "Authentication required")
 
 
 def test_invalid_header_only_bearer_uses_safe_401_error_contract(api_client: TestClient) -> None:
@@ -159,13 +164,7 @@ def test_invalid_header_only_bearer_uses_safe_401_error_contract(api_client: Tes
     response = api_client.post(
         "/api/v1/projects", json={"name": "Invalid"}, headers={"Authorization": "Bearer invalid"}
     )
-    assert response.status_code == 401
-    assert response.json()["error"] == {
-        "code": "AUTHENTICATION_REQUIRED",
-        "message": "Authentication required",
-        "request_id": response.json()["error"]["request_id"],
-    }
-    assert response.json()["error"]["request_id"]
+    _assert_error(response, 401, "AUTHENTICATION_REQUIRED", "Authentication required")
 
 
 def test_project_creation_requires_browser_csrf(api_client: TestClient) -> None:
@@ -174,17 +173,32 @@ def test_project_creation_requires_browser_csrf(api_client: TestClient) -> None:
     assert api_client.post("/api/v1/projects", json={"name": "No CSRF"}).status_code == 403
 
 
-@pytest.mark.parametrize("request_id", ["trace.123_OK", "evil\r\nX-Injected: yes", "x" * 9000, "   ", "bad\x00id"])
+@pytest.mark.parametrize("request_id", ["a", "x" * 128])
 def test_error_request_id_is_trusted_or_replaced(api_client: TestClient, request_id: str) -> None:
     """Reflecting hostile request IDs enables header/log injection and amplification."""
     response = api_client.get("/api/v1/projects", headers={"X-Request-ID": request_id})
+    _assert_error(response, 401, "AUTHENTICATION_REQUIRED", "Authentication required")
     actual = response.json()["error"]["request_id"]
     assert actual == response.headers["X-Request-ID"]
-    if request_id == "trace.123_OK":
-        assert actual == request_id
-    else:
-        assert actual != request_id
-        assert len(actual) <= 128
+    assert actual == request_id
+
+
+@pytest.mark.parametrize("request_id", ["x" * 129, "evil\r\nX: y", "\t", "bad\x00id", b"\xe4\xb8\xad\xe6\x96\x87", "   ", "x" * 9000])
+def test_invalid_request_id_is_replaced_with_generated_uuid(api_client: TestClient, request_id: str | bytes) -> None:
+    response = api_client.get("/api/v1/projects", headers={"X-Request-ID": request_id})
+    _assert_error(response, 401, "AUTHENTICATION_REQUIRED", "Authentication required")
+    actual = response.json()["error"]["request_id"]
+    assert re.fullmatch(r"[A-Za-z0-9._-]{1,128}", actual)
+    assert actual != (request_id.decode("utf-8") if isinstance(request_id, bytes) else request_id)
+
+
+def test_absent_request_ids_are_distinct_generated_uuids(api_client: TestClient) -> None:
+    first = api_client.get("/api/v1/projects")
+    second = api_client.get("/api/v1/projects")
+    _assert_error(first, 401, "AUTHENTICATION_REQUIRED", "Authentication required")
+    _assert_error(second, 401, "AUTHENTICATION_REQUIRED", "Authentication required")
+    assert first.headers["X-Request-ID"] != second.headers["X-Request-ID"]
+    assert re.fullmatch(r"[0-9a-f-]{36}", first.headers["X-Request-ID"])
 
 
 @pytest.mark.parametrize(
@@ -212,7 +226,7 @@ def test_project_name_trims_and_rejects_case_insensitive_aliases(api_client: Tes
     duplicate = api_client.post(
         "/api/v1/projects", json={"name": "core"}, headers=_csrf_headers(api_client)
     )
-    assert duplicate.status_code == 409
+    _assert_error(duplicate, 409, "PROJECT_NAME_CONFLICT", "A project with this name already exists")
 
 
 def test_is_test_requires_json_boolean(api_client: TestClient) -> None:
@@ -221,7 +235,7 @@ def test_is_test_requires_json_boolean(api_client: TestClient) -> None:
     response = api_client.post(
         "/api/v1/projects", json={"name": "Strict", "is_test": "false"}, headers=_csrf_headers(api_client)
     )
-    assert response.status_code == 422
+    _assert_error(response, 422, "VALIDATION_ERROR", "Request validation failed")
 
 
 @pytest.mark.asyncio
@@ -253,25 +267,24 @@ async def test_concurrent_canonical_name_creates_have_one_winner(
             )
             return response.status_code
 
-    for first, second in (("Race Core", " race core "), ("Race Next", "RACE NEXT")):
-        assert sorted(await asyncio.gather(create(first), create(second))) == [201, 409]
-    await db_session.execute(delete(Project))
-    await db_session.execute(delete(AuthSession))
-    await db_session.execute(delete(User))
-    await db_session.commit()
+    try:
+        for first, second in (("Race Core", " race core "), ("Race Next", "RACE NEXT")):
+            assert sorted(await asyncio.gather(create(first), create(second))) == [201, 409]
+    finally:
+        await db_session.execute(delete(Project))
+        await db_session.execute(delete(AuthSession))
+        await db_session.execute(delete(User))
+        await db_session.commit()
 
 
 def test_missing_project_and_invalid_creation_use_safe_error_mapping(api_client: TestClient) -> None:
     """Falling back to FastAPI defaults would break safe 404/422 API error contracts."""
     _login(api_client, "owner-code")
     missing = api_client.get(f"/api/v1/projects/{uuid4()}")
-    assert missing.status_code == 404
-    assert missing.json()["error"]["code"] == "PROJECT_NOT_FOUND"
+    _assert_error(missing, 404, "PROJECT_NOT_FOUND", "Project not found")
 
     invalid = api_client.post("/api/v1/projects", json={"name": ""}, headers=_csrf_headers(api_client))
-    assert invalid.status_code == 422
-    assert invalid.json()["error"]["code"] == "VALIDATION_ERROR"
-    assert invalid.json()["error"]["request_id"]
+    _assert_error(invalid, 422, "VALIDATION_ERROR", "Request validation failed")
 
 
 @pytest.mark.asyncio
@@ -285,8 +298,7 @@ async def test_duplicate_project_name_is_conflict(
     response = api_client.post(
         "/api/v1/projects", json={"name": "Unique"}, headers=_csrf_headers(api_client)
     )
-    assert response.status_code == 409
-    assert response.json()["error"]["code"] == "PROJECT_NAME_CONFLICT"
+    _assert_error(response, 409, "PROJECT_NAME_CONFLICT", "A project with this name already exists")
 
 
 @pytest.mark.asyncio

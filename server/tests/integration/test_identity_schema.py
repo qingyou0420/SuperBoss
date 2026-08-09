@@ -10,9 +10,10 @@ from uuid import uuid4
 
 import asyncpg
 import pytest
+from sqlalchemy import delete
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.schema import CreateIndex
 
 from superboss.modules.projects.models import Project, ProjectMember
@@ -167,3 +168,33 @@ async def test_database_rejects_all_supported_edge_whitespace(
     with pytest.raises(IntegrityError):
         await db_session.flush()
     await db_session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_independent_sessions_race_on_canonical_project_name(postgres_database: str) -> None:
+    """Only the PostgreSQL lower(name) index can make simultaneous canonical inserts conflict."""
+    engine = create_async_engine(postgres_database)
+    barrier = asyncio.Barrier(2)
+
+    async def insert(name: str) -> str:
+        async with AsyncSession(engine) as session:
+            session.add(Project(name=name))
+            await barrier.wait()
+            try:
+                await session.flush()
+                await session.commit()
+                return "committed"
+            except IntegrityError as error:
+                await session.rollback()
+                return str(error.orig)
+
+    try:
+        first, second = await asyncio.gather(insert("Race DB"), insert("race db"))
+        assert sorted([first == "committed", second == "committed"]) == [False, True]
+        failed = second if first == "committed" else first
+        assert "uq_projects_name_ci" in failed
+    finally:
+        async with AsyncSession(engine) as cleanup:
+            await cleanup.execute(delete(Project).where(Project.name.ilike("%race db%")))
+            await cleanup.commit()
+        await engine.dispose()
