@@ -218,6 +218,25 @@ async def test_part_rejects_out_of_range_number(file_client, db_session: AsyncSe
     assert response.status_code == 422 and response.json()["error"]["code"] == "VALIDATION_ERROR" and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and storage.expiries == before and file is not None and file.state.value == "UPLOADING"
 
 
+def test_part_missing_upload_returns_not_found(file_client) -> None:
+    from uuid import uuid4
+    client, storage = file_client; _login(client)
+    response = client.post(f"/api/v1/files/uploads/{uuid4()}/parts/1", headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))})
+    assert response.status_code == 404 and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and storage.expiries == []
+
+
+@pytest.mark.asyncio
+async def test_part_rejects_quarantined_file(file_client, db_session: AsyncSession) -> None:
+    from superboss.modules.files.models import File, FileState, Upload
+    client, storage = file_client; project = Project(name="Part state"); db_session.add(project); await db_session.commit(); _login(client)
+    headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "part-state"}
+    started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers)
+    upload = await db_session.get(Upload, started.json()["upload_id"]); assert upload is not None
+    file = await db_session.get(File, upload.file_id); assert file is not None; file.state = FileState.QUARANTINED; await db_session.commit()
+    before = list(storage.expiries); response = client.post(f"/api/v1/files/uploads/{upload.id}/parts/1", headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))})
+    assert response.status_code == 409 and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and storage.expiries == before
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("key", ["x", "!" * 255])
 async def test_start_accepts_idempotency_key_boundaries(file_client, db_session: AsyncSession, key: str) -> None:
