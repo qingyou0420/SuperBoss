@@ -20,11 +20,19 @@ class Settings(BaseSettings):
     s3_endpoint_url: str = "http://127.0.0.1:9000"
     s3_access_key_id: str = ""
     s3_secret_access_key: str = ""
+    lifecycle_reconcile_interval_seconds: float = 30.0
+    lifecycle_reconcile_batch_size: int = 100
 
     model_config = SettingsConfigDict(env_prefix="SUPERBOSS_", extra="forbid", hide_input_in_errors=True)
 
     @model_validator(mode="after")
     def validate_secure_jwt_secret(self) -> "Settings":
+        if self.lifecycle_reconcile_interval_seconds < 0:
+            raise ValueError("Lifecycle reconcile interval must be non-negative")
+        if self.environment != "test" and self.lifecycle_reconcile_interval_seconds <= 0:
+            raise ValueError("Lifecycle reconcile interval must be positive")
+        if self.lifecycle_reconcile_batch_size < 1:
+            raise ValueError("Lifecycle reconcile batch size must be positive")
         if self.environment in {"staging", "production"}:
             candidate = self.jwt_secret
             try:

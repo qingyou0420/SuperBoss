@@ -1,7 +1,10 @@
 """FastAPI application factory."""
 
+import asyncio
+import logging
 import secrets
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI, Request, Response
@@ -17,27 +20,61 @@ from superboss.infrastructure.s3 import Boto3ObjectStorage
 from superboss.infrastructure.wecom import build_wecom_provider
 from superboss.modules.auth.repository import AuthRepository
 from superboss.modules.auth.service import AuthService, InvalidSession
+from superboss.modules.files.service import FileLifecycleService
+from superboss.modules.files.storage import ObjectStorage
 from superboss.modules.users.repository import UserRepository
 
+logger = logging.getLogger(__name__)
 
-def _unconfigured_file_scan_dispatcher(_file_id: UUID, _delivery_key: UUID | None = None) -> None:
+
+def _unconfigured_file_scan_dispatcher(_file_id: UUID, _delivery_key: UUID) -> None:
     raise RuntimeError("file scan dispatcher is not configured")
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    object_storage: ObjectStorage | None = None,
+    enqueue_file_scan: Callable[[UUID, UUID], Awaitable[None] | None] | None = None,
+) -> FastAPI:
     active_settings = settings or get_settings()
-    app = FastAPI(title="SuperBoss API", version="1.0.0")
-    app.state.settings = active_settings
     engine = create_async_engine(active_settings.database_url, pool_pre_ping=True)
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        stop = asyncio.Event()
+        task: asyncio.Task[None] | None = None
+        if active_settings.lifecycle_reconcile_interval_seconds > 0:
+            async def maintain() -> None:
+                while not stop.is_set():
+                    try:
+                        await FileLifecycleService(app.state.session_factory, app.state.object_storage, app.state.enqueue_file_scan).reconcile(active_settings.lifecycle_reconcile_batch_size)
+                    except Exception as error:  # noqa: BLE001
+                        logger.warning("file lifecycle maintenance failed: %s", type(error).__name__)
+                    try:
+                        await asyncio.wait_for(stop.wait(), active_settings.lifecycle_reconcile_interval_seconds)
+                    except TimeoutError:
+                        continue
+            task = asyncio.create_task(maintain())
+        app.state.lifecycle_maintenance_task = task
+        try:
+            yield
+        finally:
+            stop.set()
+            if task is not None:
+                try:
+                    await asyncio.wait_for(task, timeout=5)
+                except TimeoutError:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+            await engine.dispose()
+
+    app = FastAPI(title="SuperBoss API", version="1.0.0", lifespan=lifespan)
+    app.state.settings = active_settings
+    app.state.engine = engine
     app.state.session_factory = async_sessionmaker(engine, expire_on_commit=False)
     app.state.wecom_provider = build_wecom_provider(active_settings)
-    app.state.object_storage = Boto3ObjectStorage(
-        active_settings.s3_bucket,
-        active_settings.s3_endpoint_url,
-        active_settings.s3_access_key_id,
-        active_settings.s3_secret_access_key,
-    )
-    app.state.enqueue_file_scan = _unconfigured_file_scan_dispatcher
+    app.state.object_storage = object_storage or Boto3ObjectStorage(active_settings.s3_bucket, active_settings.s3_endpoint_url, active_settings.s3_access_key_id, active_settings.s3_secret_access_key)
+    app.state.enqueue_file_scan = enqueue_file_scan or _unconfigured_file_scan_dispatcher
 
     def request_id(request: Request) -> str:
         candidate = request.headers.get("X-Request-ID", "")

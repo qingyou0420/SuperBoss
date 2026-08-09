@@ -87,6 +87,7 @@ def test_settings(postgres_database: str) -> Settings:
         jwt_secret="test-only-signing-secret-with-at-least-thirty-two-bytes",
         wecom_fake=True,
         owner_wecom_userid="owner-1",
+        lifecycle_reconcile_interval_seconds=0,
     )
 
 

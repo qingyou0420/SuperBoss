@@ -15,6 +15,6 @@ def test_default_file_scan_dispatcher_fails_closed_without_secret_details(
     app = create_app(test_settings)
 
     with pytest.raises(RuntimeError, match="file scan dispatcher is not configured") as error:
-        app.state.enqueue_file_scan(uuid4())
+        app.state.enqueue_file_scan(uuid4(), uuid4())
 
     assert "secret" not in str(error.value).lower()

@@ -1,6 +1,5 @@
 import asyncio
 import hashlib
-import inspect
 import json
 import re
 from collections.abc import Awaitable, Callable
@@ -649,15 +648,7 @@ class FileLifecycleService:
     async def _enqueue_scan(self, lifecycle: FileUploadLifecycle) -> None:
         if self.enqueue_scan is None or lifecycle.completion_event_key is None:
             raise RuntimeError("file scan dispatcher is not configured")
-        try:
-            inspect.signature(self.enqueue_scan).bind(
-                lifecycle.file_id, lifecycle.completion_event_key
-            )
-        except TypeError:
-            # Transitional test/runtime adapters accepted one argument before delivery keys.
-            result = self.enqueue_scan(lifecycle.file_id)  # type: ignore[call-arg]
-        else:
-            result = self.enqueue_scan(lifecycle.file_id, lifecycle.completion_event_key)
+        result = self.enqueue_scan(lifecycle.file_id, lifecycle.completion_event_key)
         if isinstance(result, Awaitable):
             await result
 

@@ -14,9 +14,12 @@ from tests.files.storage import InMemoryObjectStorage
 
 @pytest_asyncio.fixture
 async def file_client(db_session: AsyncSession, test_settings: Settings):
-    app = create_app(test_settings)
-    app.state.object_storage = InMemoryObjectStorage()
-    app.state.enqueue_file_scan = lambda _file_id: None
+    storage = InMemoryObjectStorage()
+    app = create_app(
+        test_settings,
+        object_storage=storage,
+        enqueue_file_scan=lambda _file_id, _delivery_key: None,
+    )
     with TestClient(app, base_url="https://testserver") as client:
         yield client, app.state.object_storage
 
@@ -273,7 +276,7 @@ async def test_complete_dispatches_after_quarantine_commit(file_client, db_sessi
     from superboss.modules.files.models import File, Upload
     client, storage = file_client; app = client.app; project = Project(name="Complete dispatch"); db_session.add(project); await db_session.commit(); _login(client)
     observed: list[tuple[UUID, str]] = []
-    async def dispatch(file_id: UUID) -> None:
+    async def dispatch(file_id: UUID, _delivery_key: UUID) -> None:
         async with app.state.session_factory() as session:
             file = await session.get(File, file_id); assert file is not None; observed.append((file_id, file.state.value))
     app.state.enqueue_file_scan = dispatch; storage.complete_size = 2
@@ -297,7 +300,7 @@ async def test_complete_size_mismatch_persists_failed_without_dispatch(file_clie
     from superboss.modules.files.models import File, Upload
     client, storage = file_client; app = client.app; project = Project(name="Complete mismatch"); db_session.add(project); await db_session.commit(); _login(client)
     dispatched: list[UUID] = []
-    app.state.enqueue_file_scan = lambda file_id: dispatched.append(file_id); storage.complete_size = 1
+    app.state.enqueue_file_scan = lambda file_id, _delivery_key: dispatched.append(file_id); storage.complete_size = 1
     headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "mismatch"}
     started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 2, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers); upload = await db_session.get(Upload, started.json()["upload_id"]); assert upload is not None
     response = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json={"parts": [{"part_number": 1, "etag": "secret-etag"}]}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); file = await db_session.get(File, upload.file_id)
@@ -314,7 +317,7 @@ async def test_complete_storage_error_persists_safe_failed_state(file_client, db
     from superboss.modules.audit.models import AuditLog
     from superboss.modules.files.models import File, Upload
     client, storage = file_client; app = client.app; project = Project(name="Complete storage error"); db_session.add(project); await db_session.commit(); _login(client)
-    dispatched: list[UUID] = []; app.state.enqueue_file_scan = lambda file_id: dispatched.append(file_id); storage.complete_error = RuntimeError("S3 secret")
+    dispatched: list[UUID] = []; app.state.enqueue_file_scan = lambda file_id, _delivery_key: dispatched.append(file_id); storage.complete_error = RuntimeError("S3 secret")
     headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "storage-error"}
     started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers); upload = await db_session.get(Upload, started.json()["upload_id"]); assert upload is not None
     response = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json={"parts": [{"part_number": 1, "etag": "secret-etag"}]}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); file = await db_session.get(File, upload.file_id); events = list((await db_session.scalars(select(AuditLog))).all())
@@ -329,7 +332,7 @@ async def test_complete_rejects_invalid_parts_before_side_effects(file_client, d
     from superboss.modules.audit.models import AuditLog
     from superboss.modules.files.models import File, Upload
     client, storage = file_client; app = client.app; project = Project(name="Complete validation"); db_session.add(project); await db_session.commit(); _login(client)
-    dispatched: list[object] = []; app.state.enqueue_file_scan = lambda file_id: dispatched.append(file_id)
+    dispatched: list[object] = []; app.state.enqueue_file_scan = lambda file_id, _delivery_key: dispatched.append(file_id)
     headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "complete-validation"}; started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers); upload = await db_session.get(Upload, started.json()["upload_id"]); assert upload is not None
     response = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json={"parts": parts}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); file = await db_session.get(File, upload.file_id); events = list((await db_session.scalars(select(AuditLog))).all())
     assert response.status_code == 422 and response.json()["error"]["code"] == "VALIDATION_ERROR" and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and file is not None and file.state.value == "UPLOADING" and upload.multipart_id in storage.active and storage.completed == {} and dispatched == [] and events == []
@@ -344,7 +347,7 @@ async def test_repeat_complete_is_rejected_without_redelivery(file_client, db_se
     from superboss.modules.audit.models import AuditLog
     from superboss.modules.files.models import File, Upload
     client, storage = file_client; app = client.app; project = Project(name="Repeat complete"); db_session.add(project); await db_session.commit(); _login(client)
-    dispatched: list[UUID] = []; app.state.enqueue_file_scan = lambda file_id: dispatched.append(file_id)
+    dispatched: list[UUID] = []; app.state.enqueue_file_scan = lambda file_id, _delivery_key: dispatched.append(file_id)
     headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "repeat-complete"}; started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers); upload = await db_session.get(Upload, started.json()["upload_id"]); assert upload is not None
     body = {"parts": [{"part_number": 1, "etag": "e"}]}; first = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json=body, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); second = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json=body, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); file = await db_session.get(File, upload.file_id)
     events = list((await db_session.scalars(select(AuditLog))).all())
@@ -458,7 +461,7 @@ async def test_foreign_staff_cannot_complete_upload(file_client, db_session: Asy
     assert started.status_code == 201 and upload is not None
 
     dispatched: list[object] = []
-    app.state.enqueue_file_scan = lambda file_id: dispatched.append(file_id)
+    app.state.enqueue_file_scan = lambda file_id, _delivery_key: dispatched.append(file_id)
     client.cookies.clear()
     login = client.get("/api/v1/auth/wecom/start")
     assert client.get("/api/v1/auth/wecom/callback", params={"code": "staff-code", "state": login.json()["state"]}).status_code == 204
@@ -486,7 +489,7 @@ async def test_anonymous_complete_uses_authentication_error_before_csrf(file_cli
 
     client, storage = file_client
     dispatched: list[object] = []
-    client.app.state.enqueue_file_scan = lambda file_id: dispatched.append(file_id)
+    client.app.state.enqueue_file_scan = lambda file_id, _delivery_key: dispatched.append(file_id)
 
     response = client.post(
         f"/api/v1/files/uploads/{uuid4()}/complete",
@@ -510,7 +513,7 @@ async def test_owner_complete_requires_valid_csrf(file_client, db_session: Async
 
     client, storage = file_client
     dispatched: list[object] = []
-    client.app.state.enqueue_file_scan = lambda file_id: dispatched.append(file_id)
+    client.app.state.enqueue_file_scan = lambda file_id, _delivery_key: dispatched.append(file_id)
     _login(client)
     headers = {} if csrf is None else {"X-CSRF-Token": csrf}
     response = client.post(
@@ -859,7 +862,7 @@ async def test_complete_missing_upload_returns_file_upload_not_found(file_client
 
     client, storage = file_client
     dispatched: list[object] = []
-    client.app.state.enqueue_file_scan = lambda file_id: dispatched.append(file_id)
+    client.app.state.enqueue_file_scan = lambda file_id, _delivery_key: dispatched.append(file_id)
     _login(client)
     request_id = "bba39a39-47ba-4ac5-9250-ccdba1d7f25e"
     response = client.post(
