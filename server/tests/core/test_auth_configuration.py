@@ -32,6 +32,8 @@ def test_generated_base64url_key_is_accepted_in_deployment_environments() -> Non
         f"{secrets.token_urlsafe(32)[:10]} {secrets.token_urlsafe(32)[10:]}",
         f"{secrets.token_urlsafe(32)}===",
         "change_me_abcdefghijklmnopqrstuvwxyz0123456789_-ABCDE",
+        "this-is-a-common-jwt-key-for-production-use-only-1234567890X",
+        "this-is-a-secret-jwt-key-for-production-use-only-1234567890X",
     ],
 )
 def test_deployment_keys_must_be_strict_unpadded_canonical_base64url(secret: str) -> None:
@@ -39,3 +41,14 @@ def test_deployment_keys_must_be_strict_unpadded_canonical_base64url(secret: str
     for environment in ("staging", "production"):
         with pytest.raises(ValueError, match="canonical base64url"):
             Settings(environment=environment, jwt_secret=secret)
+
+
+def test_deployment_key_validation_does_not_render_candidate_input() -> None:
+    """Configuration errors must not leak a rejected signing key into logs or UI."""
+    candidate = "this-is-a-common-key-PRIVATEKEYTAIL987654321-abcdefghijklmnop"
+    with pytest.raises(ValueError) as error:
+        Settings(environment="production", jwt_secret=candidate)
+    rendered = str(error.value)
+    assert candidate not in rendered
+    assert "PRIVATEKEYTAIL987654321" not in rendered
+    assert "input_value" not in rendered

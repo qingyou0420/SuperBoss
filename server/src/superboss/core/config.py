@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     wecom_fake: bool = False
     owner_wecom_userid: str = ""
 
-    model_config = SettingsConfigDict(env_prefix="SUPERBOSS_", extra="forbid")
+    model_config = SettingsConfigDict(env_prefix="SUPERBOSS_", extra="forbid", hide_input_in_errors=True)
 
     @model_validator(mode="after")
     def validate_secure_jwt_secret(self) -> "Settings":
@@ -33,7 +33,9 @@ class Settings(BaseSettings):
             if base64.urlsafe_b64encode(material).rstrip(b"=").decode("ascii") != candidate:
                 raise ValueError("JWT secret must be canonical base64url random material")
             periodic = any(material == material[:period] * (len(material) // period) for period in range(1, len(material) // 2 + 1) if len(material) % period == 0)
-            markers = ("change-me", "change_me", "changeme", "example", "placeholder", "password")
+            markers = (
+                "change-me", "change_me", "changeme", "example", "placeholder", "password", "common", "secret",
+            )
             if len(material) < 32 or periodic or len(set(material)) < 16 or any(marker in candidate.lower() for marker in markers):
                 raise ValueError("JWT secret must be canonical base64url random material")
         return self
