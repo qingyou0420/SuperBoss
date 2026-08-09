@@ -255,6 +255,7 @@ class FileStorageCleanup(Base):
             "dedupe_key ~ '^[0-9a-f]{64}$'", name="ck_file_storage_cleanup_dedupe_key"
         ),
         Index("ix_file_storage_cleanup_pending", "state", "next_attempt_at"),
+        Index("ix_file_storage_cleanup_due_lease", "state", "next_attempt_at", "locked_at"),
     )
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), default=uuid4, nullable=False)
     operation: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -270,6 +271,7 @@ class FileStorageCleanup(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claim_token: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
     last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

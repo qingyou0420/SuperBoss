@@ -191,7 +191,7 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
             check=True,
         )
         tables, constraints, indexes = asyncio.run(catalog())
-        assert asyncio.run(revision()) == "0009_outbox_claim_lease"
+        assert asyncio.run(revision()) == "0010_cleanup_claim_lease"
         assert "trg_files_snapshot_storage_cleanup" in asyncio.run(trigger_names())
         assert {"files", "uploads", "file_upload_lifecycle", "file_lifecycle_outbox", "file_storage_cleanup"} <= set(tables)
         assert asyncio.run(table_columns("files")) == [
@@ -218,7 +218,7 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
         assert asyncio.run(table_columns("file_storage_cleanup")) == [
             "id", "operation", "dedupe_key", "object_key", "multipart_id", "lifecycle_id",
             "state", "attempt_count", "next_attempt_at", "locked_at", "last_error_code",
-            "created_at", "updated_at",
+            "created_at", "updated_at", "claim_token",
         ]
         assert "event_key" in asyncio.run(table_columns("audit_logs"))
 
@@ -272,6 +272,7 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
         assert "INDEXix_file_lifecycle_outbox_pendingONpublic.file_lifecycle_outboxUSINGbtree(state,next_attempt_at)" in normalized_indexes
         assert "INDEXix_file_lifecycle_outbox_due_leaseONpublic.file_lifecycle_outboxUSINGbtree(state,next_attempt_at,locked_at)" in normalized_indexes
         assert "INDEXix_file_storage_cleanup_pendingONpublic.file_storage_cleanupUSINGbtree(state,next_attempt_at)" in normalized_indexes
+        assert "INDEXix_file_storage_cleanup_due_leaseONpublic.file_storage_cleanupUSINGbtree(state,next_attempt_at,locked_at)" in normalized_indexes
         assert "UNIQUEINDEXuq_file_storage_cleanup_operation_target" in normalized_indexes
 
         subprocess.run(

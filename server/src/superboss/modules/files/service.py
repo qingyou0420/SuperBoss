@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import inspect
 import json
@@ -6,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from sqlalchemy import case, select, update
+from sqlalchemy import and_, case, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -70,11 +71,11 @@ class FileService:
         self,
         session: AsyncSession,
         storage: ObjectStorage | None,
-        enqueue_scan: Callable[[UUID], Awaitable[None] | None] | None = None,
+        enqueue_scan: Callable[[UUID, UUID], Awaitable[None] | None] | None = None,
     ) -> None:
         self.session = session
         self.storage = storage
-        self.enqueue_scan = enqueue_scan or (lambda _file_id: None)
+        self.enqueue_scan = enqueue_scan or (lambda _file_id, _delivery_key: None)
 
     def _storage(self) -> ObjectStorage:
         if self.storage is None:
@@ -299,7 +300,11 @@ class FileService:
         )
 
     async def complete_upload(
-        self, actor: Actor, upload_id: UUID, parts: list[CompletedPart], request_id: UUID | None = None
+        self,
+        actor: Actor,
+        upload_id: UUID,
+        parts: list[CompletedPart],
+        request_id: UUID | None = None,
     ) -> File:
         upload = await self.session.get(Upload, upload_id)
         if upload is None:
@@ -325,7 +330,9 @@ class FileService:
             raise ValueError("duplicate part number")
         canonical = sorted(parts, key=lambda p: p.part_number)
         encoded_parts = [{"part_number": p.part_number, "etag": p.etag} for p in canonical]
-        digest = hashlib.sha256(json.dumps(encoded_parts, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+        digest = hashlib.sha256(
+            json.dumps(encoded_parts, separators=(",", ":"), ensure_ascii=False).encode()
+        ).hexdigest()
         if lifecycle.completion_state == "QUARANTINED":
             if lifecycle.parts_digest == digest and file.state == FileState.QUARANTINED:
                 return file
@@ -341,12 +348,16 @@ class FileService:
             lifecycle.completion_actor_role = actor.role.value if actor.role is not None else None
             lifecycle.completion_request_id = request_id
             lifecycle.prepared_at = datetime.now(UTC)
-            lifecycle.completion_event_key = uuid5(NAMESPACE_URL, f"file-complete:{upload_id}:{digest}")
+            lifecycle.completion_event_key = uuid5(
+                NAMESPACE_URL, f"file-complete:{upload_id}:{digest}"
+            )
             await self.session.commit()
         elif lifecycle.parts_digest != digest:
             raise FileUploadConflictError()
         lifecycle = await self.session.scalar(
-            select(FileUploadLifecycle).where(FileUploadLifecycle.upload_id == upload_id).with_for_update()
+            select(FileUploadLifecycle)
+            .where(FileUploadLifecycle.upload_id == upload_id)
+            .with_for_update()
         )
         assert lifecycle is not None
         try:
@@ -356,7 +367,9 @@ class FileService:
             raise FileCompletionPendingError() from error
         if metadata is None:
             try:
-                metadata = await self._storage().complete_multipart(file.object_key, upload.multipart_id, canonical)
+                metadata = await self._storage().complete_multipart(
+                    file.object_key, upload.multipart_id, canonical
+                )
             except Exception:  # noqa: BLE001 -- a post-complete stat distinguishes ambiguity
                 try:
                     metadata = await self._storage().stat_object(file.object_key)
@@ -382,7 +395,15 @@ class FileService:
         event_key = lifecycle.completion_event_key
         assert event_key is not None
         for kind in ("scan_dispatch", "completion_audit"):
-            self.session.add(FileLifecycleOutbox(id=uuid4(), kind=kind, dedupe_key=event_key, file_id=file.id, project_id=file.project_id))
+            self.session.add(
+                FileLifecycleOutbox(
+                    id=uuid4(),
+                    kind=kind,
+                    dedupe_key=event_key,
+                    file_id=file.id,
+                    project_id=file.project_id,
+                )
+            )
         try:
             await self.session.commit()
         except IntegrityError:
@@ -430,38 +451,21 @@ class FileService:
         await self._best_effort_cleanup(lifecycle.upload_id)
 
     async def _best_effort_cleanup(self, lifecycle_id: UUID) -> None:
-        cleanups = list(
-            await self.session.scalars(
-                select(FileStorageCleanup).where(
-                    FileStorageCleanup.lifecycle_id == lifecycle_id,
-                    FileStorageCleanup.state != "DONE",
-                ).order_by(case((FileStorageCleanup.operation == "DELETE_OBJECT", 0), else_=1))
-            )
-        )
-        for cleanup in cleanups:
-            cleanup.state = "RUNNING"
-            await self.session.commit()
-            try:
-                if cleanup.operation == "DELETE_OBJECT":
-                    await self._storage().delete_object(cleanup.object_key)
-                elif cleanup.multipart_id is not None:
-                    await self._storage().abort_multipart(cleanup.object_key, cleanup.multipart_id)
-            except Exception:  # noqa: BLE001 -- persist only a stable failure code
-                cleanup.state = "PENDING"
-                cleanup.attempt_count += 1
-                cleanup.next_attempt_at = datetime.now(UTC) + timedelta(seconds=30)
-                cleanup.last_error_code = (
-                    "DELETE_FAILED" if cleanup.operation == "DELETE_OBJECT" else "ABORT_FAILED"
-                )
-            else:
-                cleanup.state = "DONE"
-                cleanup.attempt_count += 1
-                cleanup.last_error_code = None
-            await self.session.commit()
+        bind = self.session.bind
+        if bind is None:
+            return
+        session_factory = async_sessionmaker(bind, expire_on_commit=False)
+        await FileLifecycleService(
+            session_factory,
+            self._storage(),
+            self.enqueue_scan,
+        ).reconcile_cleanup(limit=100, lifecycle_id=lifecycle_id)
 
 
 class FileLifecycleService:
     """Claims durable storage compensation work without process-local coordination."""
+
+    _CLEANUP_EXTERNAL_TIMEOUT_SECONDS = 20
 
     def __init__(
         self,
@@ -500,7 +504,11 @@ class FileLifecycleService:
                 expired = now - timedelta(seconds=30)
                 if not (
                     (outbox.state == "PENDING" and outbox.next_attempt_at <= now)
-                    or (outbox.state == "DELIVERING" and outbox.locked_at is not None and outbox.locked_at <= expired)
+                    or (
+                        outbox.state == "DELIVERING"
+                        and outbox.locked_at is not None
+                        and outbox.locked_at <= expired
+                    )
                 ):
                     return False
                 claim_token = uuid4()
@@ -527,7 +535,9 @@ class FileLifecycleService:
                             claim_token=None,
                             locked_at=None,
                             next_attempt_at=datetime.now(UTC) + timedelta(seconds=30),
-                            last_error_code="AUDIT_FAILED" if kind == "completion_audit" else "DISPATCH_FAILED",
+                            last_error_code="AUDIT_FAILED"
+                            if kind == "completion_audit"
+                            else "DISPATCH_FAILED",
                         )
                     )
                     await session.commit()
@@ -539,7 +549,9 @@ class FileLifecycleService:
                         FileLifecycleOutbox.claim_token == claim_token,
                         FileLifecycleOutbox.state == "DELIVERING",
                     )
-                    .values(state="DELIVERED", claim_token=None, locked_at=None, last_error_code=None)
+                    .values(
+                        state="DELIVERED", claim_token=None, locked_at=None, last_error_code=None
+                    )
                 )
                 await session.commit()
         return True
@@ -593,41 +605,8 @@ class FileLifecycleService:
 
     async def reconcile(self, limit: int = 100) -> int:
         """Run bounded compensation jobs; failed providers remain safely retryable."""
-        completed = 0
+        completed = await self.reconcile_cleanup(limit)
         async with self.session_factory() as session:
-            cleanups = list(
-                await session.scalars(
-                    select(FileStorageCleanup)
-                    .where(FileStorageCleanup.state.in_(("PENDING", "RUNNING")))
-                    .order_by(
-                        case((FileStorageCleanup.operation == "DELETE_OBJECT", 0), else_=1),
-                        FileStorageCleanup.next_attempt_at,
-                    )
-                    .with_for_update(skip_locked=True)
-                    .limit(limit)
-                )
-            )
-            for cleanup in cleanups:
-                cleanup.state = "RUNNING"
-                await session.commit()
-                try:
-                    if cleanup.operation == "DELETE_OBJECT":
-                        await self.storage.delete_object(cleanup.object_key)
-                    elif cleanup.multipart_id is not None:
-                        await self.storage.abort_multipart(cleanup.object_key, cleanup.multipart_id)
-                except Exception:  # noqa: BLE001 -- no provider data enters durable state
-                    cleanup.state = "PENDING"
-                    cleanup.attempt_count += 1
-                    cleanup.next_attempt_at = datetime.now(UTC) + timedelta(seconds=30)
-                    cleanup.last_error_code = (
-                        "DELETE_FAILED" if cleanup.operation == "DELETE_OBJECT" else "ABORT_FAILED"
-                    )
-                else:
-                    cleanup.state = "DONE"
-                    cleanup.attempt_count += 1
-                    cleanup.last_error_code = None
-                    completed += 1
-                await session.commit()
             lifecycles = list(
                 await session.scalars(
                     select(FileUploadLifecycle)
@@ -648,22 +627,109 @@ class FileLifecycleService:
                     if metadata is None:
                         parts: list[CompletedPart] = []
                         for item in lifecycle.canonical_parts_json or []:
+                            if not isinstance(item, dict):
+                                continue
                             part_number = item.get("part_number")
                             etag = item.get("etag")
-                            if not isinstance(part_number, int) or not isinstance(etag, str):
-                                parts = []
-                                break
+                            if (
+                                not isinstance(part_number, int)
+                                or isinstance(part_number, bool)
+                                or not isinstance(etag, str)
+                            ):
+                                continue
                             parts.append(CompletedPart(part_number, etag))
                         if not parts:
                             continue
                         metadata = await self.storage.complete_multipart(
                             lifecycle.object_key, upload.multipart_id, parts
                         )
-                except Exception:  # noqa: BLE001 -- ambiguous storage stays prepared
+                except Exception:  # noqa: BLE001
                     await session.rollback()
                     continue
                 if metadata.size_bytes != lifecycle.declared_size_bytes:
                     continue
                 await FileService(session, self.storage)._finalize_completion(file, lifecycle)
                 completed += 1
+        return completed
+
+    async def reconcile_cleanup(self, limit: int = 100, lifecycle_id: UUID | None = None) -> int:
+        """Claim and execute due cleanup work with a per-claim lease token."""
+        completed = 0
+        async with self.session_factory() as session:
+            cleanup_filters = [
+                or_(
+                    and_(
+                        FileStorageCleanup.state == "PENDING",
+                        FileStorageCleanup.next_attempt_at <= datetime.now(UTC),
+                    ),
+                    and_(
+                        FileStorageCleanup.state == "RUNNING",
+                        FileStorageCleanup.locked_at <= datetime.now(UTC) - timedelta(seconds=30),
+                    ),
+                )
+            ]
+            if lifecycle_id is not None:
+                cleanup_filters.append(FileStorageCleanup.lifecycle_id == lifecycle_id)
+            cleanups = list(
+                await session.scalars(
+                    select(FileStorageCleanup)
+                    .where(*cleanup_filters)
+                    .order_by(
+                        case((FileStorageCleanup.operation == "DELETE_OBJECT", 0), else_=1),
+                        FileStorageCleanup.next_attempt_at,
+                    )
+                    .with_for_update(skip_locked=True)
+                    .limit(limit)
+                )
+            )
+            for cleanup in cleanups:
+                cleanup.state = "RUNNING"
+                cleanup.locked_at = datetime.now(UTC)
+                claim_token = uuid4()
+                cleanup.claim_token = claim_token
+                cleanup.attempt_count += 1
+                await session.commit()
+                try:
+                    if cleanup.operation == "DELETE_OBJECT":
+                        await asyncio.wait_for(
+                            self.storage.delete_object(cleanup.object_key),
+                            timeout=self._CLEANUP_EXTERNAL_TIMEOUT_SECONDS,
+                        )
+                    elif cleanup.multipart_id is not None:
+                        await asyncio.wait_for(
+                            self.storage.abort_multipart(cleanup.object_key, cleanup.multipart_id),
+                            timeout=self._CLEANUP_EXTERNAL_TIMEOUT_SECONDS,
+                        )
+                except Exception:  # noqa: BLE001 -- no provider data enters durable state
+                    await session.execute(
+                        update(FileStorageCleanup)
+                        .where(
+                            FileStorageCleanup.id == cleanup.id,
+                            FileStorageCleanup.claim_token == claim_token,
+                            FileStorageCleanup.state == "RUNNING",
+                        )
+                        .values(
+                            state="PENDING",
+                            claim_token=None,
+                            locked_at=None,
+                            next_attempt_at=datetime.now(UTC) + timedelta(seconds=30),
+                            last_error_code="DELETE_FAILED"
+                            if cleanup.operation == "DELETE_OBJECT"
+                            else "ABORT_FAILED",
+                        )
+                    )
+                else:
+                    await session.execute(
+                        update(FileStorageCleanup)
+                        .where(
+                            FileStorageCleanup.id == cleanup.id,
+                            FileStorageCleanup.claim_token == claim_token,
+                            FileStorageCleanup.state == "RUNNING",
+                        )
+                        .values(
+                            state="DONE", claim_token=None, locked_at=None, last_error_code=None
+                        )
+                    )
+                    completed += 1
+                await session.commit()
         return completed

@@ -808,6 +808,8 @@ async def test_size_mismatch_persists_compensation_and_reconciler_retries_delete
     db_session, active_owner
 ) -> None:
     """A completed wrong-size object is deleted only through a durable retry record."""
+    from datetime import UTC, datetime
+
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -856,6 +858,8 @@ async def test_size_mismatch_persists_compensation_and_reconciler_retries_delete
     object_key = file.object_key
 
     storage.delete_error = None
+    cleanup[1].next_attempt_at = datetime.now(UTC)
+    await db_session.commit()
     factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
     assert await FileLifecycleService(factory, storage).reconcile() == 1
     db_session.expire_all()
@@ -1378,3 +1382,253 @@ async def test_future_due_outbox_skips_dispatch_without_claim(db_session, active
     db_session.expire_all()
     scan = await db_session.scalar(select(FileLifecycleOutbox).where(FileLifecycleOutbox.kind == "scan_dispatch", FileLifecycleOutbox.file_id == file_id))
     assert scan is not None and scan.state == "PENDING" and scan.attempt_count == 0 and scan.claim_token is None and scan.locked_at is None and called == []
+@pytest.mark.asyncio
+async def test_live_cleanup_lease_allows_one_concurrent_external_call(db_session) -> None:
+    """A live cleanup lease admits exactly one external delete worker."""
+    import asyncio
+    import hashlib
+
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from superboss.modules.files.models import FileStorageCleanup
+    from superboss.modules.files.service import FileLifecycleService
+
+    class BlockingDeleteStorage(InMemoryObjectStorage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+            self.delete_calls = 0
+
+        async def delete_object(self, object_key: str) -> None:
+            self.delete_calls += 1
+            self.entered.set()
+            await asyncio.wait_for(self.release.wait(), timeout=3)
+            await super().delete_object(object_key)
+
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    for number in range(3):
+        storage = BlockingDeleteStorage()
+        object_key = f"projects/lease-cleanup/{number}"
+        db_session.add(
+            FileStorageCleanup(
+                operation="DELETE_OBJECT",
+                dedupe_key=hashlib.sha256(object_key.encode()).hexdigest(),
+                object_key=object_key,
+            )
+        )
+        await db_session.commit()
+
+        first = asyncio.create_task(
+            FileLifecycleService(factory, storage).reconcile_cleanup(limit=1)
+        )
+        await asyncio.wait_for(storage.entered.wait(), timeout=3)
+        second = await FileLifecycleService(factory, storage).reconcile_cleanup(limit=1)
+        assert second == 0 and storage.delete_calls == 1
+        storage.release.set()
+        assert await asyncio.wait_for(first, timeout=3) == 1
+
+        db_session.expire_all()
+        cleanup = await db_session.scalar(
+            select(FileStorageCleanup).where(FileStorageCleanup.object_key == object_key)
+        )
+        assert cleanup is not None
+        assert cleanup.state == "DONE"
+        assert cleanup.attempt_count == 1
+        assert cleanup.claim_token is None and cleanup.locked_at is None
+
+
+@pytest.mark.asyncio
+async def test_expired_cleanup_lease_takeover_uses_new_token_cas(db_session) -> None:
+    """A late cleanup worker cannot acknowledge over an expired lease takeover."""
+    import asyncio
+    import hashlib
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import select, update
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from superboss.modules.files.models import FileStorageCleanup
+    from superboss.modules.files.service import FileLifecycleService
+
+    class TakeoverDeleteStorage(InMemoryObjectStorage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.first_entered = asyncio.Event()
+            self.second_entered = asyncio.Event()
+            self.release_first = asyncio.Event()
+            self.release_second = asyncio.Event()
+            self.calls = 0
+
+        async def delete_object(self, object_key: str) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                self.first_entered.set()
+                await asyncio.wait_for(self.release_first.wait(), timeout=3)
+            else:
+                self.second_entered.set()
+                await asyncio.wait_for(self.release_second.wait(), timeout=3)
+            await super().delete_object(object_key)
+
+    storage = TakeoverDeleteStorage()
+    object_key = "projects/lease-cleanup/takeover"
+    db_session.add(
+        FileStorageCleanup(
+            operation="DELETE_OBJECT",
+            dedupe_key=hashlib.sha256(object_key.encode()).hexdigest(),
+            object_key=object_key,
+        )
+    )
+    await db_session.commit()
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+
+    first = asyncio.create_task(
+        FileLifecycleService(factory, storage).reconcile_cleanup(limit=1)
+    )
+    await asyncio.wait_for(storage.first_entered.wait(), timeout=3)
+    original = await db_session.scalar(
+        select(FileStorageCleanup).where(FileStorageCleanup.object_key == object_key)
+    )
+    assert original is not None and original.claim_token is not None
+    cleanup_id = original.id
+    old_token = original.claim_token
+    await db_session.execute(
+        update(FileStorageCleanup)
+        .where(FileStorageCleanup.id == cleanup_id)
+        .values(locked_at=datetime.now(UTC) - timedelta(seconds=31))
+    )
+    await db_session.commit()
+
+    second = asyncio.create_task(
+        FileLifecycleService(factory, storage).reconcile_cleanup(limit=1)
+    )
+    await asyncio.wait_for(storage.second_entered.wait(), timeout=3)
+    db_session.expire_all()
+    taken_over = await db_session.scalar(
+        select(FileStorageCleanup).where(FileStorageCleanup.id == cleanup_id)
+    )
+    assert taken_over is not None and taken_over.claim_token not in {None, old_token}
+
+    storage.release_first.set()
+    assert await asyncio.wait_for(first, timeout=3) == 1
+    db_session.expire_all()
+    still_owned = await db_session.scalar(
+        select(FileStorageCleanup).where(FileStorageCleanup.id == cleanup_id)
+    )
+    assert still_owned is not None and still_owned.state == "RUNNING"
+    assert still_owned.claim_token == taken_over.claim_token
+
+    storage.release_second.set()
+    assert await asyncio.wait_for(second, timeout=3) == 1
+    db_session.expire_all()
+    cleanup = await db_session.scalar(
+        select(FileStorageCleanup).where(FileStorageCleanup.id == cleanup_id)
+    )
+    assert cleanup is not None and cleanup.state == "DONE" and cleanup.attempt_count == 2
+    assert cleanup.claim_token is None and cleanup.locked_at is None and storage.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_future_due_cleanup_skips_external_call_without_claim(db_session) -> None:
+    """Backoff prevents cleanup workers from claiming future work."""
+    import hashlib
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from superboss.modules.files.models import FileStorageCleanup
+    from superboss.modules.files.service import FileLifecycleService
+
+    class ObservedStorage(InMemoryObjectStorage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.delete_calls = 0
+            self.abort_calls = 0
+
+        async def delete_object(self, object_key: str) -> None:
+            self.delete_calls += 1
+            await super().delete_object(object_key)
+
+        async def abort_multipart(self, object_key: str, multipart_id: str) -> None:
+            self.abort_calls += 1
+            await super().abort_multipart(object_key, multipart_id)
+
+    object_key = "projects/lease-cleanup/future"
+    db_session.add(
+        FileStorageCleanup(
+            operation="DELETE_OBJECT",
+            dedupe_key=hashlib.sha256(object_key.encode()).hexdigest(),
+            object_key=object_key,
+            next_attempt_at=datetime.now(UTC) + timedelta(minutes=1),
+        )
+    )
+    await db_session.commit()
+    storage = ObservedStorage()
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+
+    assert await FileLifecycleService(factory, storage).reconcile_cleanup(limit=1) == 0
+    db_session.expire_all()
+    cleanup = await db_session.scalar(
+        select(FileStorageCleanup).where(FileStorageCleanup.object_key == object_key)
+    )
+    assert cleanup is not None and cleanup.state == "PENDING" and cleanup.attempt_count == 0
+    assert cleanup.claim_token is None and cleanup.locked_at is None
+    assert storage.delete_calls == 0 and storage.abort_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_request_cleanup_and_maintenance_share_one_live_lease(db_session) -> None:
+    """Request best-effort cleanup uses the same claim protocol as maintenance."""
+    import asyncio
+    import hashlib
+
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from superboss.modules.files.models import FileStorageCleanup
+    from superboss.modules.files.service import FileLifecycleService, FileService
+
+    class BlockingDeleteStorage(InMemoryObjectStorage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+            self.delete_calls = 0
+
+        async def delete_object(self, object_key: str) -> None:
+            self.delete_calls += 1
+            self.entered.set()
+            await asyncio.wait_for(self.release.wait(), timeout=3)
+            await super().delete_object(object_key)
+
+    storage = BlockingDeleteStorage()
+    lifecycle_id = uuid4()
+    object_key = "projects/lease-cleanup/request-and-maintenance"
+    db_session.add(
+        FileStorageCleanup(
+            operation="DELETE_OBJECT",
+            dedupe_key=hashlib.sha256(object_key.encode()).hexdigest(),
+            object_key=object_key,
+            lifecycle_id=lifecycle_id,
+        )
+    )
+    await db_session.commit()
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+
+    request = asyncio.create_task(
+        FileService(db_session, storage)._best_effort_cleanup(lifecycle_id)
+    )
+    await asyncio.wait_for(storage.entered.wait(), timeout=3)
+    maintenance = await FileLifecycleService(factory, storage).reconcile_cleanup(limit=1)
+    assert maintenance == 0 and storage.delete_calls == 1
+    storage.release.set()
+    await asyncio.wait_for(request, timeout=3)
+
+    db_session.expire_all()
+    cleanup = await db_session.scalar(
+        select(FileStorageCleanup).where(FileStorageCleanup.object_key == object_key)
+    )
+    assert cleanup is not None and cleanup.state == "DONE" and cleanup.attempt_count == 1
+    assert cleanup.claim_token is None and cleanup.locked_at is None
