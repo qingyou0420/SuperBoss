@@ -158,7 +158,4 @@ class FileService:
             raise ConflictError()
         file.state = FileState.QUARANTINED
         await self.session.flush()
-        result = self.enqueue_scan(file.id)
-        if result is not None:
-            await result
         return file

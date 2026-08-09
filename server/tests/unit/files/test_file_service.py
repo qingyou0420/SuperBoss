@@ -115,6 +115,27 @@ async def test_same_key_is_scoped_to_project_and_actor(db_session, active_owner)
     assert len({first.id, second.id, third.id}) == 3 and len(storage.active) == 3
 
 
+@pytest.mark.asyncio
+async def test_complete_sorts_parts_and_quarantines_without_enqueue(db_session, active_owner) -> None:
+    """Completion must persist quarantine, not use multipart ETags as checksums."""
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileService
+    from superboss.modules.files.storage import CompletedPart
+
+    project = Project(name="Complete")
+    db_session.add(project)
+    await db_session.flush()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    enqueued: list[UUID] = []
+    storage = InMemoryObjectStorage(complete_size=2)
+    service = FileService(db_session, storage, lambda file_id: enqueued.append(file_id))
+    upload = await service.start_upload(actor, UploadStart(project_id=project.id, filename="x.pdf", size_bytes=2, sha256="0" * 64, category="资料", file_date="2026-08-09"), "complete")
+    file = await service.complete_upload(actor, upload.id, [CompletedPart(2, "not-a-sha"), CompletedPart(1, "0" * 64)])
+    assert file.state.value == "QUARANTINED" and file.sha256 == "0" * 64
+    assert storage.completed[upload.multipart_id] == [CompletedPart(1, "0" * 64), CompletedPart(2, "not-a-sha")]
+    assert enqueued == []
+
+
 @pytest.mark.parametrize("key", ["x", "!" * 255, "", "x" * 256, " x", "x ", "x\r\ny", "中文"])
 def test_idempotency_key_grammar(key: str) -> None:
     """Header keys are printable ASCII tokens, never whitespace or controls."""
