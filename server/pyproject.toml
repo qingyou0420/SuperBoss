@@ -6,7 +6,10 @@ requires-python = ">=3.13,<3.14"
 dependencies = [
     "alembic",
     "asyncpg",
+    "cryptography",
     "fastapi",
+    "httpx",
+    "pyjwt",
     "pydantic-settings",
     "sqlalchemy[asyncio]",
     "uvicorn[standard]",
@@ -32,6 +35,9 @@ packages = ["src/superboss"]
 [tool.ruff]
 line-length = 100
 target-version = "py313"
+
+[tool.ruff.lint]
+extend-ignore = ["B008"]
 
 [tool.mypy]
 python_version = "3.13"
