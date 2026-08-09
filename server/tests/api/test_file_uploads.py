@@ -681,3 +681,37 @@ async def test_foreign_staff_download_is_denied_and_audited(file_client, db_sess
     assert str(event.request_id) == request_id and event.metadata_json["state"] == "CLEAN"
     assert "url" not in event.metadata_json and "object_key" not in event.metadata_json
     assert "memory://" not in str(event.metadata_json) and file.object_key not in str(event.metadata_json)
+
+
+@pytest.mark.asyncio
+async def test_missing_file_download_is_denied_with_file_not_found_code(
+    file_client, db_session: AsyncSession
+) -> None:
+    from uuid import uuid4
+
+    from sqlalchemy import select
+
+    from superboss.modules.audit.models import AuditLog
+
+    client, storage = file_client
+    _login(client)
+    owner = await db_session.scalar(select(User).where(User.wecom_userid == "owner-1"))
+    assert owner is not None
+    file_id = uuid4()
+    request_id = "bba39a39-47ba-4ac5-9250-ccdba1d7f25e"
+    response = client.get(
+        f"/api/v1/files/{file_id}/download",
+        headers={"X-Request-ID": request_id},
+    )
+
+    events = list((await db_session.scalars(select(AuditLog))).all())
+    assert response.status_code == 404 and response.json()["error"]["code"] == "FILE_NOT_FOUND"
+    assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"] == request_id
+    assert storage.expiries == [] and len(events) == 1
+    event = events[0]
+    assert event.action == "file.download" and event.outcome == "DENIED"
+    assert event.actor_kind == "user" and event.actor_id == owner.id
+    assert event.object_type == "file" and event.object_id == file_id and event.project_id is None
+    assert str(event.request_id) == request_id
+    assert "url" not in event.metadata_json and "object_key" not in event.metadata_json
+    assert "memory://" not in str(event.metadata_json)

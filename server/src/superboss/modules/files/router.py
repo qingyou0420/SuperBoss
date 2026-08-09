@@ -6,12 +6,12 @@ from fastapi import APIRouter, Depends, Header, Path, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core.actors import Actor, get_actor
-from superboss.core.errors import ForbiddenError
+from superboss.core.errors import DomainError
 from superboss.modules.audit.schemas import AuditEventInput
 from superboss.modules.audit.service import AuditService
 from superboss.modules.files.models import File
 from superboss.modules.files.schemas import UploadComplete, UploadStart
-from superboss.modules.files.service import FileNotReadyError, FileService
+from superboss.modules.files.service import FileService
 from superboss.modules.files.storage import CompletedPart
 
 router = APIRouter(prefix="/files", tags=["files"])
@@ -36,7 +36,7 @@ def get_service(request: Request, session: AsyncSession = Depends(get_session)) 
 
 
 async def _record_download_audit(
-    request: Request, actor: Actor, file: File, outcome: str
+    request: Request, actor: Actor, file: File | None, file_id: UUID, outcome: str
 ) -> None:
     try:
         await AuditService(request.app.state.session_factory).record(
@@ -44,11 +44,11 @@ async def _record_download_audit(
                 actor=actor,
                 action="file.download",
                 object_type="file",
-                object_id=file.id,
-                project_id=file.project_id,
+                object_id=file.id if file is not None else file_id,
+                project_id=file.project_id if file is not None else None,
                 outcome=outcome,
                 request_id=UUID(request.state.request_id),
-                metadata={"state": file.state.value},
+                metadata={"state": file.state.value} if file is not None else {},
             )
         )
     except Exception:  # noqa: BLE001 -- audit unavailability must not alter download authorization
@@ -115,12 +115,11 @@ async def download(
 ) -> dict[str, str]:
     try:
         url = await service.presign_download(actor, file_id)
-    except (FileNotReadyError, ForbiddenError):
+    except DomainError:
         file = await service.session.get(File, file_id)
-        if file is not None:
-            await _record_download_audit(request, actor, file, "DENIED")
+        await _record_download_audit(request, actor, file, file_id, "DENIED")
         raise
     file = await service.session.get(File, file_id)
     assert file is not None
-    await _record_download_audit(request, actor, file, "SUCCESS")
+    await _record_download_audit(request, actor, file, file_id, "SUCCESS")
     return {"url": url}

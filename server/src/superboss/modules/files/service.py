@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from superboss.core.actors import Actor, require_project_access
 from superboss.core.errors import (
     ConflictError,
+    FileNotFoundError,
     FileStorageFailureError,
     FileUploadSizeMismatchError,
     NotFoundError,
@@ -149,7 +150,7 @@ class FileService:
     async def presign_download(self, actor: Actor, file_id: UUID) -> str:
         file = await self.session.get(File, file_id)
         if file is None:
-            raise NotFoundError()
+            raise FileNotFoundError()
         require_project_access(actor, file.project_id)
         await self.ensure_downloadable(file)
         return await self._storage().presign_get(file.object_key, 60)

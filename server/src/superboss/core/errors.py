@@ -30,6 +30,11 @@ class NotFoundError(DomainError):
         super().__init__("PROJECT_NOT_FOUND", "Project not found", 404)
 
 
+class FileNotFoundError(NotFoundError):
+    def __init__(self) -> None:
+        DomainError.__init__(self, "FILE_NOT_FOUND", "File not found", 404)
+
+
 class ConflictError(DomainError):
     def __init__(self) -> None:
         super().__init__("PROJECT_NAME_CONFLICT", "A project with this name already exists", 409)
