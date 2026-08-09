@@ -178,6 +178,23 @@ async def test_part_rejects_every_non_uploading_state(db_session, active_owner, 
     with pytest.raises(ConflictError): await service.presign_part(actor, upload.id, 1)
 
 
+@pytest.mark.asyncio
+async def test_foreign_staff_cannot_presign_part(db_session, active_owner) -> None:
+    from superboss.core.errors import ForbiddenError
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileService
+    target, assigned = Project(name="Target part"), Project(name="Assigned part")
+    staff = User(wecom_userid="part-staff", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
+    db_session.add_all([target, assigned, staff]); await db_session.flush()
+    db_session.add(ProjectMember(project_id=assigned.id, user_id=staff.id))
+    storage = InMemoryObjectStorage(); service = FileService(db_session, storage)
+    owner = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    upload = await service.start_upload(owner, UploadStart(project_id=target.id, filename="x.pdf", size_bytes=1, sha256="0" * 64, category="资料", file_date="2026-08-09"), "foreign")
+    staff_actor = Actor("user", staff.id, Role.STAFF, frozenset({assigned.id}), frozenset())
+    with pytest.raises(ForbiddenError): await service.presign_part(staff_actor, upload.id, 1)
+    assert storage.expiries == []
+
+
 @pytest.mark.parametrize("key", ["x", "!" * 255, "", "x" * 256, " x", "x ", "x\r\ny", "中文"])
 def test_idempotency_key_grammar(key: str) -> None:
     """Header keys are printable ASCII tokens, never whitespace or controls."""
