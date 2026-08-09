@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import os
@@ -16,6 +17,74 @@ from conftest import (
     load_app,
 )
 from typer.testing import CliRunner
+
+
+def _corrupt_state_path(state_dir: Path, *, marker: bool) -> Path:
+    origin_hash = hashlib.sha256(ORIGIN.encode("utf-8")).hexdigest()
+    origin_dir = state_dir / origin_hash
+    origin_dir.mkdir(parents=True, exist_ok=True)
+    return origin_dir / ("replacement.marker" if marker else f"{'0' * 64}.json")
+
+
+@pytest.mark.parametrize("marker", [False, True], ids=["outbox", "marker"])
+def test_deep_local_state_json_is_stable_input_error_before_credentials_or_network(
+    marker: bool,
+    runner: CliRunner,
+    memory_keyring: MemoryKeyring,
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    respx_mock: respx.MockRouter,
+) -> None:
+    app = load_app(monkeypatch, state_dir)
+    path = _corrupt_state_path(state_dir, marker=marker)
+    path.write_bytes(b"[" * 10_000 + b"]" * 10_000)
+    keyring_reads = len(memory_keyring.get_calls)
+    arguments = (
+        ["pair", "--server", ORIGIN, "--code", "local-code", "--name", "PC"]
+        if marker
+        else ["retry", "--server", ORIGIN]
+    )
+
+    result = runner.invoke(app, arguments)
+
+    assert result.exit_code == 2
+    assert len(memory_keyring.get_calls) == keyring_reads
+    assert len(memory_keyring.set_calls) == 0
+    assert len(respx_mock.calls) == 0
+    assert str(path) not in f"{result.stdout}\n{result.stderr}"
+
+
+@pytest.mark.parametrize("marker", [False, True], ids=["outbox", "marker"])
+def test_oversized_local_state_is_rejected_without_parsing_or_external_access(
+    marker: bool,
+    runner: CliRunner,
+    memory_keyring: MemoryKeyring,
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    respx_mock: respx.MockRouter,
+) -> None:
+    app = load_app(monkeypatch, state_dir)
+    outbox_module = importlib.import_module("superboss_connector.outbox")
+    path = _corrupt_state_path(state_dir, marker=marker)
+    path.write_bytes(b" " * (outbox_module.LOCAL_STATE_MAX_BYTES + 1))
+
+    def parsing_is_forbidden(_value: object) -> object:
+        pytest.fail("oversized local state reached JSON parsing")
+
+    monkeypatch.setattr(outbox_module.json, "loads", parsing_is_forbidden)
+    keyring_reads = len(memory_keyring.get_calls)
+    arguments = (
+        ["pair", "--server", ORIGIN, "--code", "local-code", "--name", "PC"]
+        if marker
+        else ["retry", "--server", ORIGIN]
+    )
+
+    result = runner.invoke(app, arguments)
+
+    assert result.exit_code == 2
+    assert len(memory_keyring.get_calls) == keyring_reads
+    assert len(memory_keyring.set_calls) == 0
+    assert len(respx_mock.calls) == 0
 
 
 def test_same_origin_windows_lock_contention_fails_bounded_without_state_damage(

@@ -13,12 +13,16 @@ class CredentialStore:
     def __init__(self, origin: str) -> None:
         self.service = f"SuperBoss/KimiConnector/{origin}"
 
-    def load_refresh(self) -> str:
+    def load_refresh_optional(self) -> str | None:
         try:
             value = keyring.get_password(self.service, USERNAME)
         except Exception as error:
             raise ConnectorError(3, CREDENTIAL_ERROR) from error
-        if not value:
+        return value or None
+
+    def load_refresh(self) -> str:
+        value = self.load_refresh_optional()
+        if value is None:
             raise ConnectorError(3, CREDENTIAL_ERROR)
         return value
 

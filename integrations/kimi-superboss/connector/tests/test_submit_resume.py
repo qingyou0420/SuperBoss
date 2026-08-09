@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import importlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -445,3 +447,139 @@ def test_file_mutation_after_presign_exits_4_before_complete_or_submit(
         create_route=create,
         idempotency_key=f"replacement-after-{mutation}",
     )
+
+
+def test_same_size_rewrite_after_verify_before_read_sends_zero_parts(
+    tmp_path: Path,
+    runner: CliRunner,
+    memory_keyring: MemoryKeyring,
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    respx_mock: respx.MockRouter,
+) -> None:
+    app = load_app(monkeypatch, state_dir)
+    flow = _install_interrupted_flow(tmp_path, memory_keyring, respx_mock)
+    cli_module = importlib.import_module("superboss_connector.cli")
+    real_verify = cli_module.verify_attachment
+    verification_count = 0
+
+    def verify_then_rewrite(path: Path, expected_size: int, expected_sha256: str) -> None:
+        nonlocal verification_count
+        real_verify(path, expected_size, expected_sha256)
+        verification_count += 1
+        if verification_count == 2:
+            path.write_bytes(b"X" * expected_size)
+
+    monkeypatch.setattr(cli_module, "verify_attachment", verify_then_rewrite)
+
+    result = runner.invoke(
+        app,
+        ["submit", "--server", ORIGIN, "--manifest", str(flow.manifest)],
+    )
+
+    assert result.exit_code == 4
+    assert verification_count >= 2
+    assert all(route.call_count == 0 for route in flow.put_routes.values())
+    assert flow.complete_route.call_count == 0
+    assert flow.submit_route.call_count == 0
+    assert not list(state_dir.rglob("*.json"))
+
+
+def test_outbox_persists_approved_digest_for_every_part_and_resume_keeps_them(
+    tmp_path: Path,
+    runner: CliRunner,
+    memory_keyring: MemoryKeyring,
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    respx_mock: respx.MockRouter,
+) -> None:
+    app = load_app(monkeypatch, state_dir)
+    flow = _install_interrupted_flow(tmp_path, memory_keyring, respx_mock)
+    expected_digests = [
+        hashlib.sha256(block).hexdigest()
+        for block in (
+            b"A" * PART_SIZE,
+            b"A" * PART_SIZE,
+            b"Z",
+        )
+    ]
+
+    first = runner.invoke(
+        app,
+        ["submit", "--server", ORIGIN, "--manifest", str(flow.manifest)],
+    )
+
+    assert first.exit_code == 6
+    entry_path = next(state_dir.rglob("*.json"))
+    first_state = json.loads(entry_path.read_text(encoding="utf-8"))
+    assert first_state["attachments"][0]["part_sha256s"] == expected_digests
+
+    retried = runner.invoke(app, ["retry", "--server", ORIGIN])
+
+    assert retried.exit_code == 0
+    assert flow.put_routes[1].call_count == 1
+    assert flow.put_routes[2].call_count == 1
+    assert flow.put_routes[3].call_count == 2
+
+
+def test_exact_100_mib_attachment_persists_thirteen_approved_part_digests(
+    tmp_path: Path,
+    runner: CliRunner,
+    memory_keyring: MemoryKeyring,
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    respx_mock: respx.MockRouter,
+) -> None:
+    app = load_app(monkeypatch, state_dir)
+    manifest, attachment, _payload = write_manifest(tmp_path / "max-size")
+    with attachment.open("wb") as stream:
+        stream.seek(100 * 1024 * 1024 - 1)
+        stream.write(b"\0")
+
+    result = runner.invoke(
+        app,
+        ["submit", "--server", ORIGIN, "--manifest", str(manifest)],
+    )
+
+    assert result.exit_code == 3
+    state = json.loads(next(state_dir.rglob("*.json")).read_text(encoding="utf-8"))
+    digests = state["attachments"][0]["part_sha256s"]
+    assert len(digests) == 13
+    assert digests[:12] == [hashlib.sha256(b"\0" * PART_SIZE).hexdigest()] * 12
+    assert digests[12] == hashlib.sha256(b"\0" * (4 * 1024 * 1024)).hexdigest()
+    assert memory_keyring.set_calls == []
+    assert len(respx_mock.calls) == 0
+
+
+def test_tampered_approved_part_digest_exits_2_before_credentials_or_network(
+    tmp_path: Path,
+    runner: CliRunner,
+    memory_keyring: MemoryKeyring,
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    respx_mock: respx.MockRouter,
+) -> None:
+    app = load_app(monkeypatch, state_dir)
+    flow = _install_interrupted_flow(tmp_path, memory_keyring, respx_mock)
+    first = runner.invoke(
+        app,
+        ["submit", "--server", ORIGIN, "--manifest", str(flow.manifest)],
+    )
+    assert first.exit_code == 6
+    entry_path = next(state_dir.rglob("*.json"))
+    document = json.loads(entry_path.read_text(encoding="utf-8"))
+    document["attachments"][0].setdefault(
+        "part_sha256s",
+        [hashlib.sha256(flow.attachment.read_bytes()).hexdigest()],
+    )
+    document["attachments"][0]["part_sha256s"][0] = "0" * 64
+    entry_path.write_text(json.dumps(document), encoding="utf-8")
+    network_calls = len(respx_mock.calls)
+    keyring_reads = len(memory_keyring.get_calls)
+
+    retried = runner.invoke(app, ["retry", "--server", ORIGIN])
+
+    assert retried.exit_code == 2
+    assert len(respx_mock.calls) == network_calls
+    assert len(memory_keyring.get_calls) == keyring_reads
+    assert entry_path.exists()

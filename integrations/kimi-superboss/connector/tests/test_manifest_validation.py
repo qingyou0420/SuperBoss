@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import importlib
+import json
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 import respx
 from conftest import (
     ORIGIN,
+    SERVICE,
+    USERNAME,
     ManifestMutation,
     MemoryKeyring,
     load_app,
@@ -15,6 +20,8 @@ from conftest import (
     write_manifest,
 )
 from typer.testing import CliRunner
+
+LOCAL_MANIFEST_LIMIT = 256 * 1024
 
 
 def _extra_root(payload: dict[str, Any], _attachment: Path) -> None:
@@ -115,6 +122,93 @@ def test_empty_attachment_is_rejected_before_hashing_credentials_or_network(
     assert result.exit_code == 2
     assert memory_keyring.get_calls == []
     assert len(respx_mock.calls) == 0
+
+
+def test_escaped_unpaired_surrogate_in_k3_text_exits_2_without_side_effects(
+    tmp_path: Path,
+    runner: CliRunner,
+    memory_keyring: MemoryKeyring,
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    respx_mock: respx.MockRouter,
+) -> None:
+    app = load_app(monkeypatch, state_dir)
+    manifest, _attachment, payload = write_manifest(tmp_path / "surrogate")
+    payload["k3_result"]["model_label"] = "bad\ud800model"
+    manifest.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        ["submit", "--server", ORIGIN, "--manifest", str(manifest)],
+    )
+
+    assert result.exit_code == 2
+    assert memory_keyring.get_calls == []
+    assert memory_keyring.set_calls == []
+    assert len(respx_mock.calls) == 0
+
+
+@pytest.mark.parametrize("corruption", ["oversized", "deep_json"])
+def test_manifest_read_boundary_fails_2_before_outbox_credentials_or_network(
+    corruption: str,
+    tmp_path: Path,
+    runner: CliRunner,
+    memory_keyring: MemoryKeyring,
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    respx_mock: respx.MockRouter,
+) -> None:
+    app = load_app(monkeypatch, state_dir)
+    manifest_module = importlib.import_module("superboss_connector.manifest")
+    manifest = tmp_path / "manifest.json"
+    if corruption == "oversized":
+        manifest.write_bytes(b" " * (LOCAL_MANIFEST_LIMIT + 1))
+
+        def parsing_is_forbidden(_value: object) -> object:
+            pytest.fail("oversized manifest reached JSON parsing")
+
+        monkeypatch.setattr(manifest_module.json, "loads", parsing_is_forbidden)
+    else:
+        manifest.write_bytes(b"[" * 10_000 + b"]" * 10_000)
+
+    result = runner.invoke(
+        app,
+        ["submit", "--server", ORIGIN, "--manifest", str(manifest)],
+    )
+
+    assert result.exit_code == 2
+    assert memory_keyring.get_calls == []
+    assert memory_keyring.set_calls == []
+    assert len(respx_mock.calls) == 0
+    assert not list(state_dir.rglob("*.json"))
+
+
+def test_valid_near_64_kib_local_manifest_passes_input_read_boundary(
+    tmp_path: Path,
+    runner: CliRunner,
+    memory_keyring: MemoryKeyring,
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    respx_mock: respx.MockRouter,
+) -> None:
+    app = load_app(monkeypatch, state_dir)
+    manifest, _attachment, payload = write_manifest(tmp_path / "near-limit")
+    payload["k3_result"]["modification_details"] = ["D" * 4096 for _ in range(15)]
+    rewrite_manifest(manifest, payload)
+    assert 60 * 1024 < manifest.stat().st_size < 64 * 1024
+    memory_keyring.values[(SERVICE, USERNAME)] = "near-limit-refresh"
+    refresh = respx_mock.post(f"{ORIGIN}/api/v1/device-auth/refresh").mock(
+        return_value=httpx.Response(503)
+    )
+
+    result = runner.invoke(
+        app,
+        ["submit", "--server", ORIGIN, "--manifest", str(manifest)],
+    )
+
+    assert result.exit_code == 6
+    assert refresh.call_count == 1
+    assert len(list(state_dir.rglob("*.json"))) == 1
 
 
 @pytest.mark.parametrize("invalid_file", ["directory", "over_100_mib"])

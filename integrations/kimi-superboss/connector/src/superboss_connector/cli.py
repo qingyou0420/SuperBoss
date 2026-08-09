@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable
 from functools import wraps
 from pathlib import Path
@@ -13,9 +14,22 @@ import typer
 from .client import ApiClient, AttachmentResponse, JobResponse, SubmitResponse
 from .config import normalize_origin
 from .credentials import CredentialStore
-from .errors import FILE_CHANGED, INVALID_INPUT, ConnectorError
+from .errors import (
+    FILE_CHANGED,
+    INVALID_INPUT,
+    OUTBOX_CONFLICT,
+    OUTBOX_INVALID,
+    ConnectorError,
+)
 from .manifest import PreparedManifest, prepare_manifest, verify_attachment
-from .outbox import CompletedPart, OutboxEntry, OutboxStore, Phase, initial_entry
+from .outbox import (
+    CompletedPart,
+    EvidenceState,
+    OutboxEntry,
+    OutboxStore,
+    Phase,
+    initial_entry,
+)
 
 app = typer.Typer(add_completion=False, no_args_is_help=True, pretty_exceptions_enable=False)
 
@@ -45,11 +59,62 @@ def _safe_argument(value: str, *, maximum: int) -> None:
         raise ConnectorError(2, INVALID_INPUT)
 
 
-def _print_result(result: SubmitResponse) -> None:
-    fields = [str(result.id), result.status]
+def _print_result(result: SubmitResponse | EvidenceState) -> None:
+    identifier = result.id if isinstance(result, SubmitResponse) else result.job_id
+    fields = [str(identifier), result.status]
     if result.result_code is not None:
         fields.append(result.result_code)
     typer.echo(" ".join(fields))
+
+
+def _print_result_and_delete(
+    result: SubmitResponse | EvidenceState,
+    store: OutboxStore,
+    path: Path,
+) -> None:
+    try:
+        _print_result(result)
+    except (OSError, UnicodeError) as error:
+        raise ConnectorError(2, OUTBOX_INVALID) from error
+    store.delete(path)
+
+
+def _report_replacement() -> None:
+    try:
+        typer.echo("Device paired. Old operation abandoned; create a new manifest and UUID.")
+    except (OSError, UnicodeError) as error:
+        raise ConnectorError(2, OUTBOX_INVALID) from error
+
+
+def _recover_replacement(
+    store: OutboxStore,
+    credentials: CredentialStore,
+    *,
+    retain_completed_marker: bool = False,
+) -> bool:
+    marker = store.load_replacement_marker()
+    if marker is None:
+        return False
+    old_outbox_path = store.marker_outbox_path(marker)
+    current_refresh = credentials.load_refresh_optional()
+    current_fingerprint = (
+        hashlib.sha256(current_refresh.encode("utf-8")).hexdigest()
+        if current_refresh is not None
+        else None
+    )
+    replacement_is_durable = (
+        marker.old_credential_state == "MISSING" and current_refresh is not None
+    ) or (
+        marker.old_credential_state == "PRESENT"
+        and current_refresh is not None
+        and current_fingerprint != marker.old_refresh_sha256
+    )
+    if replacement_is_durable and old_outbox_path.exists():
+        store.delete(old_outbox_path)
+    if replacement_is_durable and retain_completed_marker:
+        return True
+    store.delete_replacement_marker()
+    return replacement_is_durable
 
 
 def _prepared_for_retry(entry: OutboxEntry) -> PreparedManifest:
@@ -64,12 +129,15 @@ def _prepared_for_retry(entry: OutboxEntry) -> PreparedManifest:
     ):
         raise ConnectorError(4, FILE_CHANGED)
     for prepared, stored in zip(manifest.attachments, entry.attachments, strict=True):
+        if prepared.sha256 == stored.sha256 and list(prepared.part_sha256s) != stored.part_sha256s:
+            raise ConnectorError(2, OUTBOX_INVALID)
         if (
             prepared.kind != stored.kind
             or str(prepared.path) != stored.path
             or prepared.filename != stored.filename
             or prepared.size_bytes != stored.size_bytes
             or prepared.sha256 != stored.sha256
+            or list(prepared.part_sha256s) != stored.part_sha256s
             or prepared.content_type != stored.content_type
         ):
             raise ConnectorError(4, FILE_CHANGED)
@@ -95,7 +163,13 @@ def _bind_created_job(
     entry.phase = Phase.UPLOAD
 
 
-def _read_part(path: Path, part_number: int, part_size: int, total_size: int) -> bytes:
+def _read_part(
+    path: Path,
+    part_number: int,
+    part_size: int,
+    total_size: int,
+    expected_sha256: str,
+) -> bytes:
     offset = (part_number - 1) * part_size
     expected_length = min(part_size, total_size - offset)
     try:
@@ -104,7 +178,7 @@ def _read_part(path: Path, part_number: int, part_size: int, total_size: int) ->
             content = stream.read(part_size)
     except OSError as error:
         raise ConnectorError(4, FILE_CHANGED) from error
-    if len(content) != expected_length:
+    if len(content) != expected_length or hashlib.sha256(content).hexdigest() != expected_sha256:
         raise ConnectorError(4, FILE_CHANGED)
     return content
 
@@ -163,6 +237,7 @@ def _resume(
                     part_number,
                     attachment.part_size,
                     attachment.size_bytes,
+                    attachment.part_sha256s[part_number - 1],
                 )
                 etag = client.put_part(url, content)
                 attachment.completed_parts.append(CompletedPart(part_number=part_number, etag=etag))
@@ -193,7 +268,15 @@ def _resume(
         store.save(path, entry)
 
     result = client.submit_job(entry.job_id, access_token)
-    store.delete(path)
+    entry.phase = Phase.EVIDENCE
+    entry.evidence = EvidenceState(
+        job_id=result.id,
+        status=result.status,
+        result_code=result.result_code,
+        submitted_at=result.submitted_at,
+        updated_at=result.updated_at,
+    )
+    store.save(path, entry)
     return result
 
 
@@ -217,10 +300,38 @@ def pair(
     origin = normalize_origin(server)
     _safe_argument(code, maximum=255)
     _safe_argument(name, maximum=255)
+    store = OutboxStore(origin)
     credentials = CredentialStore(origin)
-    with ApiClient(origin) as client:
-        client.pair(code, name, credentials)
-    typer.echo("Device paired.")
+    with store.lock():
+        if _recover_replacement(
+            store,
+            credentials,
+            retain_completed_marker=True,
+        ):
+            _report_replacement()
+            store.delete_replacement_marker()
+            return
+        existing = store.load_optional()
+        if existing is not None and existing[1].phase == Phase.EVIDENCE:
+            raise ConnectorError(2, OUTBOX_CONFLICT)
+        if existing is not None:
+            old_refresh = credentials.load_refresh_optional()
+            store.save_replacement_marker(
+                old_refresh_sha256=(
+                    hashlib.sha256(old_refresh.encode("utf-8")).hexdigest()
+                    if old_refresh is not None
+                    else None
+                ),
+                old_outbox_path=existing[0],
+            )
+        with ApiClient(origin) as client:
+            client.pair(code, name, credentials)
+        if existing is not None:
+            store.delete(existing[0])
+            _report_replacement()
+            store.delete_replacement_marker()
+        else:
+            typer.echo("Device paired.")
 
 
 @app.command("submit")
@@ -234,11 +345,12 @@ def submit(
     prepared = prepare_manifest(manifest)
     store = OutboxStore(origin)
     with store.lock():
+        credentials = CredentialStore(origin)
+        _recover_replacement(store, credentials)
         store.ensure_available(prepared.idempotency_key)
         entry = initial_entry(origin, prepared)
         path = store.path_for(prepared.idempotency_key)
         store.save(path, entry)
-        credentials = CredentialStore(origin)
         try:
             with ApiClient(origin) as client:
                 access_token = client.refresh(credentials)
@@ -246,7 +358,7 @@ def submit(
         except ConnectorError as error:
             _discard_on_file_change(error, store, path)
             raise
-    _print_result(result)
+        _print_result_and_delete(result, store, path)
 
 
 @app.command("status")
@@ -257,14 +369,17 @@ def status(
 ) -> None:
     """Read one own-device import status."""
     origin = normalize_origin(server)
+    store = OutboxStore(origin)
     credentials = CredentialStore(origin)
-    with ApiClient(origin) as client:
-        access_token = client.refresh(credentials)
-        result = client.status(job_id, access_token)
-    fields = [str(result.id), result.status]
-    if result.result_code is not None:
-        fields.append(result.result_code)
-    typer.echo(" ".join(fields))
+    with store.lock():
+        _recover_replacement(store, credentials)
+        with ApiClient(origin) as client:
+            access_token = client.refresh(credentials)
+            result = client.status(job_id, access_token)
+        fields = [str(result.id), result.status]
+        if result.result_code is not None:
+            fields.append(result.result_code)
+        typer.echo(" ".join(fields))
 
 
 @app.command("retry")
@@ -274,17 +389,23 @@ def retry(server: Annotated[str, typer.Option("--server")]) -> None:
     origin = normalize_origin(server)
     store = OutboxStore(origin)
     with store.lock():
+        credentials = CredentialStore(origin)
+        _recover_replacement(store, credentials)
         path, entry = store.load()
+        if entry.phase == Phase.EVIDENCE:
+            if entry.evidence is None:
+                raise ConnectorError(2, OUTBOX_INVALID)
+            _print_result_and_delete(entry.evidence, store, path)
+            return
         try:
             prepared = _prepared_for_retry(entry)
-            credentials = CredentialStore(origin)
             with ApiClient(origin) as client:
                 access_token = client.refresh(credentials)
                 result = _resume(client, access_token, store, path, entry, prepared)
         except ConnectorError as error:
             _discard_on_file_change(error, store, path)
             raise
-    _print_result(result)
+        _print_result_and_delete(result, store, path)
 
 
 def main() -> None:

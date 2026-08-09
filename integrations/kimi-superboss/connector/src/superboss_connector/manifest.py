@@ -17,7 +17,12 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from .config import ATTACHMENT_MAX_BYTES, MANIFEST_MAX_UTF8_BYTES
+from .config import (
+    ATTACHMENT_MAX_BYTES,
+    MANIFEST_INPUT_MAX_BYTES,
+    MANIFEST_MAX_UTF8_BYTES,
+    PART_SIZE,
+)
 from .errors import INVALID_INPUT, ConnectorError
 
 _MODEL_CONFIG = ConfigDict(
@@ -58,6 +63,10 @@ def _normalize_list(value: object, *, document: bool = False) -> object:
 
 
 def _safe_text(value: str, *, document: bool = False) -> str:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ValueError("invalid UTF-8 text") from error
     if any(
         ord(character) == 127 or (ord(character) < 32 and not (document and character == "\n"))
         for character in value
@@ -161,11 +170,13 @@ class LocalManifest(BaseModel):
     k3_result: K3Result
     attachments: list[LocalAttachment] = Field(min_length=1, max_length=3)
 
-    @field_validator("idempotency_key")
+    @field_validator("idempotency_key", mode="before")
     @classmethod
-    def validate_key(cls, value: str) -> str:
-        if not value.strip() or any(
-            ord(character) < 32 or ord(character) > 126 for character in value
+    def validate_key(cls, value: object) -> object:
+        if (
+            not isinstance(value, str)
+            or not value
+            or any(not 33 <= ord(character) <= 126 for character in value)
         ):
             raise ValueError("idempotency key must be printable ASCII")
         return value
@@ -253,6 +264,7 @@ class PreparedAttachment:
     filename: str
     size_bytes: int
     sha256: str
+    part_sha256s: tuple[str, ...]
     content_type: str
 
 
@@ -275,7 +287,7 @@ def _json_bytes(payload: object, *, separators: tuple[str, str]) -> bytes:
     ).encode("utf-8")
 
 
-def _hash_regular_file(path: Path) -> tuple[int, str]:
+def _hash_regular_file(path: Path) -> tuple[int, str, tuple[str, ...]]:
     try:
         before = path.stat()
         if (
@@ -285,9 +297,11 @@ def _hash_regular_file(path: Path) -> tuple[int, str]:
         ):
             raise ConnectorError(2, INVALID_INPUT)
         digest = hashlib.sha256()
+        part_digests: list[str] = []
         with path.open("rb") as stream:
-            for block in iter(lambda: stream.read(1024 * 1024), b""):
+            for block in iter(lambda: stream.read(PART_SIZE), b""):
                 digest.update(block)
+                part_digests.append(hashlib.sha256(block).hexdigest())
         after = path.stat()
     except ConnectorError:
         raise
@@ -297,18 +311,34 @@ def _hash_regular_file(path: Path) -> tuple[int, str]:
     after_fingerprint = (after.st_size, after.st_mtime_ns, after.st_mode)
     if before_fingerprint != after_fingerprint:
         raise ConnectorError(2, INVALID_INPUT)
-    return before.st_size, digest.hexdigest()
+    return before.st_size, digest.hexdigest(), tuple(part_digests)
 
 
 def prepare_manifest(path: Path) -> PreparedManifest:
     """Validate the entire local envelope and all attachment bytes."""
     try:
         manifest_path = path.resolve(strict=True)
-        if not manifest_path.is_file():
+        metadata = manifest_path.stat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size < 1
+            or metadata.st_size > MANIFEST_INPUT_MAX_BYTES
+        ):
             raise OSError("not a file")
-        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+        with manifest_path.open("rb") as stream:
+            serialized = stream.read(MANIFEST_INPUT_MAX_BYTES + 1)
+        if not serialized or len(serialized) > MANIFEST_INPUT_MAX_BYTES:
+            raise ValueError("manifest size changed")
+        raw = json.loads(serialized.decode("utf-8"))
         local = LocalManifest.model_validate(raw)
-    except (OSError, UnicodeError, json.JSONDecodeError, ValidationError, ValueError) as error:
+    except (
+        OSError,
+        UnicodeError,
+        RecursionError,
+        json.JSONDecodeError,
+        ValidationError,
+        ValueError,
+    ) as error:
         raise ConnectorError(2, INVALID_INPUT) from error
 
     prepared: list[PreparedAttachment] = []
@@ -326,7 +356,7 @@ def prepare_manifest(path: Path) -> PreparedManifest:
             if not resolved.is_relative_to(base) or resolved in resolved_seen:
                 raise ConnectorError(2, INVALID_INPUT)
             resolved_seen.add(resolved)
-            size_bytes, digest = _hash_regular_file(resolved)
+            size_bytes, digest, part_digests = _hash_regular_file(resolved)
             content_type = declaration.content_type or mimetypes.guess_type(resolved.name)[0]
             content_type = content_type or "application/octet-stream"
             server_attachment = ServerAttachment(
@@ -343,6 +373,7 @@ def prepare_manifest(path: Path) -> PreparedManifest:
                     filename=server_attachment.filename,
                     size_bytes=size_bytes,
                     sha256=digest,
+                    part_sha256s=part_digests,
                     content_type=content_type,
                 )
             )
@@ -378,7 +409,7 @@ def prepare_manifest(path: Path) -> PreparedManifest:
 
 def verify_attachment(path: Path, expected_size: int, expected_sha256: str) -> None:
     try:
-        size, digest = _hash_regular_file(path)
+        size, digest, _part_digests = _hash_regular_file(path)
     except ConnectorError as error:
         raise ConnectorError(
             4, "A local attachment changed; submit a new result package."

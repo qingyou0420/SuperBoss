@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import socket
 from collections.abc import Callable, Iterator
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -53,6 +54,29 @@ class MemoryKeyring(KeyringBackend):
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def no_live_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    def deterministic_resolution(
+        host: str,
+        port: int,
+        *_args: object,
+        **_kwargs: object,
+    ) -> list[tuple[int, int, int, str, tuple[str, int]]]:
+        if host != "storage.local":
+            raise AssertionError("unexpected live DNS lookup")
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                ("93.184.216.34", port),
+            )
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", deterministic_resolution)
 
 
 @pytest.fixture
@@ -223,7 +247,7 @@ def job_payload(
         "status": status,
         "result_code": None,
         "k3_result": server_manifest["k3_result"],
-        "submitted_at": None,
+        "submitted_at": None if status == "UPLOADING" else TIMESTAMP,
         "created_at": TIMESTAMP,
         "updated_at": TIMESTAMP,
         "attachments": [
