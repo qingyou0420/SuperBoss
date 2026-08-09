@@ -306,6 +306,21 @@ async def test_complete_size_mismatch_persists_failed_without_dispatch(file_clie
 
 
 @pytest.mark.asyncio
+async def test_complete_storage_error_persists_safe_failed_state(file_client, db_session: AsyncSession) -> None:
+    from uuid import UUID
+
+    from sqlalchemy import select
+    from superboss.modules.audit.models import AuditLog
+    from superboss.modules.files.models import File, Upload
+    client, storage = file_client; app = client.app; project = Project(name="Complete storage error"); db_session.add(project); await db_session.commit(); _login(client)
+    dispatched: list[UUID] = []; app.state.enqueue_file_scan = lambda file_id: dispatched.append(file_id); storage.complete_error = RuntimeError("S3 secret")
+    headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "storage-error"}
+    started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers); upload = await db_session.get(Upload, started.json()["upload_id"]); assert upload is not None
+    response = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json={"parts": [{"part_number": 1, "etag": "secret-etag"}]}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); file = await db_session.get(File, upload.file_id); events = list((await db_session.scalars(select(AuditLog))).all())
+    assert response.status_code == 502 and response.json()["error"]["code"] == "FILE_STORAGE_FAILURE" and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and file is not None and file.state.value == "FAILED" and dispatched == [] and upload.multipart_id in storage.aborted and upload.multipart_id not in storage.active and "S3 secret" not in response.text and "secret-etag" not in response.text and file.object_key not in response.text and not [event for event in events if event.action == "file.upload.complete" and event.outcome == "SUCCESS"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("key", ["x", "!" * 255])
 async def test_start_accepts_idempotency_key_boundaries(file_client, db_session: AsyncSession, key: str) -> None:
     client, storage = file_client; project = Project(name=f"Key {len(key)}"); db_session.add(project); await db_session.commit(); _login(client)
