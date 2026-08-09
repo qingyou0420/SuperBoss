@@ -194,6 +194,18 @@ async def test_start_rejects_changed_metadata_for_same_key(file_client, db_sessi
 
 
 @pytest.mark.asyncio
+async def test_owner_presigns_first_upload_part(file_client, db_session: AsyncSession) -> None:
+    from superboss.modules.files.models import File, Upload
+    client, storage = file_client; project = Project(name="Part HTTP"); db_session.add(project); await db_session.commit(); _login(client)
+    headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "part"}
+    started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers)
+    upload_id = started.json()["upload_id"]; upload = await db_session.get(Upload, upload_id); assert upload is not None
+    response = client.post(f"/api/v1/files/uploads/{upload_id}/parts/1", headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))})
+    file = await db_session.get(File, upload.file_id)
+    assert response.status_code == 200 and response.json() == {"url": f"memory://part/{upload.multipart_id}/1"} and storage.expiries[-1] == 900 and file is not None and file.state.value == "UPLOADING"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("key", ["x", "!" * 255])
 async def test_start_accepts_idempotency_key_boundaries(file_client, db_session: AsyncSession, key: str) -> None:
     client, storage = file_client; project = Project(name=f"Key {len(key)}"); db_session.add(project); await db_session.commit(); _login(client)

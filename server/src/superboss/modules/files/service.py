@@ -165,7 +165,7 @@ class FileService:
         if file is None or file.state != FileState.UPLOADING:
             raise ConflictError()
         return await self._storage().presign_upload_part(
-            file.object_key, upload.multipart_id, part_number, 300
+            file.object_key, upload.multipart_id, part_number, 900
         )
 
     async def complete_upload(
