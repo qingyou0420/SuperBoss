@@ -14,9 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from superboss.core.db import Base
 from superboss.modules.audit import models as audit_models
 from superboss.modules.auth import models as auth_models
+from superboss.modules.files import models as file_models
 from superboss.modules.projects import models as project_models
 from superboss.modules.users import models as user_models
-from superboss.modules.files import models as file_models
 
 model_modules = (audit_models, project_models, user_models, auth_models, file_models)
 

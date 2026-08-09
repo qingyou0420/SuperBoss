@@ -13,8 +13,8 @@ from superboss.api.router import api_router
 from superboss.core.config import Settings, get_settings
 from superboss.core.errors import DomainError
 from superboss.core.security import TokenError, decode_access_token
-from superboss.infrastructure.wecom import build_wecom_provider
 from superboss.infrastructure.s3 import Boto3ObjectStorage
+from superboss.infrastructure.wecom import build_wecom_provider
 from superboss.modules.auth.repository import AuthRepository
 from superboss.modules.auth.service import AuthService, InvalidSession
 from superboss.modules.users.repository import UserRepository
@@ -27,7 +27,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     engine = create_async_engine(active_settings.database_url, pool_pre_ping=True)
     app.state.session_factory = async_sessionmaker(engine, expire_on_commit=False)
     app.state.wecom_provider = build_wecom_provider(active_settings)
-    app.state.object_storage = Boto3ObjectStorage(active_settings.s3_bucket, active_settings.s3_endpoint_url, active_settings.s3_access_key_id, active_settings.s3_secret_access_key)
+    app.state.object_storage = Boto3ObjectStorage(
+        active_settings.s3_bucket,
+        active_settings.s3_endpoint_url,
+        active_settings.s3_access_key_id,
+        active_settings.s3_secret_access_key,
+    )
     app.state.enqueue_file_scan = lambda _file_id: None
 
     def request_id(request: Request) -> str:
@@ -55,7 +60,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return error_response(request, error.code, error.message, error.status_code)
 
     @app.exception_handler(RequestValidationError)
-    async def handle_validation_error(request: Request, error: RequestValidationError) -> JSONResponse:
+    async def handle_validation_error(
+        request: Request, error: RequestValidationError
+    ) -> JSONResponse:
         del error
         return error_response(request, "VALIDATION_ERROR", "Request validation failed", 422)
 
@@ -83,7 +90,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     decode_access_token(active_settings, authorization.removeprefix("Bearer "))
                     session = app.state.session_factory()
                     try:
-                        await AuthService(session, AuthRepository(session), UserRepository(session), None, active_settings).authenticate_access_token(authorization.removeprefix("Bearer "))
+                        await AuthService(
+                            session,
+                            AuthRepository(session),
+                            UserRepository(session),
+                            None,
+                            active_settings,
+                        ).authenticate_access_token(authorization.removeprefix("Bearer "))
                     finally:
                         await session.close()
                 except (TokenError, InvalidSession):
@@ -100,7 +113,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 or not csrf_header
                 or not secrets.compare_digest(csrf_cookie, csrf_header)
             ):
-                return error_response(request, "CSRF_VALIDATION_FAILED", "CSRF validation failed", 403)
+                return error_response(
+                    request, "CSRF_VALIDATION_FAILED", "CSRF validation failed", 403
+                )
         return finalize_response(request, await call_next(request))
 
     app.include_router(api_router, prefix="/api/v1")
