@@ -257,7 +257,7 @@ async def test_download_rejects_non_clean_state(db_session, active_owner, state)
     from superboss.modules.files.models import File, FileState
     from superboss.modules.files.service import FileNotReadyError, FileService
     project = Project(name=f"Download {state}"); db_session.add(project); await db_session.flush()
-    file = File(project_id=project.id, filename="secret.pdf", category="资料", file_date="2026-08-09", object_key="projects/x/secret", size_bytes=1, sha256="0" * 64, uploader_id=active_owner.id, uploader_kind="user", content_type="application/pdf", state=FileState(state))
+    file = File(project_id=project.id, filename="secret.pdf", category="资料", file_date=date(2026, 8, 9), object_key="projects/x/secret", size_bytes=1, sha256="0" * 64, uploader_id=active_owner.id, uploader_kind="user", content_type="application/pdf", state=FileState(state))
     db_session.add(file); await db_session.flush()
     storage = InMemoryObjectStorage(); actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
     with pytest.raises(FileNotReadyError): await FileService(db_session, storage).presign_download(actor, file.id)
