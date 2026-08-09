@@ -1,4 +1,5 @@
 """Behavioral in-memory object storage for file service tests."""
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from uuid import uuid4
@@ -16,10 +17,13 @@ class InMemoryObjectStorage:
     expiries: list[int] = field(default_factory=list)
     complete_error: Exception | None = None
     abort_error: Exception | None = None
+    create_barrier: asyncio.Barrier | None = None
 
     async def create_multipart(self, object_key: str, content_type: str) -> str:
         upload_id = str(uuid4())
         self.active[upload_id] = object_key
+        if self.create_barrier is not None:
+            await self.create_barrier.wait()
         return upload_id
 
     async def presign_upload_part(self, object_key: str, multipart_id: str, part_number: int, expires_seconds: int) -> str:

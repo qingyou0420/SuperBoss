@@ -4,6 +4,7 @@ from collections.abc import Awaitable, Callable
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core.actors import Actor, require_project_access
@@ -102,8 +103,33 @@ class FileService:
             multipart_id=multipart_id,
         )
         self.session.add_all([file, upload])
-        await self.session.flush()
+        try:
+            await self.session.flush()
+        except IntegrityError as error:
+            if not self._is_idempotency_conflict(error):
+                raise
+            await self.session.rollback()
+            try:
+                await self._storage().abort_multipart(key, multipart_id)
+            except Exception:  # noqa: BLE001 -- preserve canonical database outcome
+                pass
+            winner = await self.session.scalar(
+                select(Upload).where(
+                    Upload.project_id == command.project_id,
+                    Upload.uploader_kind == actor.kind,
+                    Upload.uploader_id == actor.subject_id,
+                    Upload.idempotency_key == idempotency_key,
+                )
+            )
+            if winner is not None and winner.metadata_fingerprint == self._fingerprint(command):
+                return winner
+            raise ConflictError() from error
         return upload
+
+    @staticmethod
+    def _is_idempotency_conflict(error: IntegrityError) -> bool:
+        cause = getattr(error.orig, "__cause__", None)
+        return getattr(cause, "constraint_name", None) == "uq_upload_idempotency"
 
     @staticmethod
     def _fingerprint(command: UploadStart) -> str:

@@ -313,3 +313,30 @@ async def test_download_rejects_unsupported_actor_shapes(db_session, active_owne
     db_session.add(file); await db_session.flush(); storage = InMemoryObjectStorage()
     with pytest.raises(ForbiddenError): await FileService(db_session, storage).presign_download(Actor(kind, active_owner.id, role, frozenset(), frozenset()), file.id)
     assert storage.expiries == []
+
+
+@pytest.mark.asyncio
+async def test_concurrent_same_metadata_reuses_winner_and_aborts_loser(db_session, active_owner) -> None:
+    import asyncio
+    from sqlalchemy import func, select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    from superboss.modules.files.models import File, Upload
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileService
+
+    project = Project(name="Concurrent upload")
+    db_session.add(project)
+    await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    command = UploadStart(project_id=project.id, filename="x.pdf", size_bytes=1, sha256="0" * 64, category="资料", file_date="2026-08-09")
+    storage = InMemoryObjectStorage(create_barrier=asyncio.Barrier(2))
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    async def create() -> tuple[UUID, UUID]:
+        async with factory() as session:
+            upload = await FileService(session, storage).start_upload(actor, command, "race")
+            await session.commit()
+            return upload.id, upload.file_id
+    first, second = await asyncio.wait_for(asyncio.gather(create(), create()), timeout=10)
+    assert first == second and len(storage.active) == 1 and len(storage.aborted) == 1
+    assert await db_session.scalar(select(func.count()).select_from(Upload)) == 1
+    assert await db_session.scalar(select(func.count()).select_from(File)) == 1
