@@ -1,7 +1,7 @@
 """File upload state-machine behavior."""
 
 from datetime import date
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
