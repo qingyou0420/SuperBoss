@@ -287,3 +287,62 @@ def test_valid_bearer_cannot_bypass_csrf_when_both_browser_cookies_exist(api_cli
     assert api_client.post("/api/v1/auth/logout", headers=headers).status_code == 403
     headers["X-CSRF-Token"] = api_client.cookies.get("XSRF-TOKEN")
     assert api_client.post("/api/v1/auth/logout", headers=headers).status_code == 204
+
+
+def _login_tokens(client: TestClient) -> tuple[str, str, str]:
+    started = client.get("/api/v1/auth/wecom/start")
+    assert _callback(client, "owner-code", started.json()["state"]).status_code == 204
+    return (
+        client.cookies.get("access_token"),
+        client.cookies.get("refresh_token"),
+        client.cookies.get("XSRF-TOKEN"),
+    )
+
+
+@pytest.mark.parametrize("cookie_shape", ["access", "refresh", "both"])
+@pytest.mark.parametrize("auth_variant", ["absent", "arbitrary", "malformed", "wrong_signature", "live", "revoked"])
+def test_every_browser_cookie_shape_requires_csrf_despite_authorization_headers(
+    api_client: TestClient, cookie_shape: str, auth_variant: str
+) -> None:
+    """A future source-selection regression must not let any header bypass 18 cookie cases."""
+    live_access, live_refresh, csrf = _login_tokens(api_client)
+    assert api_client.post("/api/v1/auth/logout", headers={"X-CSRF-Token": csrf}).status_code == 204
+    revoked_access, _, _ = live_access, live_refresh, csrf
+    live_access, live_refresh, _ = _login_tokens(api_client)
+    api_client.cookies.clear()
+    if cookie_shape in {"access", "both"}:
+        api_client.cookies.set("access_token", live_access, domain="testserver.local", path="/")
+    if cookie_shape in {"refresh", "both"}:
+        api_client.cookies.set("refresh_token", live_refresh, domain="testserver.local", path="/api/v1/auth")
+    headers = {
+        "arbitrary": "junk",
+        "malformed": "Bearer nope",
+        "wrong_signature": f"Bearer {live_access}x",
+        "live": f"Bearer {live_access}",
+        "revoked": f"Bearer {revoked_access}",
+    }
+    request_headers = {} if auth_variant == "absent" else {"Authorization": headers[auth_variant]}
+    assert api_client.post("/api/v1/auth/logout", headers=request_headers).status_code == 403
+
+
+@pytest.mark.parametrize("auth_variant", ["absent", "arbitrary", "malformed", "wrong_signature", "live", "revoked"])
+def test_header_only_bearer_matrix_uses_authoritative_server_state(
+    api_client: TestClient, auth_variant: str
+) -> None:
+    """Only a live header-only session may bypass browser CSRF."""
+    revoked_access, _, csrf = _login_tokens(api_client)
+    assert api_client.post("/api/v1/auth/logout", headers={"X-CSRF-Token": csrf}).status_code == 204
+    live_access, _, _ = _login_tokens(api_client)
+    api_client.cookies.clear()
+    headers = {
+        "arbitrary": "junk",
+        "malformed": "Bearer nope",
+        "wrong_signature": f"Bearer {live_access}x",
+        "live": f"Bearer {live_access}",
+        "revoked": f"Bearer {revoked_access}",
+    }
+    response = api_client.post(
+        "/api/v1/auth/logout",
+        headers={} if auth_variant == "absent" else {"Authorization": headers[auth_variant]},
+    )
+    assert response.status_code == (204 if auth_variant == "live" else (403 if auth_variant == "absent" else 401))
