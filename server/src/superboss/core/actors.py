@@ -69,6 +69,16 @@ def require_owner(actor: Actor) -> None:
 
 
 def require_project_access(actor: Actor, project_id: UUID) -> None:
-    if actor.kind == "user" and (actor.role == Role.OWNER or project_id in actor.project_ids):
+    if actor.kind != "user":
+        raise ForbiddenError()
+    if actor.role == Role.OWNER:
+        return
+    if actor.role == Role.STAFF and project_id in actor.project_ids:
         return
     raise ForbiddenError()
+
+
+def require_project_actor(actor: Actor) -> None:
+    """Reject actor kinds and role shapes unsupported by project APIs."""
+    if actor.kind != "user" or actor.role not in {Role.OWNER, Role.STAFF}:
+        raise ForbiddenError()

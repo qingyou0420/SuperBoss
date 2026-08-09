@@ -2,14 +2,22 @@
 
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, StrictBool, field_validator
 
 from superboss.modules.projects.models import ProjectStatus
 
 
 class ProjectCreate(BaseModel):
-    name: str = Field(min_length=1, max_length=255)
-    is_test: bool = False
+    name: str
+    is_test: StrictBool = False
+
+    @field_validator("name")
+    @classmethod
+    def canonical_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not 1 <= len(normalized) <= 255:
+            raise ValueError("Project name must contain 1 to 255 non-whitespace characters")
+        return normalized
 
 
 class ProjectRead(BaseModel):

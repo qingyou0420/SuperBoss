@@ -1,7 +1,9 @@
 """FastAPI application factory."""
 
+import re
 import secrets
 from collections.abc import Awaitable, Callable
+from uuid import uuid4
 
 from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -26,8 +28,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.session_factory = async_sessionmaker(engine, expire_on_commit=False)
     app.state.wecom_provider = build_wecom_provider(active_settings)
 
+    def request_id(request: Request) -> str:
+        candidate = request.headers.get("X-Request-ID", "")
+        if re.fullmatch(r"[A-Za-z0-9._-]{1,128}", candidate):
+            return candidate
+        return str(uuid4())
+
     def error_response(request: Request, code: str, message: str, status_code: int) -> JSONResponse:
-        request_id = request.headers.get("X-Request-ID") or secrets.token_urlsafe(16)
+        request_id = request.state.request_id
         return JSONResponse(
             {"error": {"code": code, "message": message, "request_id": request_id}},
             status_code=status_code,
@@ -47,6 +55,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def enforce_browser_csrf(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
+        request.state.request_id = request_id(request)
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
             authorization = request.headers.get("Authorization")
             has_browser_credentials = bool(

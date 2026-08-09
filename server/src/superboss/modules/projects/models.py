@@ -10,8 +10,8 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     String,
-    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
@@ -29,7 +29,9 @@ class Project(Base):
     __tablename__ = "projects"
     __table_args__ = (
         CheckConstraint("status IN ('ACTIVE', 'ARCHIVED')", name="ck_projects_status"),
-        UniqueConstraint("name", name="uq_projects_name"),
+        CheckConstraint("name = btrim(name)", name="ck_projects_name_trimmed"),
+        CheckConstraint("char_length(name) BETWEEN 1 AND 255", name="ck_projects_name_length"),
+        Index("uq_projects_name_ci", func.lower("name"), unique=True),
     )
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)

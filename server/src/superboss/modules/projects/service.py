@@ -4,7 +4,12 @@ from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
 
-from superboss.core.actors import Actor, require_owner, require_project_access
+from superboss.core.actors import (
+    Actor,
+    require_owner,
+    require_project_access,
+    require_project_actor,
+)
 from superboss.core.errors import ConflictError, NotFoundError
 from superboss.modules.projects.models import Project
 from superboss.modules.projects.repository import ProjectRepository
@@ -27,11 +32,13 @@ class ProjectService:
         return project
 
     async def list(self, actor: Actor) -> list[Project]:
+        require_project_actor(actor)
         if actor.role == Role.OWNER:
             return await self.repository.list_all()
         return await self.repository.list_for_staff(actor.subject_id)
 
     async def get(self, actor: Actor, project_id: UUID) -> Project:
+        require_project_actor(actor)
         project = await self.repository.by_id(project_id)
         if project is None:
             raise NotFoundError()
