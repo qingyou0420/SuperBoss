@@ -140,3 +140,41 @@ def test_logout_revokes_browser_access_and_refresh_tokens(api_client: TestClient
         == 401
     )
     assert api_client.get("/api/v1/auth/me").status_code == 401
+
+
+@pytest.mark.parametrize("authorization", [None, "junk", "Bearer nope", "Bearer invalid.token.value"])
+def test_access_cookie_never_allows_bearer_to_bypass_csrf(
+    api_client: TestClient, authorization: str | None
+) -> None:
+    """Changing auth-source precedence would let any header bypass browser CSRF."""
+    started = api_client.get("/api/v1/auth/wecom/start")
+    assert _callback(api_client, "owner-code", started.json()["state"]).status_code == 204
+    headers = {} if authorization is None else {"Authorization": authorization}
+    assert api_client.post("/api/v1/auth/logout", headers=headers).status_code == 403
+    headers["X-CSRF-Token"] = api_client.cookies.get("XSRF-TOKEN")
+    assert api_client.post("/api/v1/auth/logout", headers=headers).status_code == 204
+
+
+@pytest.mark.parametrize("authorization", [None, "junk", "Bearer nope", "Bearer invalid.token.value"])
+def test_refresh_cookie_never_allows_bearer_to_bypass_csrf(
+    api_client: TestClient, authorization: str | None
+) -> None:
+    """Refresh-only browser sessions remain browser authentication for CSRF purposes."""
+    started = api_client.get("/api/v1/auth/wecom/start")
+    assert _callback(api_client, "owner-code", started.json()["state"]).status_code == 204
+    api_client.cookies.delete("access_token", domain="testserver.local", path="/")
+    headers = {} if authorization is None else {"Authorization": authorization}
+    assert api_client.post("/api/v1/auth/refresh", headers=headers).status_code == 403
+    headers["X-CSRF-Token"] = api_client.cookies.get("XSRF-TOKEN")
+    assert api_client.post("/api/v1/auth/refresh", headers=headers).status_code == 204
+
+
+def test_valid_bearer_cannot_bypass_csrf_when_both_browser_cookies_exist(api_client: TestClient) -> None:
+    """A live device token must not change an already-cookie-authenticated request's source."""
+    started = api_client.get("/api/v1/auth/wecom/start")
+    assert _callback(api_client, "owner-code", started.json()["state"]).status_code == 204
+    bearer = api_client.cookies.get("access_token")
+    headers = {"Authorization": f"Bearer {bearer}"}
+    assert api_client.post("/api/v1/auth/logout", headers=headers).status_code == 403
+    headers["X-CSRF-Token"] = api_client.cookies.get("XSRF-TOKEN")
+    assert api_client.post("/api/v1/auth/logout", headers=headers).status_code == 204
