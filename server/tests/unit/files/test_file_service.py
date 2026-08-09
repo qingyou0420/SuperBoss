@@ -1,5 +1,6 @@
 """File upload state-machine behavior."""
 
+from datetime import date
 from uuid import uuid4
 
 import pytest
@@ -69,7 +70,7 @@ async def test_same_idempotency_key_reuses_one_active_multipart(db_session, acti
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("change", [
-    {"filename": "y.pdf"}, {"category": "合同"}, {"file_date": "2026-08-10"},
+    {"filename": "y.pdf"}, {"category": "合同"}, {"file_date": date(2026, 8, 10)},
     {"size_bytes": 2}, {"sha256": "1" * 64}, {"content_type": "image/png"},
 ])
 async def test_same_key_with_changed_metadata_conflicts(db_session, active_owner, change) -> None:
