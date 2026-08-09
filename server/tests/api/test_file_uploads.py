@@ -167,6 +167,18 @@ def test_start_requires_idempotency_key(file_client) -> None:
 
 
 @pytest.mark.asyncio
+async def test_start_replays_identical_idempotency_key(file_client, db_session: AsyncSession) -> None:
+    from sqlalchemy import func, select
+    from superboss.modules.files.models import File, Upload
+    client, storage = file_client; project = Project(name="Replay"); db_session.add(project); await db_session.commit(); _login(client)
+    body = {"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}
+    headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "replay"}
+    first, second = client.post("/api/v1/files/uploads", json=body, headers=headers), client.post("/api/v1/files/uploads", json=body, headers=headers)
+    assert first.status_code == second.status_code == 201 and first.json() == second.json() and len(storage.active) == 1
+    assert await db_session.scalar(select(func.count()).select_from(File)) == 1 and await db_session.scalar(select(func.count()).select_from(Upload)) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("key", ["x", "!" * 255])
 async def test_start_accepts_idempotency_key_boundaries(file_client, db_session: AsyncSession, key: str) -> None:
     client, storage = file_client; project = Project(name=f"Key {len(key)}"); db_session.add(project); await db_session.commit(); _login(client)
