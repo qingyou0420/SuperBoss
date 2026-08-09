@@ -1,19 +1,27 @@
 """Audit behavior exposed through real project HTTP requests."""
 
 from collections.abc import AsyncIterator
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
+from fastapi import Depends, Request
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from superboss.core.actors import Actor
 from superboss.core.config import Settings
 from superboss.main import create_app
 from superboss.modules.audit.models import AuditLog
+from superboss.modules.audit.schemas import AuditEventInput
+from superboss.modules.audit.service import AuditService
 from superboss.modules.auth.models import AuthSession, OAuthState
 from superboss.modules.projects.models import Project, ProjectMember
+from superboss.modules.projects.repository import ProjectRepository
+from superboss.modules.projects.router import get_service, get_session
+from superboss.modules.projects.schemas import ProjectCreate
+from superboss.modules.projects.service import ProjectService
 from superboss.modules.users.models import Role, User, UserStatus
 
 
@@ -179,3 +187,78 @@ async def test_non_project_and_unmatched_requests_have_ids_but_no_audit(
         response = getattr(client, method)(path)
         assert UUID(response.headers["X-Request-ID"])
     assert await db_session.scalar(select(AuditLog)) is None
+
+
+class _CommitFailure:
+    async def commit(self) -> None:
+        raise RuntimeError("controlled commit failure")
+
+
+@pytest.mark.asyncio
+async def test_business_commit_failure_persists_no_success_audit(
+    db_session: AsyncSession,
+) -> None:
+    """A failed business commit must stop before durable success evidence is written."""
+    request_id = UUID("33f7445d-b60f-43e7-9d86-5da70d3d705d")
+    actor = Actor("user", uuid4(), Role.OWNER, frozenset(), frozenset())
+    assert db_session.bind is not None
+    service = ProjectService(
+        ProjectRepository(db_session), AuditService(async_sessionmaker(db_session.bind, expire_on_commit=False))
+    )
+    project = await service.create(actor, ProjectCreate(name="Commit failure"), request_id)
+    service.repository.session = _CommitFailure()  # type: ignore[assignment]
+    with pytest.raises(RuntimeError, match="controlled commit failure"):
+        await service.commit_and_record_success(actor, "project.create", request_id, project.id)
+    assert not list((await db_session.scalars(select(AuditLog).where(AuditLog.request_id == request_id))).all())
+
+
+@pytest.mark.asyncio
+async def test_successful_commit_control_persists_one_success_audit(db_session: AsyncSession) -> None:
+    """The failure test's control proves a real committed unit of work does record success."""
+    request_id = UUID("aa5e21e9-051b-4e7c-97ba-04421e9d202c")
+    actor = Actor("user", uuid4(), Role.OWNER, frozenset(), frozenset())
+    assert db_session.bind is not None
+    service = ProjectService(
+        ProjectRepository(db_session), AuditService(async_sessionmaker(db_session.bind, expire_on_commit=False))
+    )
+    project = await service.create(actor, ProjectCreate(name="Commit success"), request_id)
+    await service.commit_and_record_success(actor, "project.create", request_id, project.id)
+    events = list((await db_session.scalars(select(AuditLog).where(AuditLog.request_id == request_id))).all())
+    assert len(events) == 1 and events[0].outcome == "SUCCESS"
+
+
+class _FailingAuditService:
+    async def record(self, event: AuditEventInput) -> UUID:
+        del event
+        raise RuntimeError("audit secret must never escape")
+
+
+@pytest.mark.asyncio
+async def test_audit_write_failure_is_not_returned_as_project_success(
+    db_session: AsyncSession, test_settings: Settings
+) -> None:
+    """After the business commit, a failed audit write must surface as a safe non-success response."""
+    async def failing_service(
+        request: Request, session: AsyncSession = Depends(get_session)
+    ) -> ProjectService:
+        del request
+        return ProjectService(ProjectRepository(session), _FailingAuditService())  # type: ignore[arg-type]
+
+    app = create_app(test_settings)
+    app.dependency_overrides[get_service] = failing_service
+    try:
+        with TestClient(app, base_url="https://testserver", raise_server_exceptions=False) as fault_client:
+            _login(fault_client, "owner-code")
+            request_id = UUID("e918ab2f-8b4d-4164-a7b2-246119dc1b21")
+            response = fault_client.post(
+                "/api/v1/projects",
+                json={"name": "Committed despite audit fault"},
+                headers={"X-CSRF-Token": str(fault_client.cookies.get("XSRF-TOKEN")), "X-Request-ID": str(request_id)},
+            )
+        assert not 200 <= response.status_code < 300
+        assert response.headers["X-Request-ID"] == str(request_id)
+        assert "audit secret" not in response.text.lower() and "internal" not in response.text.lower()
+        assert await db_session.scalar(select(Project).where(Project.name == "Committed despite audit fault")) is not None
+        assert not list((await db_session.scalars(select(AuditLog).where(AuditLog.request_id == request_id))).all())
+    finally:
+        app.dependency_overrides.pop(get_service, None)

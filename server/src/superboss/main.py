@@ -56,6 +56,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         del error
         return error_response(request, "VALIDATION_ERROR", "Request validation failed", 422)
 
+    @app.exception_handler(Exception)
+    async def handle_unexpected_error(request: Request, error: Exception) -> JSONResponse:
+        del error
+        return error_response(request, "REQUEST_FAILED", "Request failed", 500)
+
     @app.middleware("http")
     async def enforce_browser_csrf(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
