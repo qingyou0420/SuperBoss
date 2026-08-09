@@ -79,6 +79,15 @@ def test_browser_start_requires_valid_csrf(file_client, csrf: str | None) -> Non
     if csrf is not None: headers["X-CSRF-Token"] = csrf
     response = client.post("/api/v1/files/uploads", json={"project_id": "00000000-0000-0000-0000-000000000001", "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers)
     assert response.status_code == 403 and response.json()["error"]["code"] == "CSRF_VALIDATION_FAILED" and storage.active == {}
+
+
+@pytest.mark.asyncio
+async def test_header_only_owner_starts_upload_without_csrf(file_client, db_session: AsyncSession) -> None:
+    client, storage = file_client
+    project = Project(name="Bearer files"); db_session.add(project); await db_session.commit()
+    _login(client); token = str(client.cookies.get("access_token")); client.cookies.clear()
+    response = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers={"Authorization": f"Bearer {token}", "Idempotency-Key": "bearer"})
+    assert response.status_code == 201 and len(storage.active) == 1
 from pydantic import ValidationError
 
 
