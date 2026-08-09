@@ -4,11 +4,13 @@ import secrets
 from collections.abc import Awaitable, Callable
 
 from fastapi import FastAPI, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from superboss.api.router import api_router
 from superboss.core.config import Settings, get_settings
+from superboss.core.errors import DomainError
 from superboss.core.security import TokenError, decode_access_token
 from superboss.infrastructure.wecom import build_wecom_provider
 from superboss.modules.auth.repository import AuthRepository
@@ -24,17 +26,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.session_factory = async_sessionmaker(engine, expire_on_commit=False)
     app.state.wecom_provider = build_wecom_provider(active_settings)
 
+    def error_response(request: Request, code: str, message: str, status_code: int) -> JSONResponse:
+        request_id = request.headers.get("X-Request-ID") or secrets.token_urlsafe(16)
+        return JSONResponse(
+            {"error": {"code": code, "message": message, "request_id": request_id}},
+            status_code=status_code,
+            headers={"X-Request-ID": request_id},
+        )
+
+    @app.exception_handler(DomainError)
+    async def handle_domain_error(request: Request, error: DomainError) -> JSONResponse:
+        return error_response(request, error.code, error.message, error.status_code)
+
+    @app.exception_handler(RequestValidationError)
+    async def handle_validation_error(request: Request, error: RequestValidationError) -> JSONResponse:
+        del error
+        return error_response(request, "VALIDATION_ERROR", "Request validation failed", 422)
+
     @app.middleware("http")
     async def enforce_browser_csrf(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
             authorization = request.headers.get("Authorization")
-            if authorization is not None and not (
+            has_browser_credentials = bool(
                 request.cookies.get("access_token") or request.cookies.get("refresh_token")
-            ):
+            )
+            if authorization is not None and not has_browser_credentials:
                 if not authorization.startswith("Bearer "):
-                    return JSONResponse({"detail": "Invalid bearer token"}, status_code=401)
+                    return error_response(
+                        request, "AUTHENTICATION_REQUIRED", "Authentication required", 401
+                    )
                 try:
                     decode_access_token(active_settings, authorization.removeprefix("Bearer "))
                     session = app.state.session_factory()
@@ -43,7 +65,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     finally:
                         await session.close()
                 except (TokenError, InvalidSession):
-                    return JSONResponse({"detail": "Invalid bearer token"}, status_code=401)
+                    return error_response(
+                        request, "AUTHENTICATION_REQUIRED", "Authentication required", 401
+                    )
+                return await call_next(request)
+            if not has_browser_credentials and request.url.path.startswith("/api/v1/projects"):
                 return await call_next(request)
             csrf_cookie = request.cookies.get("XSRF-TOKEN")
             csrf_header = request.headers.get("X-CSRF-Token")
@@ -52,7 +78,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 or not csrf_header
                 or not secrets.compare_digest(csrf_cookie, csrf_header)
             ):
-                return JSONResponse({"detail": "CSRF validation failed"}, status_code=403)
+                return error_response(request, "CSRF_VALIDATION_FAILED", "CSRF validation failed", 403)
         return await call_next(request)
 
     app.include_router(api_router, prefix="/api/v1")
