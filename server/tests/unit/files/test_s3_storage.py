@@ -43,6 +43,38 @@ class RecordingS3Client:
         return {}
 
 
+@dataclass
+class StreamingBody:
+    chunks: list[bytes]
+    error_on_read: int | None = None
+    read_calls: int = 0
+    close_calls: int = 0
+    thread_ids: list[int] = field(default_factory=list)
+
+    def read(self, _size: int) -> bytes:
+        self.read_calls += 1
+        self.thread_ids.append(threading.get_ident())
+        if self.error_on_read == self.read_calls:
+            raise RuntimeError("read failure")
+        return self.chunks.pop(0) if self.chunks else b""
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.thread_ids.append(threading.get_ident())
+
+
+@dataclass
+class StreamingS3Client:
+    body: StreamingBody
+    calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    thread_ids: list[int] = field(default_factory=list)
+
+    def get_object(self, **kwargs: Any) -> dict[str, StreamingBody]:
+        self.calls.append(("get_object", kwargs))
+        self.thread_ids.append(threading.get_ident())
+        return {"Body": self.body}
+
+
 @pytest.mark.asyncio
 async def test_boto3_adapter_maps_multipart_operations_and_runs_blocking_client_off_loop() -> None:
     """Wrong boto arguments or a direct blocking call must fail this boundary contract."""
@@ -89,3 +121,50 @@ def test_boto3_adapter_public_methods_match_object_storage_parameter_contract(
     """Renaming public object-key parameters breaks protocol-compatible keyword callers."""
     signature = inspect.signature(getattr(Boto3ObjectStorage, method))
     assert tuple(signature.parameters)[1:] == parameters
+
+
+@pytest.mark.asyncio
+async def test_boto3_stream_yields_every_chunk_and_closes_body_after_eof() -> None:
+    """Removing finalization would leak the boto streaming body after normal consumption."""
+    body = StreamingBody([b"first", b"second"])
+    client = StreamingS3Client(body)
+    storage = Boto3ObjectStorage(bucket="files-bucket", client=client)  # type: ignore[arg-type]
+    main_thread = threading.get_ident()
+
+    chunks = [chunk async for chunk in storage.stream("projects/p/x.pdf")]
+
+    assert chunks == [b"first", b"second"]
+    assert client.calls == [("get_object", {"Bucket": "files-bucket", "Key": "projects/p/x.pdf"})]
+    assert body.close_calls == 1
+    assert all(thread_id != main_thread for thread_id in client.thread_ids + body.thread_ids)
+
+
+@pytest.mark.asyncio
+async def test_boto3_stream_closes_body_once_when_read_raises() -> None:
+    """A read failure must remain visible while still releasing the boto response body."""
+    body = StreamingBody([b"first"], error_on_read=2)
+    client = StreamingS3Client(body)
+    storage = Boto3ObjectStorage(bucket="files-bucket", client=client)  # type: ignore[arg-type]
+    main_thread = threading.get_ident()
+
+    with pytest.raises(RuntimeError, match="read failure"):
+        _ = [chunk async for chunk in storage.stream("projects/p/x.pdf")]
+
+    assert body.close_calls == 1
+    assert all(thread_id != main_thread for thread_id in client.thread_ids + body.thread_ids)
+
+
+@pytest.mark.asyncio
+async def test_boto3_stream_closes_body_once_when_consumer_stops_early() -> None:
+    """Calling aclose after the first chunk must release the boto body exactly once."""
+    body = StreamingBody([b"first", b"second"])
+    client = StreamingS3Client(body)
+    storage = Boto3ObjectStorage(bucket="files-bucket", client=client)  # type: ignore[arg-type]
+    main_thread = threading.get_ident()
+    stream = storage.stream("projects/p/x.pdf")
+
+    assert await anext(stream) == b"first"
+    await stream.aclose()
+
+    assert body.close_calls == 1
+    assert all(thread_id != main_thread for thread_id in client.thread_ids + body.thread_ids)

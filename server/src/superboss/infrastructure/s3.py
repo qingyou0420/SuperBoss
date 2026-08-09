@@ -74,5 +74,8 @@ class Boto3ObjectStorage:
         body = (await asyncio.to_thread(self.client.get_object, Bucket=self.bucket, Key=object_key))[
             "Body"
         ]
-        while chunk := await asyncio.to_thread(body.read, 64 * 1024):
-            yield chunk
+        try:
+            while chunk := await asyncio.to_thread(body.read, 64 * 1024):
+                yield chunk
+        finally:
+            await asyncio.to_thread(body.close)
