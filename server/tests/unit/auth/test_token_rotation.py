@@ -1,10 +1,14 @@
 """Session security behavior exercised against PostgreSQL."""
 
+import asyncio
+
 import jwt
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from superboss.core.config import Settings
+from superboss.modules.auth.models import AuthSession
 from superboss.modules.auth.repository import AuthRepository
 from superboss.modules.auth.service import AuthService, InvalidSession
 from superboss.modules.users.models import User
@@ -66,3 +70,35 @@ async def test_access_claim_anomalies_are_rejected(
     forged = jwt.encode(claims, test_settings.jwt_secret, algorithm="HS256")
     with pytest.raises(InvalidSession):
         await service.authenticate_access_token(forged)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_refresh_rotation_has_exactly_one_winner(
+    db_session: AsyncSession, active_owner: User, test_settings: Settings, postgres_database: str
+) -> None:
+    """Removing the row lock permits both concurrent refreshes to rotate one credential."""
+    issuer = AuthService(db_session, AuthRepository(db_session), UserRepository(db_session), None, test_settings)
+    pair = await issuer.issue_session(active_owner)
+    await db_session.commit()
+    engine = create_async_engine(postgres_database)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    barrier = asyncio.Barrier(2)
+
+    async def rotate() -> bool:
+        async with sessions() as session:
+            service = AuthService(session, AuthRepository(session), UserRepository(session), None, test_settings)
+            await barrier.wait()
+            try:
+                await service.rotate_refresh_token(pair.refresh_token)
+                await session.commit()
+                return True
+            except InvalidSession:
+                await session.rollback()
+                return False
+
+    assert sorted(await asyncio.gather(rotate(), rotate())) == [False, True]
+    async with sessions() as session:
+        records = (await session.scalars(select(AuthSession))).all()
+        assert sum(record.revoked_at is None for record in records) == 1
+        assert sum(record.refresh_used_at is not None for record in records) == 1
+    await engine.dispose()
