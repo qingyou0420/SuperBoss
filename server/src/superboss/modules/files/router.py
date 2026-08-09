@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Header, Path, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core.actors import Actor, get_actor
+from superboss.core.errors import ForbiddenError
 from superboss.modules.audit.schemas import AuditEventInput
 from superboss.modules.audit.service import AuditService
 from superboss.modules.files.models import File
@@ -114,7 +115,7 @@ async def download(
 ) -> dict[str, str]:
     try:
         url = await service.presign_download(actor, file_id)
-    except FileNotReadyError:
+    except (FileNotReadyError, ForbiddenError):
         file = await service.session.get(File, file_id)
         if file is not None:
             await _record_download_audit(request, actor, file, "DENIED")
