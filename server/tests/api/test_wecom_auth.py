@@ -1,7 +1,9 @@
 """End-to-end browser authentication security tests."""
 
+import asyncio
 from collections.abc import AsyncIterator
 
+import httpx
 import jwt
 import pytest
 import pytest_asyncio
@@ -181,6 +183,37 @@ def test_signed_expired_state_is_rejected_and_cookie_cleared(api_client: TestCli
     api_client.cookies.set("wecom_oauth_state", expired, domain="testserver.local", path="/api/v1/auth/wecom")
     response = _callback(api_client, "owner-code", state)
     assert response.status_code == 400 and "Max-Age=0" in response.headers["set-cookie"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_callbacks_consume_one_state_once(
+    db_session: AsyncSession, test_settings: Settings
+) -> None:
+    """Two isolated browser clients must not both consume one OAuth state."""
+    app = create_app(test_settings)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as starter:
+        started = await starter.get("/api/v1/auth/wecom/start")
+        state = started.json()["state"]
+        signed = starter.cookies.get("wecom_oauth_state")
+    barrier = asyncio.Barrier(2)
+
+    async def callback() -> int:
+        async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
+            client.cookies.set("wecom_oauth_state", signed, domain="testserver.local", path="/api/v1/auth/wecom")
+            await barrier.wait()
+            response = await client.get("/api/v1/auth/wecom/callback", params={"code": "owner-code", "state": state})
+            return response.status_code
+
+    assert sorted(await asyncio.gather(callback(), callback())) == [204, 400]
+    replay_client = httpx.AsyncClient(transport=transport, base_url="https://testserver")
+    try:
+        replay_client.cookies.set("wecom_oauth_state", signed, domain="testserver.local", path="/api/v1/auth/wecom")
+        assert (await replay_client.get("/api/v1/auth/wecom/callback", params={"code": "owner-code", "state": state})).status_code == 400
+    finally:
+        await replay_client.aclose()
+    record = await db_session.scalar(select(OAuthState).where(OAuthState.nonce_hash == hash_token(state)))
+    assert record is not None and record.consumed_at is not None
 
 
 def test_logout_revokes_browser_access_and_refresh_tokens(api_client: TestClient) -> None:
