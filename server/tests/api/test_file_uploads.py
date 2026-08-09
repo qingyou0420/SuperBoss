@@ -789,3 +789,61 @@ async def test_anonymous_download_is_unauthenticated_without_audit(
     assert response.status_code == 401 and response.json()["error"]["code"] == "AUTHENTICATION_REQUIRED"
     assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"] == request_id
     assert storage.expiries == [] and events == []
+
+
+@pytest.mark.asyncio
+async def test_download_success_returns_safe_failure_when_audit_write_fails(
+    file_client, db_session: AsyncSession, monkeypatch
+) -> None:
+    from datetime import date
+
+    from sqlalchemy import select
+
+    from superboss.modules.files.models import File, FileState
+
+    class FailingAuditService:
+        def __init__(self, _session_factory: object) -> None:
+            pass
+
+        async def record(self, _event: object) -> None:
+            raise RuntimeError("audit secret")
+
+    client, storage = file_client
+    project = Project(name="Download audit failure")
+    db_session.add(project)
+    await db_session.commit()
+    _login(client)
+    owner = await db_session.scalar(select(User).where(User.wecom_userid == "owner-1"))
+    assert owner is not None
+    file = File(
+        project_id=project.id,
+        filename="x.pdf",
+        category="资料",
+        file_date=date(2026, 8, 9),
+        object_key=f"projects/{project.id}/资料/2026-08-09/clean/audit-secret.pdf",
+        size_bytes=1,
+        sha256="0" * 64,
+        state=FileState.CLEAN,
+        uploader_id=owner.id,
+        uploader_kind="user",
+        content_type="application/pdf",
+    )
+    db_session.add(file)
+    await db_session.commit()
+    monkeypatch.setattr("superboss.modules.files.router.AuditService", FailingAuditService)
+
+    request_id = "bba39a39-47ba-4ac5-9250-ccdba1d7f25e"
+    previous_raise_server_exceptions = client._transport.raise_server_exceptions
+    client._transport.raise_server_exceptions = False
+    try:
+        response = client.get(
+            f"/api/v1/files/{file.id}/download",
+            headers={"X-Request-ID": request_id},
+        )
+    finally:
+        client._transport.raise_server_exceptions = previous_raise_server_exceptions
+
+    assert response.status_code == 500 and response.json()["error"]["code"] == "REQUEST_FAILED"
+    assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"] == request_id
+    assert "audit secret" not in response.text and file.object_key not in response.text and "memory://" not in response.text
+    assert file.state == FileState.CLEAN and storage.expiries == [60]

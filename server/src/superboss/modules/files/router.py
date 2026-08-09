@@ -36,21 +36,31 @@ def get_service(request: Request, session: AsyncSession = Depends(get_session)) 
 
 
 async def _record_download_audit(
-    request: Request, actor: Actor, file: File | None, file_id: UUID, outcome: str
+    request: Request,
+    actor: Actor,
+    file: File | None,
+    file_id: UUID,
+    outcome: str,
+    *,
+    best_effort: bool,
 ) -> None:
-    try:
+    event = AuditEventInput(
+        actor=actor,
+        action="file.download",
+        object_type="file",
+        object_id=file.id if file is not None else file_id,
+        project_id=file.project_id if file is not None else None,
+        outcome=outcome,
+        request_id=UUID(request.state.request_id),
+        metadata={"state": file.state.value} if file is not None else {},
+    )
+    if not best_effort:
         await AuditService(request.app.state.session_factory).record(
-            AuditEventInput(
-                actor=actor,
-                action="file.download",
-                object_type="file",
-                object_id=file.id if file is not None else file_id,
-                project_id=file.project_id if file is not None else None,
-                outcome=outcome,
-                request_id=UUID(request.state.request_id),
-                metadata={"state": file.state.value} if file is not None else {},
-            )
+            event
         )
+        return
+    try:
+        await AuditService(request.app.state.session_factory).record(event)
     except Exception:  # noqa: BLE001 -- audit unavailability must not alter download authorization
         return
 
@@ -117,9 +127,9 @@ async def download(
         url = await service.presign_download(actor, file_id)
     except DomainError:
         file = await service.session.get(File, file_id)
-        await _record_download_audit(request, actor, file, file_id, "DENIED")
+        await _record_download_audit(request, actor, file, file_id, "DENIED", best_effort=True)
         raise
     file = await service.session.get(File, file_id)
     assert file is not None
-    await _record_download_audit(request, actor, file, file_id, "SUCCESS")
+    await _record_download_audit(request, actor, file, file_id, "SUCCESS", best_effort=False)
     return {"url": url}
