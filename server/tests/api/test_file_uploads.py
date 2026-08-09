@@ -99,6 +99,7 @@ def test_invalid_header_only_start_is_unauthenticated(file_client) -> None:
 @pytest.mark.asyncio
 async def test_revoked_header_only_start_is_unauthenticated(file_client, db_session: AsyncSession) -> None:
     from sqlalchemy import select
+
     from superboss.modules.auth.models import AuthSession
     client, storage = file_client
     _login(client); token = str(client.cookies.get("access_token"))
@@ -136,6 +137,13 @@ def test_start_rejects_unsafe_content_type(file_client, content_type: str) -> No
 def test_start_rejects_unsafe_filename(file_client, filename: str) -> None:
     client, storage = file_client; _login(client)
     response = client.post("/api/v1/files/uploads", json={"project_id": "00000000-0000-0000-0000-000000000001", "filename": filename, "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "filename"})
+    assert response.status_code == 422 and response.json()["error"]["code"] == "VALIDATION_ERROR" and storage.active == {}
+
+
+@pytest.mark.parametrize("category", ["", "x" * 256, "x\x00", "x\r\ny", "\x01"])
+def test_start_rejects_unsafe_category(file_client, category: str) -> None:
+    client, storage = file_client; _login(client)
+    response = client.post("/api/v1/files/uploads", json={"project_id": "00000000-0000-0000-0000-000000000001", "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": category, "file_date": "2026-08-09"}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "category"})
     assert response.status_code == 422 and response.json()["error"]["code"] == "VALIDATION_ERROR" and storage.active == {}
 from pydantic import ValidationError
 
