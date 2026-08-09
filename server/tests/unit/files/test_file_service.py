@@ -231,3 +231,20 @@ async def test_storage_error_is_safe_and_leaves_failed_file(db_session, active_o
     with pytest.raises(FileStorageFailureError) as error: await service.complete_upload(actor, upload.id, [CompletedPart(1, "e")])
     assert "secret" not in str(error.value).lower()
     assert upload.multipart_id in storage.aborted
+
+
+@pytest.mark.asyncio
+async def test_deleted_file_cascades_upload_and_operations_fail_closed(db_session, active_owner) -> None:
+    from superboss.core.errors import NotFoundError
+    from superboss.modules.files.models import File
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileService
+    from superboss.modules.files.storage import CompletedPart
+    project = Project(name="Cascade"); db_session.add(project); await db_session.flush()
+    storage = InMemoryObjectStorage(); actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset()); service = FileService(db_session, storage)
+    upload = await service.start_upload(actor, UploadStart(project_id=project.id, filename="x.pdf", size_bytes=1, sha256="0" * 64, category="资料", file_date="2026-08-09"), "cascade")
+    file = await db_session.get(File, upload.file_id); assert file is not None
+    await db_session.delete(file); await db_session.commit(); db_session.expire_all()
+    with pytest.raises(NotFoundError): await service.presign_part(actor, upload.id, 1)
+    with pytest.raises(NotFoundError): await service.complete_upload(actor, upload.id, [CompletedPart(1, "e")])
+    assert storage.expiries == [] and storage.completed == {}
