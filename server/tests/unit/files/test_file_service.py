@@ -68,7 +68,11 @@ async def test_same_idempotency_key_reuses_one_active_multipart(db_session, acti
 
 
 @pytest.mark.asyncio
-async def test_same_key_with_changed_content_type_conflicts(db_session, active_owner) -> None:
+@pytest.mark.parametrize("change", [
+    {"filename": "y.pdf"}, {"category": "合同"}, {"file_date": "2026-08-10"},
+    {"size_bytes": 2}, {"sha256": "1" * 64}, {"content_type": "image/png"},
+])
+async def test_same_key_with_changed_metadata_conflicts(db_session, active_owner, change) -> None:
     """A fingerprint omission would let one key name two different uploads."""
     from superboss.core.errors import ConflictError
     from superboss.modules.files.schemas import UploadStart
@@ -81,8 +85,15 @@ async def test_same_key_with_changed_content_type_conflicts(db_session, active_o
     storage = InMemoryObjectStorage()
     service = FileService(db_session, storage)
     original = UploadStart(project_id=project.id, filename="x.pdf", size_bytes=1, sha256="0" * 64, category="资料", file_date="2026-08-09", content_type="application/pdf")
-    changed = original.model_copy(update={"content_type": "image/png"})
+    changed = original.model_copy(update=change)
     await service.start_upload(actor, original, "same")
     with pytest.raises(ConflictError):
         await service.start_upload(actor, changed, "same")
     assert len(storage.active) == 1
+
+
+@pytest.mark.parametrize("key", ["x", "!" * 255, "", "x" * 256, " x", "x ", "x\r\ny", "中文"])
+def test_idempotency_key_grammar(key: str) -> None:
+    """Header keys are printable ASCII tokens, never whitespace or controls."""
+    import re
+    assert bool(re.fullmatch(r"[!-~]{1,255}", key)) == (key in {"x", "!" * 255})

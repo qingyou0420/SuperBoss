@@ -1,4 +1,5 @@
 import hashlib
+import re
 from collections.abc import Awaitable, Callable
 from uuid import UUID, uuid4
 
@@ -53,7 +54,7 @@ class FileService:
         self, actor: Actor, command: UploadStart, idempotency_key: str
     ) -> Upload:
         require_project_access(actor, command.project_id)
-        if not 1 <= len(idempotency_key) <= 255:
+        if not re.fullmatch(r"[!-~]{1,255}", idempotency_key):
             raise ValueError("invalid Idempotency-Key")
         existing = await self.session.scalar(
             select(Upload).where(
