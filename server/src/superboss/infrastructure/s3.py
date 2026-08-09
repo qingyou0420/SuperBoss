@@ -58,6 +58,9 @@ class Boto3ObjectStorage:
             raise
         return ObjectMetadata(int(head["ContentLength"]), head.get("ETag"))
 
+    async def delete_object(self, object_key: str) -> None:
+        await asyncio.to_thread(self.client.delete_object, Bucket=self.bucket, Key=object_key)
+
     async def presign_upload_part(
         self, object_key: str, multipart_id: str, part_number: int, expires_seconds: int
     ) -> str:

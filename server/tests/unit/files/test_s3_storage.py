@@ -42,6 +42,10 @@ class RecordingS3Client:
         self._record("abort_multipart_upload", **kwargs)
         return {}
 
+    def delete_object(self, **kwargs: Any) -> dict[str, object]:
+        self._record("delete_object", **kwargs)
+        return {}
+
     def list_multipart_uploads(self, **kwargs: Any) -> dict[str, object]:
         self._record("list_multipart_uploads", **kwargs)
         return {
@@ -130,11 +134,26 @@ async def test_boto3_adapter_lists_only_exact_key_multipart_ids_off_loop() -> No
     assert client.thread_ids and all(thread_id != main_thread for thread_id in client.thread_ids)
 
 
+@pytest.mark.asyncio
+async def test_boto3_adapter_deletes_exact_object_off_loop() -> None:
+    """Compensation deletion must not run the blocking client on the event loop."""
+    client = RecordingS3Client()
+    storage = Boto3ObjectStorage(bucket="files-bucket", client=client)  # type: ignore[arg-type]
+    main_thread = threading.get_ident()
+
+    await storage.delete_object("projects/p/x.pdf")
+
+    assert client.calls == [("delete_object", {"Bucket": "files-bucket", "Key": "projects/p/x.pdf"})]
+    assert client.thread_ids == [thread_id for thread_id in client.thread_ids if thread_id != main_thread]
+
+
 @pytest.mark.parametrize(
     ("method", "parameters"),
     [
         ("create_multipart", ("object_key", "content_type")),
         ("list_multipart_uploads", ("object_key",)),
+        ("stat_object", ("object_key",)),
+        ("delete_object", ("object_key",)),
         ("presign_upload_part", ("object_key", "multipart_id", "part_number", "expires_seconds")),
         ("complete_multipart", ("object_key", "multipart_id", "parts")),
         ("abort_multipart", ("object_key", "multipart_id")),

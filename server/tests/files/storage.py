@@ -24,6 +24,8 @@ class InMemoryObjectStorage:
     create_calls: int = 0
     list_calls: int = 0
     stat_error: Exception | None = None
+    delete_error: Exception | None = None
+    deleted: list[str] = field(default_factory=list)
 
     async def create_multipart(self, object_key: str, content_type: str) -> str:
         self.create_calls += 1
@@ -45,6 +47,12 @@ class InMemoryObjectStorage:
         if self.stat_error is not None:
             raise self.stat_error
         return self.objects.get(object_key)
+
+    async def delete_object(self, object_key: str) -> None:
+        if self.delete_error is not None:
+            raise self.delete_error
+        self.objects.pop(object_key, None)
+        self.deleted.append(object_key)
 
     async def presign_upload_part(self, object_key: str, multipart_id: str, part_number: int, expires_seconds: int) -> str:
         self.expiries.append(expires_seconds)

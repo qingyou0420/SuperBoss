@@ -785,3 +785,134 @@ async def test_completion_replay_finalizes_once_and_persists_safe_outbox(db_sess
     }
     persisted_file = await db_session.get(File, upload.file_id)
     assert persisted_file is not None and persisted_file.state == FileState.QUARANTINED
+
+
+@pytest.mark.asyncio
+async def test_memory_storage_abort_never_deletes_completed_object() -> None:
+    """Compensation must explicitly delete an object after aborting its multipart."""
+    from superboss.modules.files.storage import CompletedPart
+
+    storage = InMemoryObjectStorage()
+    key = "projects/example/docs/2026-08-09/file/example.pdf"
+    multipart_id = await storage.create_multipart(key, "application/pdf")
+    await storage.complete_multipart(key, multipart_id, [CompletedPart(1, "etag")])
+    await storage.abort_multipart(key, multipart_id)
+
+    assert await storage.stat_object(key) is not None
+    await storage.delete_object(key)
+    assert await storage.stat_object(key) is None
+
+
+@pytest.mark.asyncio
+async def test_size_mismatch_persists_compensation_and_reconciler_retries_delete(
+    db_session, active_owner
+) -> None:
+    """A completed wrong-size object is deleted only through a durable retry record."""
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from superboss.core.errors import FileUploadSizeMismatchError
+    from superboss.modules.files.models import (
+        File,
+        FileState,
+        FileStorageCleanup,
+        FileUploadLifecycle,
+    )
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileLifecycleService, FileService
+    from superboss.modules.files.storage import CompletedPart
+
+    project = Project(name="Compensation retry")
+    db_session.add(project)
+    await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    storage = InMemoryObjectStorage(complete_size=2, delete_error=RuntimeError("delete secret"))
+    upload = await FileService(db_session, storage).start_upload(
+        actor,
+        UploadStart(
+            project_id=project.id,
+            filename="wrong-size.pdf",
+            category="docs",
+            file_date="2026-08-09",
+            size_bytes=1,
+            sha256="0" * 64,
+        ),
+        "compensation-retry",
+    )
+    with pytest.raises(FileUploadSizeMismatchError):
+        await FileService(db_session, storage).complete_upload(
+            actor, upload.id, [CompletedPart(1, "etag")]
+        )
+
+    file = await db_session.get(File, upload.file_id)
+    lifecycle = await db_session.get(FileUploadLifecycle, upload.id)
+    cleanup = list(await db_session.scalars(select(FileStorageCleanup).order_by(FileStorageCleanup.operation)))
+    assert file is not None and file.state == FileState.FAILED
+    assert lifecycle is not None and lifecycle.completion_state == "COMPENSATION_PENDING"
+    assert [entry.operation for entry in cleanup] == ["ABORT_MULTIPART", "DELETE_OBJECT"]
+    assert cleanup[1].state == "PENDING" and cleanup[1].last_error_code == "DELETE_FAILED"
+    assert "secret" not in str(cleanup[1].last_error_code)
+    assert await storage.stat_object(file.object_key) is not None
+    object_key = file.object_key
+
+    storage.delete_error = None
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    assert await FileLifecycleService(factory, storage).reconcile() == 1
+    db_session.expire_all()
+    cleanup = list(await db_session.scalars(select(FileStorageCleanup).order_by(FileStorageCleanup.operation)))
+    assert [entry.state for entry in cleanup] == ["DONE", "DONE"]
+    assert await storage.stat_object(object_key) is None
+
+
+@pytest.mark.asyncio
+async def test_reconciler_finalizes_durable_prepared_object_without_second_complete(
+    db_session, active_owner
+) -> None:
+    """A crash after provider completion is recoverable without a client replay."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from superboss.modules.files.models import File, FileState, FileUploadLifecycle
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileLifecycleService, FileService
+    from superboss.modules.files.storage import CompletedPart
+
+    project = Project(name="Prepared recovery")
+    db_session.add(project)
+    await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    storage = InMemoryObjectStorage(complete_size=1)
+    upload = await FileService(db_session, storage).start_upload(
+        actor,
+        UploadStart(
+            project_id=project.id,
+            filename="prepared.pdf",
+            category="docs",
+            file_date="2026-08-09",
+            size_bytes=1,
+            sha256="0" * 64,
+        ),
+        "prepared-recovery",
+    )
+    lifecycle = await db_session.get(FileUploadLifecycle, upload.id)
+    assert lifecycle is not None and upload.multipart_id is not None
+    lifecycle.completion_state = "PREPARED"
+    lifecycle.parts_digest = "a" * 64
+    lifecycle.canonical_parts_json = [{"part_number": 1, "etag": "etag"}]
+    lifecycle.completion_event_key = uuid4()
+    lifecycle.prepared_at = datetime.now(UTC)
+    await db_session.commit()
+    await storage.complete_multipart(lifecycle.object_key, upload.multipart_id, [CompletedPart(1, "etag")])
+    assert len(storage.completed) == 1
+    file_id = upload.file_id
+    upload_id = upload.id
+
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    assert await FileLifecycleService(factory, storage).reconcile() == 1
+    db_session.expire_all()
+    file = await db_session.get(File, file_id)
+    lifecycle = await db_session.get(FileUploadLifecycle, upload_id)
+    assert file is not None and file.state == FileState.QUARANTINED
+    assert lifecycle is not None and lifecycle.completion_state == "QUARANTINED"
+    assert len(storage.completed) == 1
