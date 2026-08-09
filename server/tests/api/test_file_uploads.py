@@ -189,7 +189,7 @@ async def test_start_rejects_changed_metadata_for_same_key(file_client, db_sessi
     body = {"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09", "content_type": "application/pdf"}; headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "conflict"}
     assert client.post("/api/v1/files/uploads", json=body, headers=headers).status_code == 201
     body.update(change); response = client.post("/api/v1/files/uploads", json=body, headers=headers)
-    assert response.status_code == 409 and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and len(storage.active) == 1
+    assert response.status_code == 409 and response.json()["error"]["code"] == "FILE_UPLOAD_CONFLICT" and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and len(storage.active) == 1
     assert await db_session.scalar(select(func.count()).select_from(File)) == 1 and await db_session.scalar(select(func.count()).select_from(Upload)) == 1
 
 
@@ -222,7 +222,7 @@ def test_part_missing_upload_returns_not_found(file_client) -> None:
     from uuid import uuid4
     client, storage = file_client; _login(client)
     response = client.post(f"/api/v1/files/uploads/{uuid4()}/parts/1", headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))})
-    assert response.status_code == 404 and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and storage.expiries == []
+    assert response.status_code == 404 and response.json()["error"]["code"] == "FILE_UPLOAD_NOT_FOUND" and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and storage.expiries == []
 
 
 @pytest.mark.asyncio
@@ -234,7 +234,7 @@ async def test_part_rejects_quarantined_file(file_client, db_session: AsyncSessi
     upload = await db_session.get(Upload, started.json()["upload_id"]); assert upload is not None
     file = await db_session.get(File, upload.file_id); assert file is not None; file.state = FileState.QUARANTINED; await db_session.commit()
     before = list(storage.expiries); response = client.post(f"/api/v1/files/uploads/{upload.id}/parts/1", headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))})
-    assert response.status_code == 409 and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and storage.expiries == before
+    assert response.status_code == 409 and response.json()["error"]["code"] == "FILE_UPLOAD_NOT_ACTIVE" and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and storage.expiries == before
 
 
 @pytest.mark.asyncio
@@ -348,7 +348,7 @@ async def test_repeat_complete_is_rejected_without_redelivery(file_client, db_se
     headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "repeat-complete"}; started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers); upload = await db_session.get(Upload, started.json()["upload_id"]); assert upload is not None
     body = {"parts": [{"part_number": 1, "etag": "e"}]}; first = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json=body, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); second = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json=body, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); file = await db_session.get(File, upload.file_id)
     events = list((await db_session.scalars(select(AuditLog))).all())
-    assert first.status_code == 200 and second.status_code == 409 and file is not None and file.state.value == "QUARANTINED" and len(storage.completed) == 1 and len(dispatched) == 1 and len([event for event in events if event.action == "file.upload.complete" and event.outcome == "SUCCESS"]) == 1
+    assert first.status_code == 200 and second.status_code == 409 and second.json()["error"]["code"] == "FILE_UPLOAD_NOT_ACTIVE" and file is not None and file.state.value == "QUARANTINED" and len(storage.completed) == 1 and len(dispatched) == 1 and len([event for event in events if event.action == "file.upload.complete" and event.outcome == "SUCCESS"]) == 1
 
 
 @pytest.mark.asyncio
@@ -847,3 +847,29 @@ async def test_download_success_returns_safe_failure_when_audit_write_fails(
     assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"] == request_id
     assert "audit secret" not in response.text and file.object_key not in response.text and "memory://" not in response.text
     assert file.state == FileState.CLEAN and storage.expiries == [60]
+
+
+@pytest.mark.asyncio
+async def test_complete_missing_upload_returns_file_upload_not_found(file_client, db_session: AsyncSession) -> None:
+    from uuid import uuid4
+
+    from sqlalchemy import select
+
+    from superboss.modules.audit.models import AuditLog
+
+    client, storage = file_client
+    dispatched: list[object] = []
+    client.app.state.enqueue_file_scan = lambda file_id: dispatched.append(file_id)
+    _login(client)
+    request_id = "bba39a39-47ba-4ac5-9250-ccdba1d7f25e"
+    response = client.post(
+        f"/api/v1/files/uploads/{uuid4()}/complete",
+        json={"parts": [{"part_number": 1, "etag": "etag"}]},
+        headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "X-Request-ID": request_id},
+    )
+
+    events = list((await db_session.scalars(select(AuditLog))).all())
+    assert response.status_code == 404 and response.json()["error"]["code"] == "FILE_UPLOAD_NOT_FOUND"
+    assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"] == request_id
+    assert storage.active == {} and storage.completed == {} and dispatched == []
+    assert not [event for event in events if event.action == "file.upload.complete" and event.outcome == "SUCCESS"]

@@ -166,7 +166,7 @@ async def test_part_presign_accepts_s3_boundaries(db_session, active_owner) -> N
     upload = await service.start_upload(actor, UploadStart(project_id=project.id, filename="x.pdf", size_bytes=1, sha256="0" * 64, category="资料", file_date="2026-08-09"), "parts")
     assert (await service.presign_part(actor, upload.id, 1)).endswith("/1")
     assert (await service.presign_part(actor, upload.id, 10_000)).endswith("/10000")
-    assert storage.expiries == [300, 300]
+    assert storage.expiries == [900, 900]
 
 
 @pytest.mark.asyncio
@@ -273,7 +273,7 @@ async def test_clean_download_owner_returns_key_url_with_short_expiry(db_session
     db_session.add(file); await db_session.flush(); storage = InMemoryObjectStorage()
     actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
     assert await FileService(db_session, storage).presign_download(actor, file.id) == "memory://get/projects/clean/key"
-    assert storage.expiries == [300]
+    assert storage.expiries == [60]
 
 
 @pytest.mark.asyncio
@@ -290,7 +290,7 @@ async def test_clean_download_assigned_staff_and_foreign_denial(db_session, acti
     assert await service.presign_download(assigned, file.id) == "memory://get/projects/staff/key"
     foreign = Actor("user", staff.id, Role.STAFF, frozenset({other.id}), frozenset())
     with pytest.raises(ForbiddenError): await service.presign_download(foreign, file.id)
-    assert storage.expiries == [300]
+    assert storage.expiries == [60]
 
 
 @pytest.mark.asyncio

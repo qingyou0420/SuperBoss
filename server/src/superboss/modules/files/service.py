@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from superboss.core.actors import Actor, require_project_access
 from superboss.core.errors import (
     ConflictError,
+    DomainError,
     FileNotFoundError,
     FileStorageFailureError,
     FileUploadSizeMismatchError,
@@ -25,6 +26,21 @@ class FileNotReadyError(ConflictError):
         super().__init__()
         self.code = "FILE_NOT_READY"
         self.message = "File is not available for download"
+
+
+class FileUploadConflictError(ConflictError):
+    def __init__(self) -> None:
+        DomainError.__init__(self, "FILE_UPLOAD_CONFLICT", "Upload metadata conflicts", 409)
+
+
+class FileUploadNotFoundError(NotFoundError):
+    def __init__(self) -> None:
+        DomainError.__init__(self, "FILE_UPLOAD_NOT_FOUND", "Upload not found", 404)
+
+
+class FileUploadNotActiveError(ConflictError):
+    def __init__(self) -> None:
+        DomainError.__init__(self, "FILE_UPLOAD_NOT_ACTIVE", "Upload is not active", 409)
 
 
 class FileService:
@@ -74,7 +90,7 @@ class FileService:
         if existing:
             old = await self.session.get(File, existing.file_id)
             if old is None or existing.metadata_fingerprint != self._fingerprint(command):
-                raise ConflictError()
+                raise FileUploadConflictError()
             return existing
         file_id = uuid4()
         category = self._segment(command.category, "uncategorized")
@@ -125,7 +141,7 @@ class FileService:
             )
             if winner is not None and winner.metadata_fingerprint == self._fingerprint(command):
                 return winner
-            raise ConflictError() from error
+            raise FileUploadConflictError() from error
         return upload
 
     @staticmethod
@@ -160,11 +176,11 @@ class FileService:
             raise ValueError("invalid part number")
         upload = await self.session.get(Upload, upload_id)
         if upload is None:
-            raise NotFoundError()
+            raise FileUploadNotFoundError()
         require_project_access(actor, upload.project_id)
         file = await self.session.get(File, upload.file_id)
         if file is None or file.state != FileState.UPLOADING:
-            raise ConflictError()
+            raise FileUploadNotActiveError()
         return await self._storage().presign_upload_part(
             file.object_key, upload.multipart_id, part_number, 900
         )
@@ -174,11 +190,11 @@ class FileService:
     ) -> File:
         upload = await self.session.get(Upload, upload_id)
         if upload is None:
-            raise NotFoundError()
+            raise FileUploadNotFoundError()
         require_project_access(actor, upload.project_id)
         file = await self.session.get(File, upload.file_id)
         if file is None or file.state != FileState.UPLOADING:
-            raise ConflictError()
+            raise FileUploadNotActiveError()
         if len({p.part_number for p in parts}) != len(parts):
             raise ValueError("duplicate part number")
         try:
