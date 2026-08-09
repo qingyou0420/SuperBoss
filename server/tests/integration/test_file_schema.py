@@ -191,7 +191,7 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
             check=True,
         )
         tables, constraints, indexes = asyncio.run(catalog())
-        assert asyncio.run(revision()) == "0012_defer_delete_cleanup"
+        assert asyncio.run(revision()) == "0013_lifecycle_downgrade_guard"
         assert "trg_files_snapshot_storage_cleanup" in asyncio.run(trigger_names())
         assert {"files", "uploads", "file_upload_lifecycle", "file_lifecycle_outbox", "file_storage_cleanup"} <= set(tables)
         assert asyncio.run(table_columns("files")) == [
@@ -331,3 +331,362 @@ async def test_database_rejects_upload_referencing_file_from_other_project(
     with pytest.raises(IntegrityError):
         await db_session.commit()
     await db_session.rollback()
+
+
+def test_downgrade_blocks_live_file_lifecycle_without_data_loss(
+    postgres_database: str,
+) -> None:
+    """A live upload must stop lifecycle-table DDL before any destructive downgrade."""
+    temporary_name = f"superboss_downgrade_guard_{uuid4().hex}"
+    admin_url = _database_url(postgres_database, "postgres")
+    temporary_url = _database_url(postgres_database, temporary_name)
+    project_id, file_id, upload_id = uuid4(), uuid4(), uuid4()
+
+    async def create_database() -> None:
+        connection = await asyncpg.connect(admin_url.replace("postgresql+asyncpg", "postgresql"))
+        try:
+            await connection.execute(f'CREATE DATABASE "{temporary_name}"')
+        finally:
+            await connection.close()
+
+    async def drop_database() -> None:
+        connection = await asyncpg.connect(admin_url.replace("postgresql+asyncpg", "postgresql"))
+        try:
+            await connection.execute(f'DROP DATABASE IF EXISTS "{temporary_name}" WITH (FORCE)')
+        finally:
+            await connection.close()
+
+    async def seed() -> tuple[str, set[str], int]:
+        connection = await asyncpg.connect(temporary_url.replace("postgresql+asyncpg", "postgresql"))
+        try:
+            object_key = f"projects/{project_id}/docs/2026-08-09/{file_id}/live.pdf"
+            await connection.execute(
+                "INSERT INTO projects (id, name, is_test, status) VALUES ($1, $2, FALSE, 'ACTIVE')",
+                project_id,
+                f"Downgrade guard {project_id.hex}",
+            )
+            await connection.execute(
+                "INSERT INTO files (id, project_id, filename, category, file_date, object_key, "
+                "size_bytes, sha256, state, uploader_kind, uploader_id, content_type) "
+                "VALUES ($1, $2, 'live.pdf', 'docs', '2026-08-09', $3, 1, $4, 'UPLOADING', "
+                "'user', $5, 'application/pdf')",
+                file_id,
+                project_id,
+                object_key,
+                "0" * 64,
+                uuid4(),
+            )
+            await connection.execute(
+                "INSERT INTO uploads (id, file_id, project_id, uploader_kind, uploader_id, "
+                "idempotency_key, metadata_fingerprint, multipart_id) "
+                "VALUES ($1, $2, $3, 'user', $4, 'live-downgrade', $5, NULL)",
+                upload_id,
+                file_id,
+                project_id,
+                uuid4(),
+                "1" * 64,
+            )
+            await connection.execute(
+                "INSERT INTO file_upload_lifecycle "
+                "(upload_id, file_id, project_id, object_key, multipart_id, content_type, "
+                "declared_size_bytes, provision_state, completion_state) "
+                "VALUES ($1, $2, $3, $4, NULL, 'application/pdf', 1, 'PROVISIONING', 'NONE')",
+                upload_id,
+                file_id,
+                project_id,
+                object_key,
+            )
+            revision = str(await connection.fetchval("SELECT version_num FROM alembic_version"))
+            tables = {
+                row["tablename"]
+                for row in await connection.fetch(
+                    "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+                )
+            }
+            rows = int(
+                await connection.fetchval(
+                    "SELECT (SELECT count(*) FROM files) + (SELECT count(*) FROM uploads)"
+                )
+            )
+            return revision, tables, rows
+        finally:
+            await connection.close()
+
+    async def snapshot() -> tuple[str, set[str], int]:
+        connection = await asyncpg.connect(temporary_url.replace("postgresql+asyncpg", "postgresql"))
+        try:
+            revision = str(await connection.fetchval("SELECT version_num FROM alembic_version"))
+            tables = {
+                row["tablename"]
+                for row in await connection.fetch(
+                    "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+                )
+            }
+            rows = int(
+                await connection.fetchval(
+                    "SELECT (SELECT count(*) FROM files) + (SELECT count(*) FROM uploads)"
+                )
+            )
+            return revision, tables, rows
+        finally:
+            await connection.close()
+
+    asyncio.run(create_database())
+    environment = os.environ.copy()
+    environment["SUPERBOSS_DATABASE_URL"] = temporary_url
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            cwd=SERVER_ROOT,
+            env=environment,
+            check=True,
+        )
+        assert asyncio.run(seed())[0] == "0013_lifecycle_downgrade_guard"
+        downgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "downgrade", "0005_file_lifecycle"],
+            cwd=SERVER_ROOT,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        assert downgrade.returncode != 0
+        assert "SUPERBOSS_FILE_LIFECYCLE_DOWNGRADE_BLOCKED" in output
+        revision, tables, rows = asyncio.run(snapshot())
+        assert revision == "0013_lifecycle_downgrade_guard"
+        assert {
+            "file_upload_lifecycle",
+            "file_lifecycle_outbox",
+            "file_storage_cleanup",
+        } <= tables
+        assert rows == 2
+    finally:
+        asyncio.run(drop_database())
+
+
+def test_downgrade_guard_covers_each_live_lifecycle_shape(
+    postgres_database: str,
+) -> None:
+    """Every live durable-work shape blocks downgrade before lifecycle DDL runs."""
+    temporary_name = f"superboss_downgrade_matrix_{uuid4().hex}"
+    admin_url = _database_url(postgres_database, "postgres")
+    temporary_url = _database_url(postgres_database, temporary_name)
+
+    async def create_database() -> None:
+        connection = await asyncpg.connect(admin_url.replace("postgresql+asyncpg", "postgresql"))
+        try:
+            await connection.execute(f'CREATE DATABASE "{temporary_name}"')
+        finally:
+            await connection.close()
+
+    async def drop_database() -> None:
+        connection = await asyncpg.connect(admin_url.replace("postgresql+asyncpg", "postgresql"))
+        try:
+            await connection.execute(f'DROP DATABASE IF EXISTS "{temporary_name}" WITH (FORCE)')
+        finally:
+            await connection.close()
+
+    async def reset() -> None:
+        connection = await asyncpg.connect(temporary_url.replace("postgresql+asyncpg", "postgresql"))
+        try:
+            await connection.execute(
+                "TRUNCATE file_lifecycle_outbox, file_storage_cleanup, file_upload_lifecycle, "
+                "uploads, files, projects CASCADE"
+            )
+        finally:
+            await connection.close()
+
+    async def seed(shape: str) -> None:
+        connection = await asyncpg.connect(temporary_url.replace("postgresql+asyncpg", "postgresql"))
+        try:
+            project_id, file_id, upload_id = uuid4(), uuid4(), uuid4()
+            object_key = f"projects/{project_id}/docs/2026-08-09/{file_id}/{shape}.pdf"
+            multipart_id = None if shape == "multipart_null" else f"multipart-{upload_id.hex}"
+            provision_state = {
+                "provisioning": "PROVISIONING",
+                "cancel_requested": "CANCEL_REQUESTED",
+            }.get(shape, "TERMINAL")
+            completion_state = {
+                "prepared": "PREPARED",
+                "verified": "VERIFIED",
+                "compensation_pending": "COMPENSATION_PENDING",
+            }.get(shape, "QUARANTINED" if shape == "safe" else "NONE")
+            await connection.execute(
+                "INSERT INTO projects (id, name, is_test, status) VALUES ($1, $2, FALSE, 'ACTIVE')",
+                project_id,
+                f"Downgrade matrix {shape} {project_id.hex}",
+            )
+            await connection.execute(
+                "INSERT INTO files (id, project_id, filename, category, file_date, object_key, "
+                "size_bytes, sha256, state, uploader_kind, uploader_id, content_type) "
+                "VALUES ($1, $2, 'matrix.pdf', 'docs', '2026-08-09', $3, 1, $4, 'UPLOADING', "
+                "'user', $5, 'application/pdf')",
+                file_id,
+                project_id,
+                object_key,
+                "0" * 64,
+                uuid4(),
+            )
+            await connection.execute(
+                "INSERT INTO uploads (id, file_id, project_id, uploader_kind, uploader_id, "
+                "idempotency_key, metadata_fingerprint, multipart_id) "
+                "VALUES ($1, $2, $3, 'user', $4, $5, $6, $7)",
+                upload_id,
+                file_id,
+                project_id,
+                uuid4(),
+                f"matrix-{shape}-{upload_id.hex}",
+                "1" * 64,
+                multipart_id,
+            )
+            await connection.execute(
+                "INSERT INTO file_upload_lifecycle "
+                "(upload_id, file_id, project_id, object_key, multipart_id, content_type, "
+                "declared_size_bytes, provision_state, completion_state) "
+                "VALUES ($1, $2, $3, $4, $5, 'application/pdf', 1, $6, $7)",
+                upload_id,
+                file_id,
+                project_id,
+                object_key,
+                multipart_id,
+                provision_state,
+                completion_state,
+            )
+            if shape in {"outbox_pending", "safe"}:
+                await connection.execute(
+                    "INSERT INTO file_lifecycle_outbox "
+                    "(id, kind, dedupe_key, file_id, project_id, state) "
+                    "VALUES ($1, 'scan_dispatch', $2, $3, $4, $5)",
+                    uuid4(),
+                    uuid4(),
+                    file_id,
+                    project_id,
+                    "DELIVERED" if shape == "safe" else "PENDING",
+                )
+            if shape in {"cleanup_pending", "safe"}:
+                await connection.execute(
+                    "INSERT INTO file_storage_cleanup "
+                    "(id, operation, dedupe_key, object_key, multipart_id, lifecycle_id, state) "
+                    "VALUES ($1, 'DELETE_OBJECT', $2, $3, NULL, $4, $5)",
+                    uuid4(),
+                    "2" * 64,
+                    object_key,
+                    upload_id,
+                    "DONE" if shape == "safe" else "PENDING",
+                )
+        finally:
+            await connection.close()
+
+    async def head_snapshot() -> tuple[str, set[str], set[str], int]:
+        connection = await asyncpg.connect(temporary_url.replace("postgresql+asyncpg", "postgresql"))
+        try:
+            revision = str(await connection.fetchval("SELECT version_num FROM alembic_version"))
+            tables = {
+                row["tablename"]
+                for row in await connection.fetch(
+                    "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+                )
+            }
+            columns = {
+                row["column_name"]
+                for row in await connection.fetch(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND table_name = 'file_upload_lifecycle'"
+                )
+            }
+            rows = int(
+                await connection.fetchval(
+                    "SELECT (SELECT count(*) FROM files) + (SELECT count(*) FROM uploads)"
+                )
+            )
+            return revision, tables, columns, rows
+        finally:
+            await connection.close()
+
+    async def safe_downgrade_snapshot() -> tuple[str, set[str], int, int]:
+        connection = await asyncpg.connect(temporary_url.replace("postgresql+asyncpg", "postgresql"))
+        try:
+            revision = str(await connection.fetchval("SELECT version_num FROM alembic_version"))
+            tables = {
+                row["tablename"]
+                for row in await connection.fetch(
+                    "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+                )
+            }
+            rows = int(
+                await connection.fetchval(
+                    "SELECT (SELECT count(*) FROM files) + (SELECT count(*) FROM uploads)"
+                )
+            )
+            nonempty_multipart = int(
+                await connection.fetchval(
+                    "SELECT count(*) FROM uploads WHERE multipart_id IS NOT NULL"
+                )
+            )
+            return revision, tables, rows, nonempty_multipart
+        finally:
+            await connection.close()
+
+    def downgrade(environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-m", "alembic", "downgrade", "0005_file_lifecycle"],
+            cwd=SERVER_ROOT,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    asyncio.run(create_database())
+    environment = os.environ.copy()
+    environment["SUPERBOSS_DATABASE_URL"] = temporary_url
+    unsafe_shapes = (
+        "multipart_null",
+        "provisioning",
+        "cancel_requested",
+        "prepared",
+        "verified",
+        "compensation_pending",
+        "outbox_pending",
+        "cleanup_pending",
+    )
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            cwd=SERVER_ROOT,
+            env=environment,
+            check=True,
+        )
+        for shape in unsafe_shapes:
+            asyncio.run(reset())
+            asyncio.run(seed(shape))
+            result = downgrade(environment)
+            assert result.returncode != 0
+            assert "SUPERBOSS_FILE_LIFECYCLE_DOWNGRADE_BLOCKED" in (
+                result.stdout + result.stderr
+            )
+            revision, tables, columns, rows = asyncio.run(head_snapshot())
+            assert revision == "0013_lifecycle_downgrade_guard"
+            assert {
+                "file_upload_lifecycle",
+                "file_lifecycle_outbox",
+                "file_storage_cleanup",
+            } <= tables
+            assert "completion_next_attempt_at" in columns
+            assert rows == 2
+
+        asyncio.run(reset())
+        asyncio.run(seed("safe"))
+        result = downgrade(environment)
+        assert result.returncode == 0, result.stdout + result.stderr
+        revision, tables, rows, nonempty_multipart = asyncio.run(safe_downgrade_snapshot())
+        assert revision == "0005_file_lifecycle"
+        assert not {
+            "file_upload_lifecycle",
+            "file_lifecycle_outbox",
+            "file_storage_cleanup",
+        } & tables
+        assert rows == 2 and nonempty_multipart == 1
+    finally:
+        asyncio.run(drop_database())
