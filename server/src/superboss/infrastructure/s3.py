@@ -114,9 +114,17 @@ class Boto3ObjectStorage:
         return ObjectMetadata(int(head["ContentLength"]), head.get("ETag"))
 
     async def abort_multipart(self, object_key: str, multipart_id: str) -> None:
-        await asyncio.to_thread(
-            self.client.abort_multipart_upload, Bucket=self.bucket, Key=object_key, UploadId=multipart_id
-        )
+        try:
+            await asyncio.to_thread(
+                self.client.abort_multipart_upload,
+                Bucket=self.bucket,
+                Key=object_key,
+                UploadId=multipart_id,
+            )
+        except ClientError as error:
+            code = error.response.get("Error", {}).get("Code")
+            if code not in {"NoSuchUpload", "404", "NotFound"}:
+                raise
 
     async def presign_get(self, object_key: str, expires_seconds: int) -> str:
         return await asyncio.to_thread(

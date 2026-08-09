@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+from botocore.exceptions import ClientError
 
 from superboss.infrastructure.s3 import Boto3ObjectStorage
 from superboss.modules.files.storage import CompletedPart, ObjectMetadata
@@ -233,6 +234,43 @@ async def test_boto3_adapter_deletes_exact_object_off_loop() -> None:
 
     assert client.calls == [("delete_object", {"Bucket": "files-bucket", "Key": "projects/p/x.pdf"})]
     assert client.thread_ids == [thread_id for thread_id in client.thread_ids if thread_id != main_thread]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["NoSuchUpload", "404", "NotFound"])
+async def test_boto3_adapter_treats_missing_multipart_abort_as_idempotent(code: str) -> None:
+    """A retry after a lost acknowledgement must not turn a completed abort into failure."""
+    @dataclass
+    class MissingMultipartClient:
+        calls: list[dict[str, Any]] = field(default_factory=list)
+
+        def abort_multipart_upload(self, **kwargs: Any) -> dict[str, object]:
+            self.calls.append(kwargs)
+            raise ClientError({"Error": {"Code": code}}, "AbortMultipartUpload")
+
+    client = MissingMultipartClient()
+    storage = Boto3ObjectStorage(bucket="files-bucket", client=client)  # type: ignore[arg-type]
+
+    await storage.abort_multipart("projects/p/x.pdf", "missing-upload")
+
+    assert client.calls == [
+        {"Bucket": "files-bucket", "Key": "projects/p/x.pdf", "UploadId": "missing-upload"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_boto3_adapter_does_not_swallow_abort_access_denied() -> None:
+    """Only a missing multipart is idempotent; authorization failures remain visible."""
+    @dataclass
+    class DeniedAbortClient:
+        def abort_multipart_upload(self, **_kwargs: Any) -> dict[str, object]:
+            raise ClientError({"Error": {"Code": "AccessDenied"}}, "AbortMultipartUpload")
+
+    storage = Boto3ObjectStorage(bucket="files-bucket", client=DeniedAbortClient())  # type: ignore[arg-type]
+
+    with pytest.raises(ClientError) as error:
+        await storage.abort_multipart("projects/p/x.pdf", "forbidden-upload")
+    assert error.value.response["Error"]["Code"] == "AccessDenied"
 
 
 @pytest.mark.parametrize(

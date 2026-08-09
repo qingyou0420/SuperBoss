@@ -3736,3 +3736,82 @@ async def test_maintenance_recovers_unbound_multipart_after_bind_commit_failure(
     assert lifecycle is not None and upload is not None
     assert lifecycle.provision_state == "READY" and upload.multipart_id in storage.active
     assert storage.create_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_abort_ack_loss_retries_missing_multipart_to_done(db_session) -> None:
+    """A lost DONE commit must retry a missing provider multipart as an idempotent abort."""
+    import hashlib
+    from datetime import UTC, datetime, timedelta
+
+    from botocore.exceptions import ClientError
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from superboss.infrastructure.s3 import Boto3ObjectStorage
+    from superboss.modules.files.models import FileStorageCleanup
+    from superboss.modules.files.service import FileLifecycleService
+
+    class StrictAbortClient:
+        def __init__(self) -> None:
+            self.active = {"ack-loss-upload"}
+            self.calls = 0
+            self.successful_aborts = 0
+
+        def abort_multipart_upload(self, **_kwargs: object) -> dict[str, object]:
+            self.calls += 1
+            if "ack-loss-upload" in self.active:
+                self.active.remove("ack-loss-upload")
+                self.successful_aborts += 1
+                return {}
+            raise ClientError(
+                {"Error": {"Code": "NoSuchUpload"}}, "AbortMultipartUpload"
+            )
+
+    class FailAckCommitSession(AsyncSession):
+        async def commit(self) -> None:
+            commits = getattr(self, "commits", 0) + 1
+            self.commits = commits
+            if commits == 2:
+                raise RuntimeError("ack commit failure")
+            await super().commit()
+
+    object_key = "projects/ack-loss/file.pdf"
+    cleanup = FileStorageCleanup(
+        operation="ABORT_MULTIPART",
+        dedupe_key=hashlib.sha256(
+            f"ABORT_MULTIPART\x1f{object_key}\x1fack-loss-upload".encode()
+        ).hexdigest(),
+        object_key=object_key,
+        multipart_id="ack-loss-upload",
+    )
+    db_session.add(cleanup)
+    await db_session.commit()
+    cleanup_id = cleanup.id
+    client = StrictAbortClient()
+    storage = Boto3ObjectStorage(bucket="files-bucket", client=client)  # type: ignore[arg-type]
+    failing_factory = async_sessionmaker(
+        db_session.bind, class_=FailAckCommitSession, expire_on_commit=False
+    )
+    normal_factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+
+    with pytest.raises(RuntimeError, match="ack commit failure"):
+        await FileLifecycleService(failing_factory, storage).reconcile_cleanup()
+    db_session.expire_all()
+    persisted = await db_session.get(FileStorageCleanup, cleanup_id)
+    assert persisted is not None
+    assert persisted.state == "RUNNING" and persisted.attempt_count == 1
+    assert persisted.claim_token is not None and client.active == set()
+
+    persisted.locked_at = datetime.now(UTC) - timedelta(seconds=31)
+    await db_session.commit()
+    assert await FileLifecycleService(normal_factory, storage).reconcile_cleanup() == 1
+    db_session.expire_all()
+    persisted = await db_session.get(FileStorageCleanup, cleanup_id)
+    assert persisted is not None
+    assert (
+        persisted.state == "DONE"
+        and persisted.attempt_count == 2
+        and persisted.claim_token is None
+        and persisted.locked_at is None
+    )
+    assert client.active == set() and client.successful_aborts == 1 and client.calls == 2
