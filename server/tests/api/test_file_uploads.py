@@ -114,6 +114,15 @@ def test_start_rejects_invalid_size_or_sha(file_client, change: dict[str, object
     body = {"project_id": "00000000-0000-0000-0000-000000000001", "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}; body.update(change)
     response = client.post("/api/v1/files/uploads", json=body, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "validation"})
     assert response.status_code == 422 and response.json()["error"]["code"] == "VALIDATION_ERROR" and storage.active == {}
+
+
+@pytest.mark.asyncio
+async def test_start_accepts_exactly_100_mib(file_client, db_session: AsyncSession) -> None:
+    from superboss.modules.files.models import File
+    client, storage = file_client; project = Project(name="100 MiB"); db_session.add(project); await db_session.commit(); _login(client)
+    response = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 100 * 1024 * 1024, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "max"})
+    file = await db_session.get(File, response.json()["file_id"])
+    assert response.status_code == 201 and file is not None and file.size_bytes == 100 * 1024 * 1024 and len(storage.active) == 1
 from pydantic import ValidationError
 
 
