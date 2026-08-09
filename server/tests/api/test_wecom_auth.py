@@ -101,6 +101,22 @@ def test_browser_mutations_require_matching_csrf_token(api_client: TestClient) -
     )
 
 
+def test_oauth_state_failure_is_committed_and_cookie_is_cleared(api_client: TestClient) -> None:
+    """A failed identity callback must consume state and make a restored-cookie replay fail."""
+    started = api_client.get("/api/v1/auth/wecom/start")
+    state = started.json()["state"]
+    state_cookie = api_client.cookies.get("wecom_oauth_state")
+    failed = _callback(api_client, "unknown-code", state)
+    assert failed.status_code == 403
+    assert "wecom_oauth_state=\"\"" in failed.headers["set-cookie"]
+    api_client.cookies.set(
+        "wecom_oauth_state", state_cookie, domain="testserver.local", path="/api/v1/auth/wecom"
+    )
+    replay = _callback(api_client, "owner-code", state)
+    assert replay.status_code == 400
+    assert "wecom_oauth_state=\"\"" in replay.headers["set-cookie"]
+
+
 def test_logout_revokes_browser_access_and_refresh_tokens(api_client: TestClient) -> None:
     """Removing either server-side logout revocation leaves a cookie token usable."""
     started = api_client.get("/api/v1/auth/wecom/start")
