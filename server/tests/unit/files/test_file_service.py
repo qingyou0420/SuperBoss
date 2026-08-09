@@ -6,8 +6,8 @@ from uuid import uuid4
 import pytest
 
 from superboss.core.actors import Actor
-from superboss.modules.projects.models import Project
-from superboss.modules.users.models import Role
+from superboss.modules.projects.models import Project, ProjectMember
+from superboss.modules.users.models import Role, User, UserStatus
 from tests.files.storage import InMemoryObjectStorage
 
 
@@ -91,6 +91,28 @@ async def test_same_key_with_changed_metadata_conflicts(db_session, active_owner
     with pytest.raises(ConflictError):
         await service.start_upload(actor, changed, "same")
     assert len(storage.active) == 1
+
+
+@pytest.mark.asyncio
+async def test_same_key_is_scoped_to_project_and_actor(db_session, active_owner) -> None:
+    """Global idempotency would wrongly join independent project/user uploads."""
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileService
+
+    first_project, second_project = Project(name="Idem one"), Project(name="Idem two")
+    staff = User(wecom_userid="file-staff", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
+    db_session.add_all([first_project, second_project, staff])
+    await db_session.flush()
+    db_session.add(ProjectMember(project_id=second_project.id, user_id=staff.id))
+    storage = InMemoryObjectStorage()
+    service = FileService(db_session, storage)
+    owner = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    staff_actor = Actor("user", staff.id, Role.STAFF, frozenset({second_project.id}), frozenset())
+    def command(project_id): return UploadStart(project_id=project_id, filename="x.pdf", size_bytes=1, sha256="0" * 64, category="资料", file_date="2026-08-09")
+    first = await service.start_upload(owner, command(first_project.id), "same")
+    second = await service.start_upload(owner, command(second_project.id), "same")
+    third = await service.start_upload(staff_actor, command(second_project.id), "same")
+    assert len({first.id, second.id, third.id}) == 3 and len(storage.active) == 3
 
 
 @pytest.mark.parametrize("key", ["x", "!" * 255, "", "x" * 256, " x", "x ", "x\r\ny", "中文"])
