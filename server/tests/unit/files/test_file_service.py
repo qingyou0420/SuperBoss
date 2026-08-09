@@ -136,6 +136,24 @@ async def test_complete_sorts_parts_and_quarantines_without_enqueue(db_session, 
     assert enqueued == []
 
 
+@pytest.mark.asyncio
+async def test_part_presign_accepts_s3_boundaries(db_session, active_owner) -> None:
+    """Changing the S3 boundary would reject valid first or last parts."""
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileService
+
+    project = Project(name="Parts")
+    db_session.add(project)
+    await db_session.flush()
+    storage = InMemoryObjectStorage()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    service = FileService(db_session, storage)
+    upload = await service.start_upload(actor, UploadStart(project_id=project.id, filename="x.pdf", size_bytes=1, sha256="0" * 64, category="资料", file_date="2026-08-09"), "parts")
+    assert (await service.presign_part(actor, upload.id, 1)).endswith("/1")
+    assert (await service.presign_part(actor, upload.id, 10_000)).endswith("/10000")
+    assert storage.expiries == [300, 300]
+
+
 @pytest.mark.parametrize("key", ["x", "!" * 255, "", "x" * 256, " x", "x ", "x\r\ny", "中文"])
 def test_idempotency_key_grammar(key: str) -> None:
     """Header keys are printable ASCII tokens, never whitespace or controls."""
