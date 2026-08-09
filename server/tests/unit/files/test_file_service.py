@@ -1185,3 +1185,74 @@ async def test_delete_winner_blocks_later_completion_from_touching_storage(db_se
     with pytest.raises(NotFoundError):
         await FileService(db_session, storage).complete_upload(actor, upload_id, [CompletedPart(1, "etag")])
     assert storage.completed == {} and storage.objects == {}
+
+
+@pytest.mark.asyncio
+async def test_delete_after_completion_enters_storage_leaves_durable_cleanup(db_session, active_owner) -> None:
+    """An object completed during a delete race is still covered by the trigger snapshot."""
+    import asyncio
+
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from superboss.core.errors import DomainError
+    from superboss.modules.files.models import File, FileStorageCleanup
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileLifecycleService, FileService
+    from superboss.modules.files.storage import CompletedPart, ObjectMetadata
+
+    class BlockingCompleteStorage(InMemoryObjectStorage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+            self.calls = 0
+
+        async def complete_multipart(self, object_key: str, multipart_id: str, parts: list[CompletedPart]) -> ObjectMetadata:
+            self.calls += 1
+            self.entered.set()
+            await asyncio.wait_for(self.release.wait(), timeout=3)
+            return await super().complete_multipart(object_key, multipart_id, parts)
+
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    for round_number in range(3):
+        project = Project(name=f"Complete delete race {round_number}")
+        db_session.add(project)
+        await db_session.commit()
+        storage = BlockingCompleteStorage()
+        upload = await FileService(db_session, storage).start_upload(
+            actor,
+            UploadStart(project_id=project.id, filename="race.pdf", category="docs", file_date="2026-08-09", size_bytes=1, sha256="0" * 64),
+            f"complete-delete-{round_number}",
+        )
+        file_id, upload_id = upload.file_id, upload.id
+
+        async def complete(
+            race_storage: BlockingCompleteStorage = storage,
+            race_upload_id: UUID = upload_id,
+        ) -> None:
+            async with factory() as session:
+                try:
+                    await FileService(session, race_storage).complete_upload(actor, race_upload_id, [CompletedPart(1, "etag")])
+                except DomainError:
+                    await session.rollback()
+
+        async def delete_file(race_file_id: UUID = file_id) -> None:
+            async with factory() as session:
+                file = await session.get(File, race_file_id)
+                assert file is not None
+                await session.delete(file)
+                await session.commit()
+
+        completion = asyncio.create_task(complete())
+        await asyncio.wait_for(storage.entered.wait(), timeout=5)
+        deletion = asyncio.create_task(delete_file())
+        await asyncio.wait_for(asyncio.sleep(0), timeout=1)
+        storage.release.set()
+        await asyncio.wait_for(asyncio.gather(completion, deletion), timeout=10)
+        db_session.expire_all()
+        jobs = list(await db_session.scalars(select(FileStorageCleanup).where(FileStorageCleanup.lifecycle_id == upload_id)))
+        assert storage.calls <= 1 and len(jobs) == 2
+        assert await FileLifecycleService(factory, storage).reconcile() == 2
+        assert storage.active == {} and storage.objects == {}
