@@ -35,10 +35,14 @@ async def _session(request: Request) -> AsyncIterator[AsyncSession]:
 
 
 async def get_actor(request: Request) -> Actor:
-    """Resolve every browser credential against live user and session state."""
+    """Resolve browser or exact device credentials against live server state."""
+    cached = getattr(request.state, "resolved_actor", None)
+    if isinstance(cached, Actor):
+        return cached
     authorization = request.headers.get("Authorization", "")
     token = request.cookies.get("access_token")
-    if token is None and authorization.startswith("Bearer "):
+    has_browser_cookie = token is not None or request.cookies.get("refresh_token") is not None
+    if token is None and not has_browser_cookie and authorization.startswith("Bearer "):
         token = authorization.removeprefix("Bearer ")
     if not token:
         raise UnauthenticatedError()
@@ -53,13 +57,37 @@ async def get_actor(request: Request) -> Actor:
         try:
             user = await service.authenticate_access_token(token)
         except InvalidSession as error:
-            raise UnauthenticatedError() from error
-        project_ids: frozenset[UUID] = frozenset()
-        if user.role == Role.STAFF:
-            project_ids = frozenset(
-                (await session.scalars(select(ProjectMember.project_id).where(ProjectMember.user_id == user.id))).all()
+            if has_browser_cookie:
+                raise UnauthenticatedError() from error
+            from superboss.modules.devices.service import (
+                DeviceService,
+                InvalidDeviceCredential,
             )
-        return Actor("user", user.id, user.role, project_ids, frozenset())
+            try:
+                actor = await DeviceService(
+                    request.app.state.session_factory, request.app.state.settings
+                ).authenticate_access_token(
+                    token, request_id=UUID(request.state.request_id)
+                )
+            except InvalidDeviceCredential as device_error:
+                raise UnauthenticatedError() from device_error
+            request.state.resolved_actor = actor
+            return actor
+        else:
+            project_ids: frozenset[UUID] = frozenset()
+            if user.role == Role.STAFF:
+                project_ids = frozenset(
+                    (
+                        await session.scalars(
+                            select(ProjectMember.project_id).where(
+                                ProjectMember.user_id == user.id
+                            )
+                        )
+                    ).all()
+                )
+            actor = Actor("user", user.id, user.role, project_ids, frozenset())
+            request.state.resolved_actor = actor
+            return actor
     raise UnauthenticatedError()
 
 

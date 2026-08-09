@@ -13,17 +13,14 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from superboss.api.router import api_router
+from superboss.core.actors import get_actor
 from superboss.core.config import Settings, get_settings
-from superboss.core.errors import DomainError
-from superboss.core.security import TokenError, decode_access_token
+from superboss.core.errors import DomainError, UnauthenticatedError
 from superboss.infrastructure.s3 import Boto3ObjectStorage
 from superboss.infrastructure.wecom import build_wecom_provider
-from superboss.modules.auth.repository import AuthRepository
-from superboss.modules.auth.service import AuthService, InvalidSession
 from superboss.modules.files.service import FileLifecycleService
 from superboss.modules.files.storage import ObjectStorage
 from superboss.modules.files.tasks import enqueue_file_scan as celery_enqueue_file_scan
-from superboss.modules.users.repository import UserRepository
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +91,7 @@ def create_app(
 
     def is_authenticated_write_path(path: str) -> bool:
         return path in {"/api/v1/projects", "/api/v1/files"} or path.startswith(
-            ("/api/v1/projects/", "/api/v1/files/")
+            ("/api/v1/projects/", "/api/v1/files/", "/api/v1/owner/devices")
         )
 
     @app.exception_handler(DomainError)
@@ -119,29 +116,19 @@ def create_app(
     ) -> Response:
         request.state.request_id = request_id(request)
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            if request.method == "POST" and request.url.path in {
+                "/api/v1/device-auth/pair",
+                "/api/v1/device-auth/refresh",
+            }:
+                return finalize_response(request, await call_next(request))
             authorization = request.headers.get("Authorization")
             has_browser_credentials = bool(
                 request.cookies.get("access_token") or request.cookies.get("refresh_token")
             )
             if authorization is not None and not has_browser_credentials:
-                if not authorization.startswith("Bearer "):
-                    return error_response(
-                        request, "AUTHENTICATION_REQUIRED", "Authentication required", 401
-                    )
                 try:
-                    decode_access_token(active_settings, authorization.removeprefix("Bearer "))
-                    session = app.state.session_factory()
-                    try:
-                        await AuthService(
-                            session,
-                            AuthRepository(session),
-                            UserRepository(session),
-                            None,
-                            active_settings,
-                        ).authenticate_access_token(authorization.removeprefix("Bearer "))
-                    finally:
-                        await session.close()
-                except (TokenError, InvalidSession):
+                    await get_actor(request)
+                except UnauthenticatedError:
                     return error_response(
                         request, "AUTHENTICATION_REQUIRED", "Authentication required", 401
                     )

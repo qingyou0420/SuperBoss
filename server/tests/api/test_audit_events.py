@@ -343,6 +343,18 @@ async def test_concurrent_request_ids_keep_audit_actors_isolated(
 _UNSAFE_ALLOWLIST = {
     ("POST", "/api/v1/auth/refresh", "superboss.modules.auth.router", "refresh"),
     ("POST", "/api/v1/auth/logout", "superboss.modules.auth.router", "logout"),
+    (
+        "POST",
+        "/api/v1/device-auth/pair",
+        "superboss.modules.devices.router",
+        "pair_device",
+    ),
+    (
+        "POST",
+        "/api/v1/device-auth/refresh",
+        "superboss.modules.devices.router",
+        "refresh_device",
+    ),
     ("POST", "/api/v1/files/uploads", "superboss.modules.files.router", "start"),
     (
         "POST",
@@ -355,6 +367,18 @@ _UNSAFE_ALLOWLIST = {
         "/api/v1/files/uploads/{upload_id}/parts/{part_number}",
         "superboss.modules.files.router",
         "part",
+    ),
+    (
+        "POST",
+        "/api/v1/owner/devices/pairing-codes",
+        "superboss.modules.devices.router",
+        "create_pairing_code",
+    ),
+    (
+        "DELETE",
+        "/api/v1/owner/devices/{device_id}",
+        "superboss.modules.devices.router",
+        "revoke_device",
     ),
     ("POST", "/api/v1/projects", "superboss.modules.projects.router", "create_project"),
 }

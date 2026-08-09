@@ -61,12 +61,38 @@ class DeviceTokenPair:
 
 
 @dataclass(frozen=True)
+class DeviceProjectView:
+    id: UUID
+    name: str
+
+
+@dataclass(frozen=True)
+class DeviceView:
+    id: UUID
+    name: str
+    paired_at: datetime
+    last_used_at: datetime | None
+    revoked_at: datetime | None
+    scopes: tuple[str, ...]
+    projects: tuple[DeviceProjectView, ...]
+
+
+@dataclass(frozen=True)
 class _CredentialRejected(Exception):
     object_id: UUID | None = None
 
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def normalize_device_name(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).strip(" \t\r\n\u00a0")
+    if not 1 <= len(normalized) <= 128 or any(
+        unicodedata.category(character).startswith("C") for character in normalized
+    ):
+        raise InvalidDeviceGrant("Device name is invalid")
+    return normalized
 
 
 class DeviceService:
@@ -97,10 +123,7 @@ class DeviceService:
 
     @staticmethod
     def _device_name(value: str) -> str:
-        normalized = unicodedata.normalize("NFKC", value).strip(" \t\r\n\u00a0")
-        if not 1 <= len(normalized) <= 128:
-            raise InvalidDeviceGrant("Device name is invalid")
-        return normalized
+        return normalize_device_name(value)
 
     @staticmethod
     def _event_key(kind: str, object_id: UUID) -> UUID:
@@ -553,3 +576,85 @@ class DeviceService:
                 event_key=self._event_key("device-revoke", device.id),
                 metadata={"state": "REVOKED"},
             )
+
+    async def list_devices(self, owner_id: UUID) -> tuple[DeviceView, ...]:
+        """Return an OWNER's devices without credential or session material."""
+        async with self.session_factory() as session:
+            devices = tuple(
+                await session.scalars(
+                    select(DeviceConnection)
+                    .where(DeviceConnection.owner_id == owner_id)
+                    .order_by(DeviceConnection.paired_at.desc(), DeviceConnection.id)
+                )
+            )
+            projects_by_device = await self._project_views(
+                session, tuple(device.id for device in devices), active_only=False
+            )
+            return tuple(
+                DeviceView(
+                    id=device.id,
+                    name=device.name,
+                    paired_at=device.paired_at,
+                    last_used_at=device.last_used_at,
+                    revoked_at=device.revoked_at,
+                    scopes=(),
+                    projects=projects_by_device.get(device.id, ()),
+                )
+                for device in devices
+            )
+
+    async def get_device(self, device_id: UUID) -> DeviceView:
+        """Load the live, ACTIVE project view for an already-authenticated device."""
+        async with self.session_factory() as session:
+            device = await session.get(DeviceConnection, device_id)
+            if device is None or device.revoked_at is not None:
+                raise InvalidDeviceCredential()
+            projects_by_device = await self._project_views(
+                session, (device.id,), active_only=True
+            )
+            current_scopes = frozenset(
+                await session.scalars(
+                    select(DeviceScopeGrant.scope).where(
+                        DeviceScopeGrant.device_id == device.id
+                    )
+                )
+            )
+            scopes = tuple(scope for scope in DEVICE_ACCESS_SCOPES if scope in current_scopes)
+            return DeviceView(
+                id=device.id,
+                name=device.name,
+                paired_at=device.paired_at,
+                last_used_at=device.last_used_at,
+                revoked_at=device.revoked_at,
+                scopes=scopes,
+                projects=projects_by_device.get(device.id, ()),
+            )
+
+    @staticmethod
+    async def _project_views(
+        session: AsyncSession,
+        device_ids: tuple[UUID, ...],
+        *,
+        active_only: bool,
+    ) -> dict[UUID, tuple[DeviceProjectView, ...]]:
+        if not device_ids:
+            return {}
+        statement = (
+            select(DeviceProjectGrant.device_id, Project.id, Project.name)
+            .join(Project, Project.id == DeviceProjectGrant.project_id)
+            .where(DeviceProjectGrant.device_id.in_(device_ids))
+        )
+        if active_only:
+            statement = statement.where(Project.status == ProjectStatus.ACTIVE)
+        rows = (await session.execute(statement)).all()
+        grouped: dict[UUID, list[DeviceProjectView]] = {}
+        for row in rows:
+            grouped.setdefault(row.device_id, []).append(
+                DeviceProjectView(id=row.id, name=row.name)
+            )
+        return {
+            device_id: tuple(
+                sorted(projects, key=lambda project: (project.name.casefold(), str(project.id)))
+            )
+            for device_id, projects in grouped.items()
+        }

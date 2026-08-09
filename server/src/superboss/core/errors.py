@@ -25,6 +25,11 @@ class ForbiddenError(DomainError):
         super().__init__(code, message, 403)
 
 
+class OwnerRequiredError(ForbiddenError):
+    def __init__(self) -> None:
+        super().__init__("OWNER_REQUIRED", "Owner access required")
+
+
 class NotFoundError(DomainError):
     def __init__(self) -> None:
         super().__init__("PROJECT_NOT_FOUND", "Project not found", 404)
