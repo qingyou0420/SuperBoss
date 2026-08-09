@@ -766,3 +766,26 @@ async def test_assigned_staff_downloads_clean_file(file_client, db_session: Asyn
     assert str(event.request_id) == request_id and event.metadata_json["actor_role"] == "STAFF"
     assert "url" not in event.metadata_json and "object_key" not in event.metadata_json
     assert "memory://" not in str(event.metadata_json) and file.object_key not in str(event.metadata_json)
+
+
+@pytest.mark.asyncio
+async def test_anonymous_download_is_unauthenticated_without_audit(
+    file_client, db_session: AsyncSession
+) -> None:
+    from uuid import uuid4
+
+    from sqlalchemy import select
+
+    from superboss.modules.audit.models import AuditLog
+
+    client, storage = file_client
+    request_id = "bba39a39-47ba-4ac5-9250-ccdba1d7f25e"
+    response = client.get(
+        f"/api/v1/files/{uuid4()}/download",
+        headers={"X-Request-ID": request_id},
+    )
+
+    events = list((await db_session.scalars(select(AuditLog))).all())
+    assert response.status_code == 401 and response.json()["error"]["code"] == "AUTHENTICATION_REQUIRED"
+    assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"] == request_id
+    assert storage.expiries == [] and events == []
