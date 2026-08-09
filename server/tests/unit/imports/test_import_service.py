@@ -573,11 +573,12 @@ async def test_create_requires_an_exact_device_actor_scope_and_current_project(
     else:
         denied_actor = Actor("device", device.id, None, frozenset(), actor.scopes)
     storage = InMemoryObjectStorage()
+    command = command_for(project.id)
 
     with pytest.raises(DomainError) as denied:
         await service_for(session_factory, storage).create(
             denied_actor,
-            command_for(project.id),
+            command,
             f"denied-{actor_case}",
             request_id=uuid4(),
         )
@@ -595,6 +596,30 @@ async def test_create_requires_an_exact_device_actor_scope_and_current_project(
             )
         )
     assert len(denied_events) == 1
+    serialized_denial = json.dumps(denied_events[0].metadata_json, ensure_ascii=False)
+    raw_manifest = command.model_dump(mode="json")
+
+    def text_values(value: object) -> list[str]:
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, list):
+            return [text for item in value for text in text_values(item)]
+        if isinstance(value, dict):
+            return [text for item in value.values() for text in text_values(item)]
+        return []
+
+    assert all(value not in serialized_denial for value in text_values(raw_manifest))
+    lowered_denial = serialized_denial.casefold()
+    for forbidden_coordinate in (
+        "provider secret",
+        "authorization",
+        "cookie",
+        "access_token",
+        "refresh_token",
+        "object_key",
+        "multipart_id",
+    ):
+        assert forbidden_coordinate not in lowered_denial
     assert storage.create_calls == 0 and storage.expiries == []
 
 

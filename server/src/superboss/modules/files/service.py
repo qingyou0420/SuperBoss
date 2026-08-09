@@ -18,6 +18,7 @@ from superboss.core.errors import (
     FileNotFoundError,
     FileProvisioningPendingError,
     FileUploadSizeMismatchError,
+    ForbiddenError,
     NotFoundError,
 )
 from superboss.infrastructure.clamav import Scanner, ScanStatus
@@ -172,6 +173,24 @@ class FileService:
         self, actor: Actor, command: UploadStart, idempotency_key: str
     ) -> Upload:
         require_project_access(actor, command.project_id)
+        return await self._start_upload(actor, command, idempotency_key)
+
+    async def start_import_upload(
+        self, actor: Actor, command: UploadStart, idempotency_key: str
+    ) -> Upload:
+        """Provision through the file lifecycle for one authorized import-create request."""
+        if (
+            actor.kind != "device"
+            or actor.role is not None
+            or command.project_id not in actor.project_ids
+            or "imports:create" not in actor.scopes
+        ):
+            raise ForbiddenError("IMPORT_CREATE_FORBIDDEN", "Import creation is not permitted")
+        return await self._start_upload(actor, command, idempotency_key)
+
+    async def _start_upload(
+        self, actor: Actor, command: UploadStart, idempotency_key: str
+    ) -> Upload:
         if not re.fullmatch(r"[!-~]{1,255}", idempotency_key):
             raise ValueError("invalid Idempotency-Key")
         existing = await self.session.scalar(

@@ -89,6 +89,102 @@ async def test_same_idempotency_key_reuses_one_active_multipart(db_session, acti
 
 
 @pytest.mark.asyncio
+async def test_generic_start_upload_rejects_device_with_project_and_import_scope(
+    db_session, active_owner
+) -> None:
+    """The browser File API boundary must stay closed even to a fully granted import device."""
+    from superboss.core.errors import ForbiddenError
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileService
+
+    project = Project(name="Generic upload remains browser-only")
+    db_session.add(project)
+    await db_session.flush()
+    actor = Actor(
+        "device",
+        uuid4(),
+        None,
+        frozenset({project.id}),
+        frozenset({"imports:create", "imports:upload"}),
+    )
+    storage = InMemoryObjectStorage()
+
+    with pytest.raises(ForbiddenError):
+        await FileService(db_session, storage).start_upload(
+            actor,
+            UploadStart(
+                project_id=project.id,
+                filename="k3.json",
+                size_bytes=1,
+                sha256="0" * 64,
+                category="kimi-imports",
+                file_date="2026-08-09",
+                content_type="application/json",
+            ),
+            "generic-device-denied",
+        )
+
+    assert storage.create_calls == 0 and storage.active == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("actor_case", ["valid", "kind", "role", "project", "scope"])
+async def test_import_start_upload_requires_exact_import_create_actor(
+    db_session, active_owner, actor_case: str
+) -> None:
+    """Only a roleless device with this project and imports:create may use the narrow entry."""
+    from superboss.core.errors import ForbiddenError
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileService
+
+    project = Project(name=f"Import upload actor {actor_case}")
+    db_session.add(project)
+    await db_session.flush()
+    subject_id = uuid4()
+    actor = Actor(
+        "device",
+        subject_id,
+        None,
+        frozenset({project.id}),
+        frozenset({"imports:create", "imports:upload"}),
+    )
+    if actor_case == "kind":
+        actor = Actor("user", subject_id, None, actor.project_ids, actor.scopes)
+    elif actor_case == "role":
+        actor = Actor("device", subject_id, Role.OWNER, actor.project_ids, actor.scopes)
+    elif actor_case == "project":
+        actor = Actor("device", subject_id, None, frozenset(), actor.scopes)
+    elif actor_case == "scope":
+        actor = Actor(
+            "device",
+            subject_id,
+            None,
+            actor.project_ids,
+            frozenset({"imports:upload"}),
+        )
+    command = UploadStart(
+        project_id=project.id,
+        filename="k3.json",
+        size_bytes=1,
+        sha256="0" * 64,
+        category="kimi-imports",
+        file_date="2026-08-09",
+        content_type="application/json",
+    )
+    storage = InMemoryObjectStorage()
+    service = FileService(db_session, storage)
+
+    if actor_case == "valid":
+        upload = await service.start_import_upload(actor, command, "import-device-allowed")
+        assert upload.uploader_kind == "device" and upload.uploader_id == subject_id
+        assert storage.create_calls == 1 and len(storage.active) == 1
+    else:
+        with pytest.raises(ForbiddenError):
+            await service.start_import_upload(actor, command, f"import-device-{actor_case}")
+        assert storage.create_calls == 0 and storage.active == {}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "change",
     [
