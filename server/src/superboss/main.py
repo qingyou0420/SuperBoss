@@ -55,6 +55,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response.headers["X-Request-ID"] = request.state.request_id
         return response
 
+    def is_authenticated_write_path(path: str) -> bool:
+        return path == "/api/v1/projects" or path.startswith("/api/v1/projects/") or path == "/api/v1/files" or path.startswith("/api/v1/files/")
+
     @app.exception_handler(DomainError)
     async def handle_domain_error(request: Request, error: DomainError) -> JSONResponse:
         return error_response(request, error.code, error.message, error.status_code)
@@ -104,7 +107,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         request, "AUTHENTICATION_REQUIRED", "Authentication required", 401
                     )
                 return finalize_response(request, await call_next(request))
-            if not has_browser_credentials and request.url.path.startswith("/api/v1/projects"):
+            if not has_browser_credentials and is_authenticated_write_path(request.url.path):
                 return finalize_response(request, await call_next(request))
             csrf_cookie = request.cookies.get("XSRF-TOKEN")
             csrf_header = request.headers.get("X-CSRF-Token")

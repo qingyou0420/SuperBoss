@@ -14,6 +14,7 @@ from testcontainers.community.postgres import PostgresContainer
 
 from superboss.core.config import Settings
 from superboss.modules.audit.models import AuditLog
+from superboss.modules.files.models import File, Upload
 from superboss.modules.auth.models import AuthSession, OAuthState
 from superboss.modules.projects.models import Project, ProjectMember
 from superboss.modules.users.models import Role, User, UserStatus
@@ -51,6 +52,8 @@ async def db_session(postgres_database: str) -> AsyncIterator[AsyncSession]:
     async def clear() -> None:
         async with engine.begin() as connection:
             await connection.execute(delete(AuditLog))
+            await connection.execute(delete(Upload))
+            await connection.execute(delete(File))
             await connection.execute(delete(ProjectMember))
             await connection.execute(delete(Project))
             await connection.execute(delete(OAuthState))

@@ -1,6 +1,39 @@
 """File upload request validation behavior."""
 
 import pytest
+import pytest_asyncio
+from fastapi.testclient import TestClient
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from superboss.core.config import Settings
+from superboss.main import create_app
+from superboss.modules.projects.models import Project
+from tests.files.storage import InMemoryObjectStorage
+
+
+@pytest_asyncio.fixture
+async def file_client(db_session: AsyncSession, test_settings: Settings):
+    app = create_app(test_settings)
+    app.state.object_storage = InMemoryObjectStorage()
+    app.state.enqueue_file_scan = lambda _file_id: None
+    with TestClient(app, base_url="https://testserver") as client:
+        yield client, app.state.object_storage
+
+
+def _login(client: TestClient) -> None:
+    started = client.get("/api/v1/auth/wecom/start")
+    assert client.get("/api/v1/auth/wecom/callback", params={"code": "owner-code", "state": started.json()["state"]}).status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_owner_starts_upload_with_injected_storage(file_client, db_session: AsyncSession) -> None:
+    client, storage = file_client
+    project = Project(name="HTTP Files")
+    db_session.add(project)
+    await db_session.commit()
+    _login(client)
+    response = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "happy", "X-Request-ID": "bba39a39-47ba-4ac5-9250-ccdba1d7f25e"})
+    assert response.status_code == 201 and response.headers["X-Request-ID"] == "bba39a39-47ba-4ac5-9250-ccdba1d7f25e"
 from pydantic import ValidationError
 
 
