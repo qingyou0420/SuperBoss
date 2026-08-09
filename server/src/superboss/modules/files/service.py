@@ -190,6 +190,8 @@ class FileService:
         if file is None or file.state != FileState.UPLOADING:
             raise FileUploadNotActiveError()
         require_project_access(actor, file.project_id)
+        if upload.multipart_id is None:
+            raise FileUploadNotActiveError()
         return await self._storage().presign_upload_part(
             file.object_key, upload.multipart_id, part_number, 900
         )
@@ -208,6 +210,8 @@ class FileService:
         if file is None or file.state != FileState.UPLOADING:
             raise FileUploadNotActiveError()
         require_project_access(actor, file.project_id)
+        if upload.multipart_id is None:
+            raise FileUploadNotActiveError()
         if len({p.part_number for p in parts}) != len(parts):
             raise ValueError("duplicate part number")
         try:

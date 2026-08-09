@@ -98,6 +98,61 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
         finally:
             await connection.close()
 
+    legacy_project_id = uuid4()
+    legacy_file_id = uuid4()
+    legacy_upload_id = uuid4()
+
+    async def insert_legacy_upload() -> None:
+        connection = await asyncpg.connect(temporary_url.replace("postgresql+asyncpg", "postgresql"))
+        try:
+            await connection.execute(
+                "INSERT INTO projects (id, name, is_test, status) VALUES ($1, $2, FALSE, 'ACTIVE')",
+                legacy_project_id,
+                f"Lifecycle {legacy_project_id.hex}",
+            )
+            await connection.execute(
+                "INSERT INTO files (id, project_id, filename, category, file_date, object_key, "
+                "size_bytes, sha256, state, uploader_kind, uploader_id, content_type) "
+                "VALUES ($1, $2, 'legacy.pdf', 'docs', '2026-08-09', $3, 1, $4, 'UPLOADING', "
+                "'user', $5, 'application/pdf')",
+                legacy_file_id,
+                legacy_project_id,
+                f"projects/{legacy_project_id}/docs/2026-08-09/{legacy_file_id}/legacy.pdf",
+                "0" * 64,
+                uuid4(),
+            )
+            await connection.execute(
+                "INSERT INTO uploads (id, file_id, project_id, uploader_kind, uploader_id, "
+                "idempotency_key, metadata_fingerprint, multipart_id) "
+                "VALUES ($1, $2, $3, 'user', $4, 'legacy-key', $5, 'legacy-multipart')",
+                legacy_upload_id,
+                legacy_file_id,
+                legacy_project_id,
+                uuid4(),
+                "0" * 64,
+            )
+        finally:
+            await connection.close()
+
+    async def lifecycle_backfill() -> tuple[str, str, str, str, int]:
+        connection = await asyncpg.connect(temporary_url.replace("postgresql+asyncpg", "postgresql"))
+        try:
+            row = await connection.fetchrow(
+                "SELECT provision_state, completion_state, object_key, multipart_id, declared_size_bytes "
+                "FROM file_upload_lifecycle WHERE upload_id = $1",
+                legacy_upload_id,
+            )
+            assert row is not None
+            return (
+                row["provision_state"],
+                row["completion_state"],
+                row["object_key"],
+                row["multipart_id"],
+                row["declared_size_bytes"],
+            )
+        finally:
+            await connection.close()
+
     asyncio.run(create_database())
     environment = os.environ.copy()
     environment["SUPERBOSS_DATABASE_URL"] = temporary_url
@@ -110,6 +165,13 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
         )
         baseline = asyncio.run(catalog())
         assert "files" not in baseline[0] and "uploads" not in baseline[0]
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "0005_file_lifecycle"],
+            cwd=SERVER_ROOT,
+            env=environment,
+            check=True,
+        )
+        asyncio.run(insert_legacy_upload())
 
         subprocess.run(
             [sys.executable, "-m", "alembic", "upgrade", "head"],
@@ -118,8 +180,8 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
             check=True,
         )
         tables, constraints, indexes = asyncio.run(catalog())
-        assert asyncio.run(revision()) == "0005_file_lifecycle"
-        assert "files" in tables and "uploads" in tables
+        assert asyncio.run(revision()) == "0006_file_lifecycle_recovery"
+        assert {"files", "uploads", "file_upload_lifecycle", "file_lifecycle_outbox", "file_storage_cleanup"} <= set(tables)
         assert asyncio.run(table_columns("files")) == [
             "id", "project_id", "filename", "category", "file_date", "object_key", "size_bytes",
             "sha256", "state", "uploader_kind", "uploader_id", "content_type", "scan_result",
@@ -129,6 +191,21 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
             "id", "file_id", "project_id", "uploader_kind", "uploader_id", "idempotency_key",
             "metadata_fingerprint", "multipart_id", "created_at",
         ]
+        assert asyncio.run(table_columns("file_upload_lifecycle")) == [
+            "upload_id", "file_id", "project_id", "object_key", "multipart_id", "content_type",
+            "declared_size_bytes", "provision_state", "completion_state", "parts_digest",
+            "completion_event_key", "created_at", "updated_at",
+        ]
+        assert asyncio.run(table_columns("file_lifecycle_outbox")) == [
+            "id", "kind", "dedupe_key", "file_id", "project_id", "state", "attempt_count",
+            "next_attempt_at", "locked_at", "last_error_code", "created_at", "updated_at",
+        ]
+        assert asyncio.run(table_columns("file_storage_cleanup")) == [
+            "id", "operation", "dedupe_key", "object_key", "multipart_id", "lifecycle_id",
+            "state", "attempt_count", "next_attempt_at", "locked_at", "last_error_code",
+            "created_at", "updated_at",
+        ]
+        assert "event_key" in asyncio.run(table_columns("audit_logs"))
 
         definitions = {(table, name): definition for table, name, _kind, definition in constraints}
         assert definitions[("files", "files_project_id_fkey")] == "FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE"
@@ -143,19 +220,42 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
         }
         assert {name for (table, name) in definitions if table == "uploads"} >= {
             "ck_uploads_uploader_kind", "ck_uploads_idempotency_key", "ck_uploads_fingerprint",
-            "ck_uploads_multipart_id_not_empty", "uq_upload_idempotency",
+            "ck_uploads_multipart_id_empty_or_nonempty", "uq_upload_idempotency",
+        }
+        assert {name for (table, name) in definitions if table == "file_upload_lifecycle"} >= {
+            "pk_file_upload_lifecycle", "ck_file_upload_lifecycle_provision_state",
+            "ck_file_upload_lifecycle_completion_state", "ck_file_upload_lifecycle_size",
+            "ck_file_upload_lifecycle_object_key", "ck_file_upload_lifecycle_content_type",
+            "ck_file_upload_lifecycle_multipart_id", "ck_file_upload_lifecycle_parts_digest",
+        }
+        assert {name for (table, name) in definitions if table == "file_lifecycle_outbox"} >= {
+            "pk_file_lifecycle_outbox", "uq_file_lifecycle_outbox_kind_dedupe",
+            "ck_file_lifecycle_outbox_kind", "ck_file_lifecycle_outbox_state",
+            "ck_file_lifecycle_outbox_attempt_count",
+        }
+        assert {name for (table, name) in definitions if table == "file_storage_cleanup"} >= {
+            "pk_file_storage_cleanup", "uq_file_storage_cleanup_operation_dedupe",
+            "ck_file_storage_cleanup_operation", "ck_file_storage_cleanup_state",
+            "ck_file_storage_cleanup_attempt_count", "ck_file_storage_cleanup_dedupe_key",
         }
         assert "UPLOADING" in definitions[("files", "ck_files_state")] and "FAILED" in definitions[("files", "ck_files_state")]
         size_constraint = definitions[("files", "ck_files_size")]
         assert "size_bytes >= 1" in size_constraint and "size_bytes <= 104857600" in size_constraint
         assert "^[0-9a-f]{64}$" in definitions[("files", "ck_files_sha256")]
-        multipart_constraint = definitions[("uploads", "ck_uploads_multipart_id_not_empty")]
-        assert "char_length" in multipart_constraint and "multipart_id" in multipart_constraint and "> 0" in multipart_constraint
+        multipart_constraint = definitions[("uploads", "ck_uploads_multipart_id_empty_or_nonempty")]
+        assert "multipart_id" in multipart_constraint and "char_length" in multipart_constraint
+        assert asyncio.run(lifecycle_backfill()) == (
+            "READY", "NONE", f"projects/{legacy_project_id}/docs/2026-08-09/{legacy_file_id}/legacy.pdf",
+            "legacy-multipart", 1,
+        )
         normalized_indexes = "\n".join(index_definition.replace(" ", "") for _table, index_definition in indexes)
         assert "UNIQUEINDEXfiles_object_key_keyONpublic.filesUSINGbtree(object_key)" in normalized_indexes
         assert "UNIQUEINDEXuq_files_id_projectONpublic.filesUSINGbtree(id,project_id)" in normalized_indexes
         assert "UNIQUEINDEXuploads_file_id_keyONpublic.uploadsUSINGbtree(file_id)" in normalized_indexes
         assert "UNIQUE(project_id,uploader_kind,uploader_id,idempotency_key)" in definitions[("uploads", "uq_upload_idempotency")].replace(" ", "")
+        assert "UNIQUEINDEXuq_audit_logs_event_keyONpublic.audit_logsUSINGbtree(event_key)WHERE(event_keyISNOTNULL)" in normalized_indexes
+        assert "INDEXix_file_lifecycle_outbox_pendingONpublic.file_lifecycle_outboxUSINGbtree(state,next_attempt_at)" in normalized_indexes
+        assert "INDEXix_file_storage_cleanup_pendingONpublic.file_storage_cleanupUSINGbtree(state,next_attempt_at)" in normalized_indexes
 
         subprocess.run(
             [sys.executable, "-m", "alembic", "downgrade", "0003_unique_project_name"],
