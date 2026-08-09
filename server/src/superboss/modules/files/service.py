@@ -152,7 +152,7 @@ class FileService:
             raise NotFoundError()
         require_project_access(actor, file.project_id)
         await self.ensure_downloadable(file)
-        return await self._storage().presign_get(file.object_key, 300)
+        return await self._storage().presign_get(file.object_key, 60)
 
     async def presign_part(self, actor: Actor, upload_id: UUID, part_number: int) -> str:
         if not 1 <= part_number <= 10000:

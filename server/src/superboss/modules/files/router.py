@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from superboss.core.actors import Actor, get_actor
 from superboss.modules.audit.schemas import AuditEventInput
 from superboss.modules.audit.service import AuditService
+from superboss.modules.files.models import File
 from superboss.modules.files.schemas import UploadComplete, UploadStart
 from superboss.modules.files.service import FileService
 from superboss.modules.files.storage import CompletedPart
@@ -86,6 +87,24 @@ async def part(
 
 @router.get("/{file_id}/download")
 async def download(
-    file_id: UUID, actor: Actor = Depends(get_actor), service: FileService = Depends(get_service)
+    request: Request,
+    file_id: UUID,
+    actor: Actor = Depends(get_actor),
+    service: FileService = Depends(get_service),
 ) -> dict[str, str]:
-    return {"url": await service.presign_download(actor, file_id)}
+    url = await service.presign_download(actor, file_id)
+    file = await service.session.get(File, file_id)
+    assert file is not None
+    await AuditService(request.app.state.session_factory).record(
+        AuditEventInput(
+            actor=actor,
+            action="file.download",
+            object_type="file",
+            object_id=file.id,
+            project_id=file.project_id,
+            outcome="SUCCESS",
+            request_id=UUID(request.state.request_id),
+            metadata={"state": file.state.value},
+        )
+    )
+    return {"url": url}
