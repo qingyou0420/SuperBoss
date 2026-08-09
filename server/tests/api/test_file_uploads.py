@@ -266,7 +266,7 @@ def test_owner_part_requires_valid_csrf(file_client, csrf: str | None) -> None:
 @pytest.mark.asyncio
 async def test_complete_dispatches_after_quarantine_commit(file_client, db_session: AsyncSession) -> None:
     from uuid import UUID
-    from sqlalchemy import select
+
     from superboss.modules.files.models import File, Upload
     client, storage = file_client; app = client.app; project = Project(name="Complete dispatch"); db_session.add(project); await db_session.commit(); _login(client)
     observed: list[tuple[UUID, str]] = []
