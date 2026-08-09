@@ -151,6 +151,7 @@ def test_start_rejects_unsafe_category(file_client, category: str) -> None:
 @pytest.mark.parametrize("key", ["", "x" * 256, "x\x7f"])
 async def test_start_rejects_invalid_idempotency_key(file_client, db_session: AsyncSession, key: str) -> None:
     from sqlalchemy import func, select
+
     from superboss.modules.files.models import File, Upload
     client, storage = file_client; _login(client)
     response = client.post("/api/v1/files/uploads", json={"project_id": "00000000-0000-0000-0000-000000000001", "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": key})
