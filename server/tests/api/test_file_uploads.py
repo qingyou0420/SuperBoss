@@ -715,3 +715,54 @@ async def test_missing_file_download_is_denied_with_file_not_found_code(
     assert str(event.request_id) == request_id
     assert "url" not in event.metadata_json and "object_key" not in event.metadata_json
     assert "memory://" not in str(event.metadata_json)
+
+
+@pytest.mark.asyncio
+async def test_assigned_staff_downloads_clean_file(file_client, db_session: AsyncSession) -> None:
+    from datetime import date
+
+    from sqlalchemy import select
+
+    from superboss.modules.audit.models import AuditLog
+    from superboss.modules.files.models import File, FileState
+
+    client, storage = file_client
+    project = Project(name="Download assigned staff")
+    staff = User(wecom_userid="staff-1", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
+    db_session.add_all([project, staff])
+    await db_session.flush()
+    db_session.add(ProjectMember(project_id=project.id, user_id=staff.id))
+    file = File(
+        project_id=project.id,
+        filename="x.pdf",
+        category="资料",
+        file_date=date(2026, 8, 9),
+        object_key=f"projects/{project.id}/资料/2026-08-09/clean/x.pdf",
+        size_bytes=1,
+        sha256="0" * 64,
+        state=FileState.CLEAN,
+        uploader_id=staff.id,
+        uploader_kind="user",
+        content_type="application/pdf",
+    )
+    db_session.add(file)
+    await db_session.commit()
+    login = client.get("/api/v1/auth/wecom/start")
+    assert client.get("/api/v1/auth/wecom/callback", params={"code": "staff-code", "state": login.json()["state"]}).status_code == 204
+
+    request_id = "bba39a39-47ba-4ac5-9250-ccdba1d7f25e"
+    response = client.get(
+        f"/api/v1/files/{file.id}/download",
+        headers={"X-Request-ID": request_id},
+    )
+
+    events = list((await db_session.scalars(select(AuditLog))).all())
+    assert response.status_code == 200 and response.json() == {"url": f"memory://get/{file.object_key}"}
+    assert storage.expiries[-1] == 60 and len(events) == 1
+    event = events[0]
+    assert event.action == "file.download" and event.outcome == "SUCCESS"
+    assert event.actor_kind == "user" and event.actor_id == staff.id
+    assert event.object_type == "file" and event.object_id == file.id and event.project_id == project.id
+    assert str(event.request_id) == request_id and event.metadata_json["actor_role"] == "STAFF"
+    assert "url" not in event.metadata_json and "object_key" not in event.metadata_json
+    assert "memory://" not in str(event.metadata_json) and file.object_key not in str(event.metadata_json)
