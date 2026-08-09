@@ -18,7 +18,7 @@
 - `STAFF` receives no Agent, finance, revenue, account-management, or Kimi-device APIs.
 - The OWNER's STAFF acceptance account uses a distinct WeCom userid and no testing bypass.
 - Test projects set `is_test=true`; production reports must exclude them by default and by server-side policy.
-- Kimi device credentials have only `imports:create`, `imports:upload`, and `imports:read-own` scopes.
+- Kimi device credentials have only `imports:create`, `imports:upload`, `imports:submit`, and `imports:read-own` scopes.
 - Browser and device credentials are stored as Secure, HttpOnly cookies or Windows Credential Manager entries; never use browser local storage or checked-in files for secrets.
 - Browser state-changing requests use a non-secret `XSRF-TOKEN` cookie plus matching `X-CSRF-Token` header; the authentication cookies remain HttpOnly.
 - All timestamps are stored in UTC and rendered in `Asia/Shanghai`.

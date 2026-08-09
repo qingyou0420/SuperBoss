@@ -27,6 +27,12 @@ _DEVICE_TABLES = {
     "device_project_grants",
     "device_scope_grants",
 }
+_IMPORT_TABLES = {"import_jobs", "import_attachments"}
+_CatalogFingerprint = tuple[
+    tuple[tuple[str, str, str, str, int], ...],
+    tuple[tuple[str, str, str, str], ...],
+    tuple[tuple[str, str, str], ...],
+]
 
 
 def _database_url(database_url: str, database_name: str) -> str:
@@ -34,18 +40,16 @@ def _database_url(database_url: str, database_name: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, f"/{database_name}", "", ""))
 
 
-async def _device_catalog(
+async def _table_catalog(
     connection: asyncpg.Connection,
-) -> tuple[
-    tuple[tuple[str, str, str, str, int], ...],
-    tuple[tuple[str, str, str, str], ...],
-    tuple[tuple[str, str, str], ...],
-]:
+    table_names: set[str],
+) -> _CatalogFingerprint:
     columns = await connection.fetch(
         "SELECT table_name, column_name, data_type, is_nullable, ordinal_position "
         "FROM information_schema.columns "
-        "WHERE table_schema = 'public' AND table_name LIKE 'device_%' "
-        "ORDER BY table_name, ordinal_position"
+        "WHERE table_schema = 'public' AND table_name = ANY($1::text[]) "
+        "ORDER BY table_name, ordinal_position",
+        sorted(table_names),
     )
     constraints = await connection.fetch(
         "SELECT relation.relname, constraint_.conname, constraint_.contype, "
@@ -53,13 +57,15 @@ async def _device_catalog(
         "FROM pg_constraint AS constraint_ "
         "JOIN pg_class AS relation ON relation.oid = constraint_.conrelid "
         "JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace "
-        "WHERE namespace.nspname = 'public' AND relation.relname LIKE 'device_%' "
-        "ORDER BY relation.relname, constraint_.conname"
+        "WHERE namespace.nspname = 'public' AND relation.relname = ANY($1::text[]) "
+        "ORDER BY relation.relname, constraint_.conname",
+        sorted(table_names),
     )
     indexes = await connection.fetch(
         "SELECT tablename, indexname, indexdef FROM pg_indexes "
-        "WHERE schemaname = 'public' AND tablename LIKE 'device_%' "
-        "ORDER BY tablename, indexname"
+        "WHERE schemaname = 'public' AND tablename = ANY($1::text[]) "
+        "ORDER BY tablename, indexname",
+        sorted(table_names),
     )
     return (
         tuple(
@@ -81,6 +87,18 @@ async def _device_catalog(
             for row in indexes
         ),
     )
+
+
+async def _device_catalog(
+    connection: asyncpg.Connection,
+) -> _CatalogFingerprint:
+    return await _table_catalog(connection, _DEVICE_TABLES)
+
+
+async def _import_catalog(
+    connection: asyncpg.Connection,
+) -> _CatalogFingerprint:
+    return await _table_catalog(connection, _IMPORT_TABLES)
 
 
 def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_database: str) -> None:
@@ -248,9 +266,10 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
             check=True,
         )
         tables, constraints, indexes = asyncio.run(catalog())
-        assert asyncio.run(revision()) == "0016_device_connections"
+        assert asyncio.run(revision()) == "0017_import_jobs"
         assert "trg_files_snapshot_storage_cleanup" in asyncio.run(trigger_names())
         assert {"files", "uploads", "file_upload_lifecycle", "file_lifecycle_outbox", "file_storage_cleanup"} <= set(tables)
+        assert _DEVICE_TABLES | _IMPORT_TABLES <= set(tables)
         assert asyncio.run(table_columns("files")) == [
             "id", "project_id", "filename", "category", "file_date", "object_key", "size_bytes",
             "sha256", "state", "uploader_kind", "uploader_id", "content_type", "scan_result",
@@ -420,11 +439,7 @@ def test_downgrade_blocks_live_file_lifecycle_without_data_loss(
         str,
         set[str],
         int,
-        tuple[
-            tuple[tuple[str, str, str, str, int], ...],
-            tuple[tuple[str, str, str, str], ...],
-            tuple[tuple[str, str, str], ...],
-        ],
+        tuple[_CatalogFingerprint, _CatalogFingerprint],
     ]:
         connection = await asyncpg.connect(temporary_url.replace("postgresql+asyncpg", "postgresql"))
         try:
@@ -477,7 +492,10 @@ def test_downgrade_blocks_live_file_lifecycle_without_data_loss(
                     "SELECT (SELECT count(*) FROM files) + (SELECT count(*) FROM uploads)"
                 )
             )
-            return revision, tables, rows, await _device_catalog(connection)
+            return revision, tables, rows, (
+                await _device_catalog(connection),
+                await _import_catalog(connection),
+            )
         finally:
             await connection.close()
 
@@ -485,11 +503,7 @@ def test_downgrade_blocks_live_file_lifecycle_without_data_loss(
         str,
         set[str],
         int,
-        tuple[
-            tuple[tuple[str, str, str, str, int], ...],
-            tuple[tuple[str, str, str, str], ...],
-            tuple[tuple[str, str, str], ...],
-        ],
+        tuple[_CatalogFingerprint, _CatalogFingerprint],
     ]:
         connection = await asyncpg.connect(temporary_url.replace("postgresql+asyncpg", "postgresql"))
         try:
@@ -505,7 +519,10 @@ def test_downgrade_blocks_live_file_lifecycle_without_data_loss(
                     "SELECT (SELECT count(*) FROM files) + (SELECT count(*) FROM uploads)"
                 )
             )
-            return revision, tables, rows, await _device_catalog(connection)
+            return revision, tables, rows, (
+                await _device_catalog(connection),
+                await _import_catalog(connection),
+            )
         finally:
             await connection.close()
 
@@ -520,9 +537,9 @@ def test_downgrade_blocks_live_file_lifecycle_without_data_loss(
             check=True,
         )
         before = asyncio.run(seed())
-        assert before[0] == "0016_device_connections"
-        assert _DEVICE_TABLES <= before[1]
-        assert all(before[3])
+        assert before[0] == "0017_import_jobs"
+        assert _DEVICE_TABLES | _IMPORT_TABLES <= before[1]
+        assert all(before[3][0]) and all(before[3][1])
         downgrade = subprocess.run(
             [sys.executable, "-m", "alembic", "downgrade", "0005_file_lifecycle"],
             cwd=SERVER_ROOT,
@@ -536,8 +553,8 @@ def test_downgrade_blocks_live_file_lifecycle_without_data_loss(
         assert "SUPERBOSS_FILE_LIFECYCLE_DOWNGRADE_BLOCKED" in output
         after = asyncio.run(snapshot())
         assert after == before
-        revision, tables, rows, _device_fingerprint = after
-        assert revision == "0016_device_connections"
+        revision, tables, rows, _late_catalog = after
+        assert revision == "0017_import_jobs"
         assert {
             "file_upload_lifecycle",
             "file_lifecycle_outbox",
@@ -676,11 +693,7 @@ def test_downgrade_guard_covers_each_live_lifecycle_shape(
         set[str],
         set[str],
         int,
-        tuple[
-            tuple[tuple[str, str, str, str, int], ...],
-            tuple[tuple[str, str, str, str], ...],
-            tuple[tuple[str, str, str], ...],
-        ],
+        tuple[_CatalogFingerprint, _CatalogFingerprint],
     ]:
         connection = await asyncpg.connect(temporary_url.replace("postgresql+asyncpg", "postgresql"))
         try:
@@ -703,7 +716,10 @@ def test_downgrade_guard_covers_each_live_lifecycle_shape(
                     "SELECT (SELECT count(*) FROM files) + (SELECT count(*) FROM uploads)"
                 )
             )
-            return revision, tables, columns, rows, await _device_catalog(connection)
+            return revision, tables, columns, rows, (
+                await _device_catalog(connection),
+                await _import_catalog(connection),
+            )
         finally:
             await connection.close()
 
@@ -765,9 +781,9 @@ def test_downgrade_guard_covers_each_live_lifecycle_shape(
             asyncio.run(reset())
             asyncio.run(seed(shape))
             before = asyncio.run(head_snapshot())
-            assert before[0] == "0016_device_connections"
-            assert _DEVICE_TABLES <= before[1]
-            assert all(before[4])
+            assert before[0] == "0017_import_jobs"
+            assert _DEVICE_TABLES | _IMPORT_TABLES <= before[1]
+            assert all(before[4][0]) and all(before[4][1])
             result = downgrade(environment)
             assert result.returncode != 0
             assert "SUPERBOSS_FILE_LIFECYCLE_DOWNGRADE_BLOCKED" in (
@@ -775,8 +791,8 @@ def test_downgrade_guard_covers_each_live_lifecycle_shape(
             )
             after = asyncio.run(head_snapshot())
             assert after == before
-            revision, tables, columns, rows, _device_fingerprint = after
-            assert revision == "0016_device_connections"
+            revision, tables, columns, rows, _late_catalog = after
+            assert revision == "0017_import_jobs"
             assert {
                 "file_upload_lifecycle",
                 "file_lifecycle_outbox",
@@ -797,6 +813,7 @@ def test_downgrade_guard_covers_each_live_lifecycle_shape(
             "file_storage_cleanup",
         } & tables
         assert not _DEVICE_TABLES & tables
+        assert not _IMPORT_TABLES & tables
         assert rows == 2 and nonempty_multipart == 1
     finally:
         asyncio.run(drop_database())
