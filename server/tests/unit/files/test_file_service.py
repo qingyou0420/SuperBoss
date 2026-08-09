@@ -300,3 +300,16 @@ async def test_missing_download_file_fails_closed(db_session, active_owner) -> N
     storage = InMemoryObjectStorage(); actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
     with pytest.raises(NotFoundError): await FileService(db_session, storage).presign_download(actor, uuid4())
     assert storage.expiries == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind,role", [("device", None), ("system", None), ("device", Role.OWNER), ("system", Role.STAFF), ("user", None)])
+async def test_download_rejects_unsupported_actor_shapes(db_session, active_owner, kind, role) -> None:
+    from superboss.core.errors import ForbiddenError
+    from superboss.modules.files.models import File, FileState
+    from superboss.modules.files.service import FileService
+    project = Project(name=f"Actor {kind} {role}"); db_session.add(project); await db_session.flush()
+    file = File(project_id=project.id, filename="x.pdf", category="资料", file_date=date(2026, 8, 9), object_key="projects/actor/key", size_bytes=1, sha256="0" * 64, uploader_id=active_owner.id, uploader_kind="user", content_type="application/pdf", state=FileState.CLEAN)
+    db_session.add(file); await db_session.flush(); storage = InMemoryObjectStorage()
+    with pytest.raises(ForbiddenError): await FileService(db_session, storage).presign_download(Actor(kind, active_owner.id, role, frozenset(), frozenset()), file.id)
+    assert storage.expiries == []
