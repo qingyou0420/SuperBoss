@@ -342,3 +342,38 @@ async def test_concurrent_same_metadata_reuses_winner_and_aborts_loser(db_sessio
     assert first == second and len(storage.active) == 1 and len(storage.aborted) == 1
     assert await db_session.scalar(select(func.count()).select_from(Upload)) == 1
     assert await db_session.scalar(select(func.count()).select_from(File)) == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_different_metadata_conflicts_and_aborts_loser(db_session, active_owner) -> None:
+    import asyncio
+
+    from sqlalchemy import func, select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from superboss.core.errors import ConflictError
+    from superboss.modules.files.models import Upload
+    from superboss.modules.files.schemas import UploadStart
+    from superboss.modules.files.service import FileService
+
+    project = Project(name="Concurrent conflict")
+    db_session.add(project)
+    await db_session.commit()
+    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    first = UploadStart(project_id=project.id, filename="x.pdf", size_bytes=1, sha256="0" * 64, category="资料", file_date="2026-08-09", content_type="application/pdf")
+    second = first.model_copy(update={"content_type": "image/png"})
+    storage = InMemoryObjectStorage(create_barrier=asyncio.Barrier(2))
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    async def create(command: UploadStart):
+        async with factory() as session:
+            try:
+                upload = await FileService(session, storage).start_upload(actor, command, "race-conflict")
+                await session.commit()
+                return upload
+            except ConflictError:
+                return None
+    results = await asyncio.wait_for(asyncio.gather(create(first), create(second)), timeout=10)
+    winner = next(item for item in results if item is not None)
+    assert sum(item is not None for item in results) == 1 and len(storage.active) == 1 and len(storage.aborted) == 1
+    saved = await db_session.get(Upload, winner.id)
+    assert saved is not None and await db_session.scalar(select(func.count()).select_from(Upload)) == 1
