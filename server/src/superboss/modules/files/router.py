@@ -35,7 +35,7 @@ def get_service(request: Request, session: AsyncSession = Depends(get_session)) 
 @router.post("/uploads", status_code=status.HTTP_201_CREATED)
 async def start(
     command: UploadStart,
-    idempotency_key: str = Header(alias="Idempotency-Key", min_length=1, max_length=255),
+    idempotency_key: str = Header(alias="Idempotency-Key", pattern=r"^[!-~]{1,255}$"),
     actor: Actor = Depends(get_actor),
     service: FileService = Depends(get_service),
 ) -> dict[str, str]:
