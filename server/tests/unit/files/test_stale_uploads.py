@@ -48,12 +48,15 @@ async def seed_upload(
 ) -> tuple[UUID, UUID, str]:
     file_id = uuid4()
     upload_id = uuid4()
-    project = Project(name=f"Stale {file_id}")
-    object_key = f"projects/{project.id}/docs/{file_id}/report.pdf"
+    project_id = uuid4()
+    project = Project(id=project_id, name=f"Stale {file_id}")
+    session.add(project)
+    await session.flush()
+    object_key = f"projects/{project_id}/docs/{file_id}/report.pdf"
     created_at = now - age
     file = File(
         id=file_id,
-        project_id=project.id,
+        project_id=project_id,
         filename="report.pdf",
         category="docs",
         file_date=created_at.date(),
@@ -61,7 +64,7 @@ async def seed_upload(
         size_bytes=1,
         sha256="0" * 64,
         state=state,
-        uploader_id=project.id,
+        uploader_id=project_id,
         uploader_kind="system",
         content_type="application/pdf",
         created_at=created_at,
@@ -70,8 +73,8 @@ async def seed_upload(
     upload = Upload(
         id=upload_id,
         file_id=file_id,
-        project_id=project.id,
-        uploader_id=project.id,
+        project_id=project_id,
+        uploader_id=project_id,
         uploader_kind="system",
         metadata_fingerprint="0" * 64,
         idempotency_key=f"stale-{file_id}",
@@ -81,7 +84,7 @@ async def seed_upload(
     lifecycle = FileUploadLifecycle(
         upload_id=upload_id,
         file_id=file_id,
-        project_id=project.id,
+        project_id=project_id,
         object_key=object_key,
         multipart_id=multipart_id,
         content_type="application/pdf",
@@ -91,7 +94,7 @@ async def seed_upload(
         created_at=created_at,
         updated_at=created_at,
     )
-    session.add_all([project, file, upload, lifecycle])
+    session.add_all([file, upload, lifecycle])
     await session.commit()
     return file_id, upload_id, object_key
 

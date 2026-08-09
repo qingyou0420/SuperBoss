@@ -21,6 +21,7 @@ from superboss.core.errors import (
     NotFoundError,
 )
 from superboss.infrastructure.clamav import Scanner, ScanStatus
+from superboss.modules.audit.models import AuditLog
 from superboss.modules.audit.schemas import AuditEventInput
 from superboss.modules.audit.service import AuditService
 from superboss.modules.files.models import (
@@ -656,6 +657,177 @@ class FileService:
             self._storage(),
             self.enqueue_scan,
         ).reconcile_cleanup(limit=100, lifecycle_id=lifecycle_id)
+
+
+class StaleUploadService:
+    """Atomically expire abandoned upload sessions into durable cleanup work."""
+
+    _EXPIRY_AGE = timedelta(hours=24)
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self.session_factory = session_factory
+
+    @staticmethod
+    def _event_key(file_id: UUID) -> UUID:
+        return uuid5(NAMESPACE_URL, f"superboss:file-upload-expired:{file_id}")
+
+    @staticmethod
+    def _audit_matches(audit: AuditLog, file: File, event_key: UUID) -> bool:
+        return (
+            audit.actor_kind == "system"
+            and audit.actor_id is None
+            and audit.action == "file.upload.expire"
+            and audit.object_type == "file"
+            and audit.object_id == file.id
+            and audit.project_id == file.project_id
+            and audit.outcome == "SUCCESS"
+            and audit.request_id == event_key
+            and audit.event_key == event_key
+            and audit.metadata_json
+            == {
+                "actor_role": None,
+                "reason": "UPLOAD_EXPIRED",
+                "state": "FAILED",
+            }
+        )
+
+    async def recover_stale_uploads(
+        self,
+        *,
+        now: datetime | None = None,
+        limit: int = 100,
+    ) -> int:
+        if limit < 1:
+            raise ValueError("stale upload recovery limit must be positive")
+        reference = now or datetime.now(UTC)
+        if reference.tzinfo is None:
+            raise ValueError("stale upload recovery time must be timezone-aware")
+        cutoff = reference - self._EXPIRY_AGE
+        async with self.session_factory() as session:
+            candidate_ids = list(
+                await session.scalars(
+                    select(Upload.file_id)
+                    .join(
+                        File,
+                        and_(
+                            File.id == Upload.file_id,
+                            File.project_id == Upload.project_id,
+                        ),
+                    )
+                    .where(
+                        File.state == FileState.UPLOADING,
+                        Upload.created_at < cutoff,
+                    )
+                    .order_by(Upload.created_at, Upload.id)
+                    .limit(limit)
+                )
+            )
+
+        recovered = 0
+        for file_id in candidate_ids:
+            if await self._recover_one(file_id, cutoff, reference):
+                recovered += 1
+        return recovered
+
+    async def _recover_one(self, file_id: UUID, cutoff: datetime, now: datetime) -> bool:
+        async with self.session_factory() as session, session.begin():
+            file = await session.scalar(
+                select(File)
+                .where(File.id == file_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if file is None or file.state != FileState.UPLOADING:
+                return False
+            upload = await session.scalar(select(Upload).where(Upload.file_id == file.id))
+            if (
+                upload is None
+                or upload.project_id != file.project_id
+                or upload.created_at >= cutoff
+            ):
+                return False
+            lifecycle = await session.scalar(
+                select(FileUploadLifecycle)
+                .where(FileUploadLifecycle.upload_id == upload.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if (
+                lifecycle is None
+                or lifecycle.file_id != file.id
+                or lifecycle.project_id != file.project_id
+                or lifecycle.object_key != file.object_key
+                or lifecycle.completion_state != "NONE"
+            ):
+                return False
+            if (
+                lifecycle.multipart_id is not None
+                and upload.multipart_id is not None
+                and lifecycle.multipart_id != upload.multipart_id
+            ):
+                raise RuntimeError("stale upload storage coordinates conflict")
+            multipart_id = lifecycle.multipart_id or upload.multipart_id
+            if multipart_id is None and lifecycle.provision_state not in {
+                "PROVISIONING",
+                "CANCEL_REQUESTED",
+            }:
+                raise RuntimeError("stale upload storage coordinates conflict")
+
+            event_key = self._event_key(file.id)
+            existing_audit = await session.scalar(
+                select(AuditLog).where(AuditLog.event_key == event_key)
+            )
+            if existing_audit is not None and not self._audit_matches(
+                existing_audit, file, event_key
+            ):
+                raise RuntimeError("stale upload audit conflict")
+
+            operation = "ABORT_MULTIPART" if multipart_id is not None else "DISCOVER_MULTIPART"
+            dedupe_key = hashlib.sha256(
+                f"{operation}\x1f{file.object_key}\x1f{multipart_id or ''}".encode()
+            ).hexdigest()
+            cleanup = await session.scalar(
+                select(FileStorageCleanup).where(
+                    FileStorageCleanup.operation == operation,
+                    FileStorageCleanup.dedupe_key == dedupe_key,
+                )
+            )
+            if cleanup is None:
+                session.add(
+                    FileStorageCleanup(
+                        operation=operation,
+                        dedupe_key=dedupe_key,
+                        object_key=file.object_key,
+                        multipart_id=multipart_id,
+                        lifecycle_id=lifecycle.upload_id,
+                        next_attempt_at=now,
+                    )
+                )
+            if existing_audit is None:
+                session.add(
+                    AuditLog(
+                        actor_kind="system",
+                        actor_id=None,
+                        action="file.upload.expire",
+                        object_type="file",
+                        object_id=file.id,
+                        project_id=file.project_id,
+                        outcome="SUCCESS",
+                        metadata_json={
+                            "actor_role": None,
+                            "reason": "UPLOAD_EXPIRED",
+                            "state": "FAILED",
+                        },
+                        request_id=event_key,
+                        event_key=event_key,
+                    )
+                )
+            file.state = FileState.FAILED
+            file.scan_result = "UPLOAD_EXPIRED"
+            lifecycle.provision_state = "TERMINAL"
+            lifecycle.completion_next_attempt_at = None
+            lifecycle.completion_last_error_code = None
+            return True
 
 
 class FileLifecycleService:
