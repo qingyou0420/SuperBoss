@@ -1,5 +1,6 @@
 """Blocking boto3 boundary behavior for the asynchronous object-storage adapter."""
 
+import asyncio
 import inspect
 import threading
 from dataclasses import dataclass, field
@@ -12,22 +13,104 @@ from superboss.infrastructure.s3 import Boto3ObjectStorage
 from superboss.modules.files.storage import CompletedPart, ObjectMetadata
 
 
-def test_boto3_default_client_uses_bounded_transport_config(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_boto3_default_client_is_lazy_and_uses_bounded_transport_config(
+    monkeypatch,
+) -> None:
     """An ambiguous completion cannot leave a boto call retrying past service recovery bounds."""
     from superboss.infrastructure import s3
 
     captured: dict[str, object] = {}
+    event_loop_thread = threading.get_ident()
+    factory_threads: list[int] = []
+
+    class Client:
+        def delete_object(self, **_kwargs: object) -> None:
+            return None
 
     def client(*_args: object, **kwargs: object) -> object:
         captured.update(kwargs)
-        return object()
+        factory_threads.append(threading.get_ident())
+        return Client()
 
     monkeypatch.setattr(s3.boto3, "client", client)
-    _ = Boto3ObjectStorage(bucket="files-bucket", endpoint_url="http://s3")
+    storage = Boto3ObjectStorage(bucket="files-bucket", endpoint_url="http://s3")
+    assert captured == {}
+
+    await storage.delete_object("objects/one")
+
     config = captured["config"]
+    assert factory_threads != [event_loop_thread]
     assert config.connect_timeout == 5
     assert config.read_timeout == 10
     assert config.retries["max_attempts"] == 2
+
+
+@pytest.mark.asyncio
+async def test_lazy_client_is_created_once_and_preserves_explicit_credentials(
+    monkeypatch,
+) -> None:
+    from superboss.infrastructure import s3
+
+    calls: list[dict[str, object]] = []
+    first_factory_entered = threading.Event()
+    release_factory = threading.Event()
+
+    class Client:
+        def delete_object(self, **_kwargs: object) -> None:
+            return None
+
+    def client(*_args: object, **kwargs: object) -> object:
+        calls.append(kwargs)
+        first_factory_entered.set()
+        assert release_factory.wait(timeout=1)
+        return Client()
+
+    monkeypatch.setattr(s3.boto3, "client", client)
+    storage = Boto3ObjectStorage(
+        bucket="files-bucket",
+        endpoint_url="http://s3",
+        access_key_id="access",
+        secret_access_key="secret",
+    )
+
+    first = asyncio.create_task(storage.delete_object("objects/one"))
+    assert await asyncio.to_thread(first_factory_entered.wait, 1)
+    second = asyncio.create_task(storage.delete_object("objects/two"))
+    await asyncio.sleep(0.05)
+    release_factory.set()
+    await asyncio.gather(first, second)
+
+    assert len(calls) == 1
+    assert calls[0]["aws_access_key_id"] == "access"
+    assert calls[0]["aws_secret_access_key"] == "secret"
+
+
+@pytest.mark.asyncio
+async def test_lazy_client_factory_failure_is_not_cached(monkeypatch) -> None:
+    from superboss.infrastructure import s3
+
+    attempts = 0
+
+    class Client:
+        def delete_object(self, **_kwargs: object) -> None:
+            return None
+
+    def client(*_args: object, **_kwargs: object) -> object:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("credential provider unavailable")
+        return Client()
+
+    monkeypatch.setattr(s3.boto3, "client", client)
+    storage = Boto3ObjectStorage(bucket="files-bucket", endpoint_url="http://s3")
+
+    with pytest.raises(RuntimeError, match="credential provider unavailable"):
+        await storage.delete_object("objects/one")
+    await storage.delete_object("objects/two")
+
+    assert attempts == 2
 
 
 @dataclass
