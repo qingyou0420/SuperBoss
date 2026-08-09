@@ -106,6 +106,14 @@ async def test_revoked_header_only_start_is_unauthenticated(file_client, db_sess
     session.revoked_at = session.created_at; await db_session.commit(); client.cookies.clear()
     response = client.post("/api/v1/files/uploads", json={"project_id": "00000000-0000-0000-0000-000000000001", "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers={"Authorization": f"Bearer {token}", "Idempotency-Key": "revoked"})
     assert response.status_code == 401 and response.json()["error"]["code"] == "AUTHENTICATION_REQUIRED" and storage.active == {}
+
+
+@pytest.mark.parametrize("change", [{"size_bytes": 0}, {"size_bytes": 100 * 1024 * 1024 + 1}, {"sha256": "A" * 64}, {"sha256": "0" * 63}])
+def test_start_rejects_invalid_size_or_sha(file_client, change: dict[str, object]) -> None:
+    client, storage = file_client; _login(client)
+    body = {"project_id": "00000000-0000-0000-0000-000000000001", "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}; body.update(change)
+    response = client.post("/api/v1/files/uploads", json=body, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "validation"})
+    assert response.status_code == 422 and response.json()["error"]["code"] == "VALIDATION_ERROR" and storage.active == {}
 from pydantic import ValidationError
 
 
