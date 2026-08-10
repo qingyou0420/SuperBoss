@@ -55,6 +55,15 @@ def _published_host_ports(service: dict[str, Any]) -> set[int]:
     return ports
 
 
+def _location_body(source: str, selector: str) -> str:
+    match = re.search(
+        rf"(?ms)^\s*location\s+{re.escape(selector)}\s*\{{(?P<body>.*?)^\s*\}}",
+        source,
+    )
+    assert match is not None, f"missing Nginx location {selector}"
+    return match.group("body")
+
+
 def test_production_compose_has_exact_service_boundary_and_only_https_published() -> None:
     services = _compose()["services"]
 
@@ -283,7 +292,7 @@ def test_nginx_hosts_share_tls_allowlist_security_and_proxy_boundaries() -> None
 
     assert "${SUPERBOSS_APP_HOST}" in virtual_hosts
     assert "${SUPERBOSS_OBJECTS_HOST}" in virtual_hosts
-    assert virtual_hosts.count("include /etc/nginx/allowlist.conf;") == 2
+    assert virtual_hosts.count("include /etc/nginx/allowlist.conf;") >= 2
     assert virtual_hosts.count("ssl_protocols TLSv1.2 TLSv1.3;") == 2
     assert virtual_hosts.count("ssl_certificate ") == 2
     assert virtual_hosts.count("ssl_certificate_key ") == 2
@@ -315,19 +324,42 @@ def test_nginx_hosts_share_tls_allowlist_security_and_proxy_boundaries() -> None
     assert "Access-Control-Allow-Headers *" not in virtual_hosts
     assert "Access-Control-Expose-Headers ETag" in virtual_hosts
     assert "Access-Control-Allow-Credentials true" not in virtual_hosts
-    options = re.search(
-        r"if \(\$request_method = OPTIONS\)\s*\{(?P<body>.*?)\}",
-        virtual_hosts,
-        flags=re.DOTALL,
-    )
-    assert options is not None
-    assert "return 204;" in options.group("body")
-    assert "proxy_pass" not in options.group("body")
-    assert "proxy_set_header Authorization" not in options.group("body")
-    assert "proxy_set_header Cookie" not in options.group("body")
-
     assert "deny all;" in allowlist
     assert re.search(r"\b192\.0\.2\.\d+(?:/\d+)?\b", allowlist)
     assert not re.search(r"\b(?:10|127)\.\d+\.\d+\.\d+\b", allowlist)
     assert not re.search(r"\b192\.168\.\d+\.\d+\b", allowlist)
     assert not re.search(r"\b172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+\b", allowlist)
+
+
+def test_object_preflight_reaches_allowlist_access_phase_before_local_response() -> None:
+    virtual_hosts = (ROOT / "ops" / "nginx" / "conf.d" / "superboss.conf").read_text(
+        encoding="utf-8"
+    )
+    object_server = virtual_hosts.split(
+        "server_name ${SUPERBOSS_OBJECTS_HOST};", maxsplit=1
+    )[1]
+
+    assert re.search(
+        r"map\s+\$request_method\s+\$superboss_objects_target\s*\{",
+        virtual_hosts,
+    )
+    assert not re.search(
+        r"if\s*\(\s*\$request_method\s*=\s*OPTIONS\s*\)",
+        object_server,
+    )
+    assert "include /etc/nginx/allowlist.conf;" in object_server.split(
+        "location /", maxsplit=1
+    )[0]
+
+    dispatch = _location_body(object_server, "/")
+    preflight = _location_body(object_server, "@objects_preflight")
+    proxy = _location_body(object_server, "@objects_proxy")
+    for location in (dispatch, preflight, proxy):
+        assert "include /etc/nginx/allowlist.conf;" in location
+    assert "try_files __superboss_route_never_exists__ $superboss_objects_target;" in dispatch
+    assert "proxy_pass" not in dispatch
+    assert "return 204;" in preflight
+    assert "proxy_pass" not in preflight
+    assert "proxy_set_header Authorization" not in preflight
+    assert "proxy_set_header Cookie" not in preflight
+    assert "proxy_pass http://superboss_minio;" in proxy

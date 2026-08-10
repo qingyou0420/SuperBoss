@@ -6,7 +6,7 @@ import socket
 import threading
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from botocore.exceptions import ClientError
@@ -204,7 +204,9 @@ async def test_public_presign_client_factory_failure_is_not_cached(monkeypatch) 
 
 
 @pytest.mark.asyncio
-async def test_real_presigning_uses_the_exact_public_host_without_network(monkeypatch) -> None:
+async def test_real_public_presigning_uses_v4_host_only_signatures_without_network(
+    monkeypatch,
+) -> None:
     attempted: list[object] = []
 
     def deny_connect(sock: socket.socket, address: object) -> None:
@@ -229,6 +231,12 @@ async def test_real_presigning_uses_the_exact_public_host_without_network(monkey
         (urlsplit(url).scheme, urlsplit(url).hostname)
         for url in (upload_url, download_url)
     } == {("https", "objects.nightforest.com")}
+    upload_query = parse_qs(urlsplit(upload_url).query)
+    download_query = parse_qs(urlsplit(download_url).query)
+    for query in (upload_query, download_query):
+        assert query.get("X-Amz-Algorithm") == ["AWS4-HMAC-SHA256"]
+    assert upload_query.get("X-Amz-SignedHeaders") == ["host"]
+    assert "content-type" not in upload_query.get("X-Amz-SignedHeaders", [""])[0]
     assert attempted == []
 
 

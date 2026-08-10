@@ -45,6 +45,7 @@ class Boto3ObjectStorage:
             aws_access_key_id=self._access_key_id or None,
             aws_secret_access_key=self._secret_access_key or None,
             config=Config(
+                signature_version="s3v4",
                 connect_timeout=5,
                 read_timeout=10,
                 retries={"max_attempts": 2},
