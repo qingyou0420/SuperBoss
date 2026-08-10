@@ -16,6 +16,9 @@ import ForbiddenPage from '../pages/ForbiddenPage.vue'
 import HealthPage from '../pages/HealthPage.vue'
 import LoginPage from '../pages/LoginPage.vue'
 import OwnerHomePage from '../pages/owner/OwnerHomePage.vue'
+import OwnerDevicesPage from '../pages/owner/DevicesPage.vue'
+import OwnerDrivePage from '../pages/owner/DrivePage.vue'
+import OwnerImportJobsPage from '../pages/owner/ImportJobsPage.vue'
 import OwnerProjectsPage from '../pages/owner/ProjectsPage.vue'
 
 declare module 'vue-router' {
@@ -28,6 +31,15 @@ declare module 'vue-router' {
 const FALLBACK_OWNER_PATH = '/owner'
 const POST_LOGIN_PATH_KEY = 'superboss.auth.post-login-path'
 let postLoginPathInvalid = false
+const objectOriginEnvironmentValue = (
+    import.meta as ImportMeta & {
+        readonly env?: Readonly<Record<string, unknown>>
+    }
+).env?.VITE_OBJECT_STORAGE_ORIGIN
+const configuredObjectOrigin =
+    typeof objectOriginEnvironmentValue === 'string'
+        ? objectOriginEnvironmentValue
+        : ''
 
 function hasUnsafePathText(value: string): boolean {
     for (let index = 0; index < value.length; index += 1) {
@@ -150,6 +162,24 @@ export function createAppRouter(
                         path: 'projects',
                         name: 'owner-projects',
                         component: OwnerProjectsPage,
+                    },
+                    {
+                        path: 'drive',
+                        name: 'owner-drive',
+                        component: OwnerDrivePage,
+                        props: {
+                            allowedObjectOrigin: configuredObjectOrigin,
+                        },
+                    },
+                    {
+                        path: 'devices',
+                        name: 'owner-devices',
+                        component: OwnerDevicesPage,
+                    },
+                    {
+                        path: 'import-jobs',
+                        name: 'owner-import-jobs',
+                        component: OwnerImportJobsPage,
                     },
                 ],
             },

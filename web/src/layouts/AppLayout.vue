@@ -16,6 +16,12 @@ async function logout(): Promise<void> {
     <div class="app-layout">
         <header class="app-layout__header">
             <router-link to="/owner">SuperBoss</router-link>
+            <nav class="app-layout__navigation" aria-label="OWNER 导航">
+                <router-link to="/owner/projects">项目</router-link>
+                <router-link to="/owner/drive">文件上传</router-link>
+                <router-link to="/owner/devices">设备</router-link>
+                <router-link to="/owner/import-jobs">导入任务</router-link>
+            </nav>
             <div class="app-layout__account">
                 <span>{{ auth.user?.userid }}</span>
                 <el-button text @click="logout">退出登录</el-button>
@@ -48,9 +54,37 @@ async function logout(): Promise<void> {
     align-items: center;
 }
 
+.app-layout__navigation {
+    display: flex;
+    gap: 18px;
+    align-items: center;
+}
+
+.app-layout__navigation a {
+    color: #606266;
+    text-decoration: none;
+}
+
+.app-layout__navigation a.router-link-active {
+    color: #409eff;
+}
+
 .app-layout__content {
     max-width: 1120px;
     padding: 28px;
     margin: 0 auto;
+}
+
+@media (max-width: 760px) {
+    .app-layout__header {
+        flex-wrap: wrap;
+        gap: 12px;
+    }
+
+    .app-layout__navigation {
+        order: 3;
+        width: 100%;
+        overflow-x: auto;
+    }
 }
 </style>
