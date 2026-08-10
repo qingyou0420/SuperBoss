@@ -41,6 +41,14 @@ const project = {
     status: 'ACTIVE' as const,
 }
 
+const projectConflictBody = {
+    error: {
+        code: 'PROJECT_NAME_CONFLICT',
+        message: 'A project with this name already exists',
+        request_id: 'bba39a39-47ba-4ac5-9250-ccdba1d7f25e',
+    },
+}
+
 describe('strict project API contracts', () => {
     test('uses a finite M1 list ceiling', () => {
         expect(MAX_PROJECTS_PER_RESPONSE).toBe(1000)
@@ -152,13 +160,7 @@ describe('strict project API contracts', () => {
     })
 
     test('maps only a strict project error envelope and never renders its server message', () => {
-        const conflict = new HttpClientError(409, {
-            error: {
-                code: 'PROJECT_NAME_CONFLICT',
-                message: 'A project with this name already exists',
-                request_id: 'bba39a39-47ba-4ac5-9250-ccdba1d7f25e',
-            },
-        })
+        const conflict = new HttpClientError(409, projectConflictBody)
         expect(projectErrorMessage(conflict)).toBe('项目名称已存在。')
 
         for (const data of [
@@ -193,4 +195,19 @@ describe('strict project API contracts', () => {
             expect(projectErrorMessage(malformed)).not.toContain('sentinel')
         }
     })
+
+    test.each([
+        { label: 'client error', status: 400 },
+        { label: 'server error', status: 500 },
+        { label: 'missing status', status: undefined },
+    ])(
+        'does not map the exact conflict body with $label to a name conflict',
+        ({ status }) => {
+            const error = new HttpClientError(status, projectConflictBody)
+
+            expect(projectErrorMessage(error)).toBe(
+                '项目操作失败，请稍后重试。',
+            )
+        },
+    )
 })

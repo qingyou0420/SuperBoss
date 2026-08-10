@@ -101,7 +101,11 @@ function validatedCreate(value: unknown): ProjectCreate {
 }
 
 export function projectErrorMessage(error: unknown): string {
-    if (!(error instanceof HttpClientError) || !isRecord(error.data)) {
+    if (
+        !(error instanceof HttpClientError) ||
+        error.status !== 409 ||
+        !isRecord(error.data)
+    ) {
         return '项目操作失败，请稍后重试。'
     }
     const body = error.data

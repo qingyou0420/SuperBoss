@@ -9,6 +9,7 @@ export const MAX_API_RESPONSE_BYTES = 256 * 1024
 const MAX_JSON_DEPTH = 64
 const MAX_JSON_NODES = 20_000
 const REFRESH_PATH = '/auth/refresh'
+const stringifyJson = JSON.stringify.bind(JSON)
 
 type RetriableConfig = InternalAxiosRequestConfig & {
     _superbossAuthRetried?: boolean
@@ -160,6 +161,12 @@ function safeJsonCopy(
                 throw new ApiContractError()
             }
             const result: unknown[] = []
+            Object.defineProperty(result, 'toJSON', {
+                configurable: false,
+                enumerable: false,
+                value: undefined,
+                writable: false,
+            })
             for (let index = 0; index < value.length; index += 1) {
                 const descriptor = descriptors[String(index)]
                 if (!descriptor?.enumerable || !('value' in descriptor)) {
@@ -170,7 +177,7 @@ function safeJsonCopy(
             return Object.freeze(result)
         }
         if (!isPlainObject(value)) throw new ApiContractError()
-        const result: Record<string, unknown> = {}
+        const result = Object.create(null) as Record<string, unknown>
         const descriptors = Object.getOwnPropertyDescriptors(value)
         for (const key of Reflect.ownKeys(descriptors)) {
             if (typeof key !== 'string') throw new ApiContractError()
@@ -211,7 +218,7 @@ const encodeJsonRequest = Object.freeze(
         const safe = copySafeJson(value)
         let data: string
         try {
-            data = JSON.stringify(safe)
+            data = stringifyJson(safe)
         } catch {
             throw new ApiContractError()
         }
@@ -272,7 +279,7 @@ function safeResponseData(data: unknown): unknown {
     const safe = copySafeJson(data)
     let serialized: string
     try {
-        serialized = JSON.stringify(safe)
+        serialized = stringifyJson(safe)
     } catch {
         throw new ApiContractError()
     }

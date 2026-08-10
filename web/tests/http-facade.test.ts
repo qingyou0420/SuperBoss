@@ -6,15 +6,29 @@ import axios, {
     type AxiosResponse,
     type InternalAxiosRequestConfig,
 } from 'axios'
-import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
-import { createHttpClient, responseStatus } from '../src/api/http'
+import {
+    ApiContractError,
+    createHttpClient,
+    responseStatus,
+} from '../src/api/http'
 import { projectErrorMessage } from '../src/api/projects'
 
 const safeProject = {
     name: 'Safe project',
     is_test: true,
 }
+
+const initialObjectToJson = Object.getOwnPropertyDescriptor(
+    Object.prototype,
+    'toJSON',
+)
+const initialArrayToJson = Object.getOwnPropertyDescriptor(
+    Array.prototype,
+    'toJSON',
+)
+const initialJsonStringify = Object.getOwnPropertyDescriptor(JSON, 'stringify')
 
 class BrowserRequest extends Request {
     constructor(input: RequestInfo | URL, init?: RequestInit) {
@@ -59,7 +73,19 @@ beforeEach(() => {
     setCookie('')
 })
 
-describe('narrow browser HTTP facade', () => {
+afterEach(() => {
+    expect(Object.getOwnPropertyDescriptor(Object.prototype, 'toJSON')).toEqual(
+        initialObjectToJson,
+    )
+    expect(Object.getOwnPropertyDescriptor(Array.prototype, 'toJSON')).toEqual(
+        initialArrayToJson,
+    )
+    expect(Object.getOwnPropertyDescriptor(JSON, 'stringify')).toEqual(
+        initialJsonStringify,
+    )
+})
+
+describe.sequential('narrow browser HTTP facade', () => {
     test('is frozen and exposes only get and post rather than the Axios execution surface', () => {
         const client = createHttpClient({
             adapter: async (config) => response(config, 200, {}),
@@ -413,5 +439,228 @@ describe('narrow browser HTTP facade', () => {
             /^application\/json/,
         )
         await expect(request.clone().json()).resolves.toEqual(safeProject)
+    })
+
+    const prototypeScenarios = [
+        {
+            label: 'Object.prototype',
+            prototype: Object.prototype,
+            requestData: { name: 'Safe project', is_test: true },
+            responseData: { ok: true },
+            replacement: { objectPrototypeTampered: true },
+        },
+        {
+            label: 'Array.prototype',
+            prototype: Array.prototype,
+            requestData: {
+                name: 'Safe project',
+                tags: ['proposal', 'reviewed'],
+            },
+            responseData: { items: ['proposal', 'reviewed'] },
+            replacement: ['array-prototype-tampered'],
+        },
+    ] as const
+    const prototypeTimings = [
+        'before client creation',
+        'after client creation',
+    ] as const
+    const prototypeFlows = [
+        'request',
+        'success response',
+        'error response',
+    ] as const
+    const inheritedToJsonCases = prototypeScenarios.flatMap((scenario) =>
+        prototypeTimings.flatMap((timing) =>
+            prototypeFlows.map((flow) => ({ ...scenario, timing, flow })),
+        ),
+    )
+
+    test.each(inheritedToJsonCases)(
+        'does not execute the $label hook installed $timing on the $flow path',
+        async ({
+            flow,
+            prototype,
+            replacement,
+            requestData,
+            responseData,
+            timing,
+        }) => {
+            const originalDescriptor = Object.getOwnPropertyDescriptor(
+                prototype,
+                'toJSON',
+            )
+            const hostileToJson = vi.fn(() => replacement)
+            const install = (): void => {
+                Object.defineProperty(prototype, 'toJSON', {
+                    configurable: true,
+                    enumerable: false,
+                    value: hostileToJson,
+                    writable: true,
+                })
+            }
+            let seenBody: unknown
+            const adapter: AxiosAdapter = async (config) => {
+                if (flow === 'request') {
+                    seenBody = config.data
+                    return response(config, 204, null)
+                }
+                if (flow === 'success response') {
+                    return response(config, 200, responseData)
+                }
+                const rejected = response(config, 500, responseData)
+                throw new AxiosError(
+                    'unsafe provider detail',
+                    'ERR_BAD_RESPONSE',
+                    config,
+                    undefined,
+                    rejected,
+                )
+            }
+
+            if (timing === 'before client creation') install()
+            const client = createHttpClient({ adapter })
+            if (timing === 'after client creation') install()
+
+            let result: unknown
+            let caught: unknown
+            try {
+                if (flow === 'request') {
+                    result = await client.post('/projects', requestData)
+                } else {
+                    try {
+                        result = await client.get('/projects')
+                    } catch (error) {
+                        caught = error
+                    }
+                }
+            } finally {
+                if (originalDescriptor) {
+                    Object.defineProperty(
+                        prototype,
+                        'toJSON',
+                        originalDescriptor,
+                    )
+                } else {
+                    delete (prototype as { toJSON?: unknown }).toJSON
+                }
+            }
+
+            if (flow === 'request') {
+                expect(JSON.parse(String(seenBody))).toEqual(requestData)
+                expect(result).toEqual({ status: 204, data: null })
+            } else if (flow === 'success response') {
+                expect(result).toEqual({ status: 200, data: responseData })
+                expect(caught).toBeUndefined()
+            } else {
+                expect(responseStatus(caught)).toBe(500)
+                expect(caught).toMatchObject({ data: responseData })
+            }
+            expect(hostileToJson).not.toHaveBeenCalled()
+        },
+    )
+
+    test('does not consult a globally replaced JSON.stringify after the module and client are loaded', async () => {
+        let seenBody: unknown
+        const client = createHttpClient({
+            adapter: async (config) => {
+                seenBody = config.data
+                return response(config, 204, null)
+            },
+        })
+        const originalDescriptor = Object.getOwnPropertyDescriptor(
+            JSON,
+            'stringify',
+        )
+        const hostileStringify = vi.fn(() => '{"tampered":true}')
+
+        try {
+            Object.defineProperty(JSON, 'stringify', {
+                configurable: true,
+                enumerable: false,
+                value: hostileStringify,
+                writable: true,
+            })
+            await client.post('/projects', safeProject)
+        } finally {
+            if (originalDescriptor) {
+                Object.defineProperty(JSON, 'stringify', originalDescriptor)
+            }
+        }
+
+        expect(hostileStringify).not.toHaveBeenCalled()
+        expect(JSON.parse(String(seenBody))).toEqual(safeProject)
+    })
+
+    test.each([
+        {
+            label: 'an own toJSON',
+            make: (hook: () => unknown) => ({
+                name: 'Safe project',
+                is_test: true,
+                toJSON: hook,
+            }),
+        },
+        {
+            label: 'an inherited toJSON',
+            make: (hook: () => unknown) =>
+                Object.assign(Object.create({ toJSON: hook }), safeProject),
+        },
+        {
+            label: 'an own getter',
+            make: (hook: () => unknown) => {
+                const value = { is_test: true } as Record<string, unknown>
+                Object.defineProperty(value, 'name', {
+                    enumerable: true,
+                    get: hook,
+                })
+                return value
+            },
+        },
+        {
+            label: 'a symbol key',
+            make: (hook: () => unknown) => ({
+                ...safeProject,
+                [Symbol('unsafe')]: hook,
+            }),
+        },
+        {
+            label: 'a custom prototype',
+            make: () =>
+                Object.assign(Object.create({ inherited: true }), safeProject),
+        },
+    ])(
+        'rejects request data with $label before the adapter',
+        async ({ make }) => {
+            const hostile = vi.fn(() => ({ tampered: true }))
+            const adapter = vi.fn(async (config: InternalAxiosRequestConfig) =>
+                response(config, 204, null),
+            )
+            const client = createHttpClient({ adapter })
+
+            await expect(
+                client.post('/projects', make(hostile)),
+            ).rejects.toBeInstanceOf(ApiContractError)
+
+            expect(hostile).not.toHaveBeenCalled()
+            expect(adapter).not.toHaveBeenCalled()
+        },
+    )
+
+    test('accepts an owned null-prototype JSON object without changing its body', async () => {
+        let seenBody: unknown
+        const value = Object.assign(Object.create(null), safeProject) as Record<
+            string,
+            unknown
+        >
+        const client = createHttpClient({
+            adapter: async (config) => {
+                seenBody = config.data
+                return response(config, 204, null)
+            },
+        })
+
+        await client.post('/projects', value)
+
+        expect(JSON.parse(String(seenBody))).toEqual(safeProject)
     })
 })
