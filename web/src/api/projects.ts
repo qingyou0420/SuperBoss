@@ -129,11 +129,13 @@ export function createProjectsApi(client: AxiosInstance) {
     return {
         async list(): Promise<Project[]> {
             const response = await client.get('/projects')
+            if (response.status !== 200) throw new ProjectContractError()
             return parseProjectList(response.data)
         },
         async create(command: ProjectCreate): Promise<Project> {
             const canonical = validatedCreate(command)
             const response = await client.post('/projects', canonical)
+            if (response.status !== 201) throw new ProjectContractError()
             return parseProject(response.data)
         },
     }

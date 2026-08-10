@@ -172,6 +172,7 @@ export function createAuthApi(client: AxiosInstance) {
     return {
         async startWeCom(): Promise<AuthStart> {
             const response = await client.get('/auth/wecom/start')
+            if (response.status !== 200) throw new AuthContractError()
             return parseStart(response.data)
         },
         async completeWeCom(
@@ -183,16 +184,23 @@ export function createAuthApi(client: AxiosInstance) {
             ) {
                 throw new AuthContractError()
             }
-            await client.get('/auth/wecom/callback', {
+            const response = await client.get('/auth/wecom/callback', {
                 params: { code: callback.code, state: callback.state },
             })
+            if (response.status !== 204 || response.data !== null) {
+                throw new AuthContractError()
+            }
         },
         async me(): Promise<AuthUser> {
             const response = await client.get('/auth/me')
+            if (response.status !== 200) throw new AuthContractError()
             return parseUser(response.data)
         },
         async logout(): Promise<void> {
-            await client.post('/auth/logout')
+            const response = await client.post('/auth/logout')
+            if (response.status !== 204 || response.data !== null) {
+                throw new AuthContractError()
+            }
         },
     }
 }

@@ -18,6 +18,7 @@ type RetriableConfig = InternalAxiosRequestConfig & {
 export interface HttpClientOptions {
     adapter?: AxiosAdapter
     onAuthenticationLost?: () => void | Promise<void>
+    onSessionRefreshed?: () => void | Promise<void>
 }
 
 export class ApiContractError extends Error {
@@ -89,6 +90,7 @@ export function createHttpClient(
     })
     let refreshPromise: Promise<void> | null = null
     let authenticationLostNotified = false
+    let sessionRefreshHookRunning = false
 
     const notifyAuthenticationLost = async (): Promise<void> => {
         if (authenticationLostNotified) return
@@ -101,7 +103,15 @@ export function createHttpClient(
             throw new ApiContractError('Cross-origin API target rejected')
         }
         const headers = AxiosHeaders.from(config.headers)
+        config.baseURL = '/api/v1'
+        config.withCredentials = true
+        config.xsrfCookieName = ''
+        config.xsrfHeaderName = ''
+        delete config.auth
         config.responseType = 'text'
+        config.transformResponse = [parseBoundedResponse]
+        config.maxBodyLength = MAX_API_RESPONSE_BYTES
+        config.maxContentLength = MAX_API_RESPONSE_BYTES
         headers.delete('Authorization')
         headers.delete('X-CSRF-Token')
         if (UNSAFE_METHODS.has(config.method?.toLowerCase() ?? '')) {
@@ -114,7 +124,19 @@ export function createHttpClient(
 
     const refresh = (): Promise<void> => {
         if (refreshPromise) return refreshPromise
-        const pending = client.post(REFRESH_PATH).then(() => undefined)
+        const pending = (async (): Promise<void> => {
+            const response = await client.post(REFRESH_PATH)
+            if (response.status !== 204 || response.data !== null) {
+                throw new ApiContractError()
+            }
+            sessionRefreshHookRunning = true
+            try {
+                await options.onSessionRefreshed?.()
+                authenticationLostNotified = false
+            } finally {
+                sessionRefreshHookRunning = false
+            }
+        })()
         refreshPromise = pending
         const clear = (): void => {
             if (refreshPromise === pending) refreshPromise = null
@@ -125,10 +147,7 @@ export function createHttpClient(
 
     client.interceptors.response.use(
         (response) => {
-            if (
-                response.config.url === '/auth/me' ||
-                isRefresh(response.config)
-            ) {
+            if (response.config.url === '/auth/me') {
                 authenticationLostNotified = false
             }
             return response
@@ -143,6 +162,10 @@ export function createHttpClient(
             }
             const config = error.config as RetriableConfig
             if (isRefresh(config)) throw error
+            if (sessionRefreshHookRunning && config.url === '/auth/me') {
+                await notifyAuthenticationLost()
+                throw error
+            }
             if (config._superbossAuthRetried) {
                 await notifyAuthenticationLost()
                 throw error
@@ -162,6 +185,7 @@ export function createHttpClient(
 }
 
 let authenticationLostHandler: (() => void | Promise<void>) | undefined
+let sessionRefreshedHandler: (() => void | Promise<void>) | undefined
 
 export function setAuthenticationLostHandler(
     handler: (() => void | Promise<void>) | undefined,
@@ -169,8 +193,15 @@ export function setAuthenticationLostHandler(
     authenticationLostHandler = handler
 }
 
+export function setSessionRefreshedHandler(
+    handler: (() => void | Promise<void>) | undefined,
+): void {
+    sessionRefreshedHandler = handler
+}
+
 export const apiClient = createHttpClient({
     onAuthenticationLost: () => authenticationLostHandler?.(),
+    onSessionRefreshed: () => sessionRefreshedHandler?.(),
 })
 
 export function responseStatus(error: unknown): number | undefined {

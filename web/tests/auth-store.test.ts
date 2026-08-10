@@ -61,6 +61,37 @@ describe('auth store lifecycle', () => {
         expect(store.isBootstrapped).toBe(true)
     })
 
+    test('single-flights a server-authoritative session refresh and replaces the cached role', async () => {
+        mockedAuth.me.mockResolvedValueOnce({
+            userid: 'person-1',
+            role: 'OWNER',
+        })
+        const store = useAuthStore()
+        await store.bootstrap()
+        const refresh = (
+            store as typeof store & { refresh: () => Promise<void> }
+        ).refresh
+
+        expect(refresh).toBeTypeOf('function')
+        let release!: () => void
+        mockedAuth.me.mockImplementationOnce(
+            () =>
+                new Promise(
+                    (resolve) =>
+                        (release = () =>
+                            resolve({ userid: 'person-1', role: 'STAFF' })),
+                ),
+        )
+        const first = refresh.call(store)
+        const second = refresh.call(store)
+        expect(mockedAuth.me).toHaveBeenCalledTimes(2)
+        release()
+        await Promise.all([first, second])
+
+        expect(store.user).toEqual({ userid: 'person-1', role: 'STAFF' })
+        expect(store.isAuthenticated).toBe(true)
+    })
+
     test('treats /me 401 as anonymous and ignores browser token storage', async () => {
         localStorage.setItem('access_token', 'forged-owner')
         sessionStorage.setItem('refresh_token', 'forged-refresh')

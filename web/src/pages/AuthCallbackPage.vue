@@ -3,7 +3,7 @@ import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { authApi, parseOAuthCallback } from '../api/auth'
-import { safePostLoginPath } from '../app/router'
+import { clearPostLoginPath, consumePostLoginPath } from '../app/router'
 import { useAuthStore } from '../stores/auth'
 
 const route = useRoute()
@@ -26,9 +26,11 @@ onMounted(async () => {
     try {
         parsed = parseOAuthCallback(currentSearch())
     } catch {
+        clearPostLoginPath()
         errorMessage.value = '登录回调无效，请重新登录。'
         return
     }
+    const postLoginPath = consumePostLoginPath(parsed.redirect)
     try {
         await authApi.completeWeCom({ code: parsed.code, state: parsed.state })
         await auth.bootstrap(true)
@@ -37,7 +39,7 @@ onMounted(async () => {
             await router.replace('/forbidden')
             return
         }
-        await router.replace(safePostLoginPath(parsed.redirect))
+        await router.replace(postLoginPath)
     } catch {
         errorMessage.value = '登录未完成，请重新登录。'
     }

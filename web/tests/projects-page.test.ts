@@ -71,6 +71,72 @@ describe('OWNER project management page', () => {
         expect(screen.getAllByText('验收测试')).toHaveLength(2)
     })
 
+    test('does not let a stale initial list overwrite a project created while loading', async () => {
+        let releaseList!: () => void
+        mockedProjects.list.mockImplementationOnce(
+            () =>
+                new Promise(
+                    (resolve) => (releaseList = () => resolve([regular])),
+                ),
+        )
+        mockedProjects.create.mockResolvedValue({
+            ...acceptance,
+            name: 'race-created',
+        })
+        renderPage()
+
+        await fireEvent.update(
+            await screen.findByRole('textbox'),
+            'race-created',
+        )
+        await fireEvent.click(screen.getByLabelText('设为验收测试项目'))
+        await fireEvent.click(screen.getByRole('button', { name: '创建项目' }))
+        expect(await screen.findByText('race-created')).toBeInTheDocument()
+
+        releaseList()
+        expect(await screen.findByText('正式项目')).toBeInTheDocument()
+        expect(screen.getByText('race-created')).toBeInTheDocument()
+        expect(screen.getByText('验收测试')).toBeInTheDocument()
+    })
+
+    test('accepts 255 supplementary Unicode code points without a UTF-16 maxlength barrier', async () => {
+        mockedProjects.create.mockResolvedValue({
+            ...acceptance,
+            name: '\u{1f600}'.repeat(255),
+        })
+        renderPage()
+        await screen.findByText('正式项目')
+        const input = screen.getByLabelText('项目名称') as HTMLInputElement
+
+        expect(input.maxLength).toBe(-1)
+        const boundary = '\u{1f600}'.repeat(255)
+        await fireEvent.update(input, boundary)
+        await fireEvent.click(screen.getByRole('button', { name: '创建项目' }))
+
+        await waitFor(() =>
+            expect(mockedProjects.create).toHaveBeenCalledWith({
+                name: boundary,
+                is_test: false,
+            }),
+        )
+    })
+
+    test('rejects 256 Unicode code points locally with a safe length prompt', async () => {
+        mockedProjects.create.mockResolvedValue(acceptance)
+        renderPage()
+        await screen.findByText('正式项目')
+
+        await fireEvent.update(
+            screen.getByLabelText('项目名称'),
+            '\u{1f600}'.repeat(256),
+        )
+        await fireEvent.click(screen.getByRole('button', { name: '创建项目' }))
+
+        expect(mockedProjects.create).not.toHaveBeenCalled()
+        expect(screen.getByRole('alert')).toHaveTextContent(/255/)
+        expect(screen.getByRole('alert')).not.toHaveTextContent(/sentinel/i)
+    })
+
     test('does not submit blank names or duplicate clicks while a create is pending', async () => {
         let release!: () => void
         mockedProjects.create.mockImplementation(

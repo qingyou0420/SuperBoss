@@ -112,6 +112,24 @@ describe('strict project API contracts', () => {
         })
     })
 
+    test.each([
+        { operation: 'list' as const, status: 201 },
+        { operation: 'create' as const, status: 200 },
+        { operation: 'create' as const, status: 202 },
+    ])(
+        'rejects $operation success payloads with status $status',
+        async ({ operation, status }) => {
+            const data = operation === 'list' ? [project] : project
+            const api = createProjectsApi(clientReturning(data, status))
+            const pending =
+                operation === 'list'
+                    ? api.list()
+                    : api.create({ name: project.name, is_test: true })
+
+            await expect(pending).rejects.toBeInstanceOf(ProjectContractError)
+        },
+    )
+
     test('rejects invalid create values locally before any request', async () => {
         let calls = 0
         const adapter: AxiosAdapter = async (config) => {

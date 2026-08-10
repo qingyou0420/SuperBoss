@@ -18,7 +18,10 @@ async function loadProjects(): Promise<void> {
     loading.value = true
     errorMessage.value = ''
     try {
-        projects.value = await projectsApi.list()
+        const loaded = await projectsApi.list()
+        const merged = new Map(loaded.map((project) => [project.id, project]))
+        for (const project of projects.value) merged.set(project.id, project)
+        projects.value = [...merged.values()]
     } catch {
         errorMessage.value = '项目列表暂时无法加载，请稍后重试。'
     } finally {
@@ -34,6 +37,10 @@ async function createProject(): Promise<void> {
     )
     if (!canonicalName) {
         errorMessage.value = '请输入项目名称。'
+        return
+    }
+    if ([...canonicalName].length > 255) {
+        errorMessage.value = '项目名称不能超过 255 个字符。'
         return
     }
     creating.value = true
@@ -66,7 +73,7 @@ onMounted(loadProjects)
         <el-card shadow="never">
             <form class="project-form" @submit.prevent="createProject">
                 <label for="project-name">项目名称</label>
-                <el-input id="project-name" v-model="name" maxlength="255" />
+                <el-input id="project-name" v-model="name" />
                 <el-checkbox v-model="isTest">设为验收测试项目</el-checkbox>
                 <el-button
                     type="primary"

@@ -222,6 +222,34 @@ describe('AppLayout logout handoff', () => {
         )
     })
 
+    test('treats a wrong-2xx logout response as remotely incomplete and shows only the safe warning', async () => {
+        const wrongStatusApi = createAuthApi(
+            createHttpClient({
+                adapter: async (config) =>
+                    ({
+                        config,
+                        data: { detail: 'cookie sentinel still live' },
+                        headers: {},
+                        status: 200,
+                        statusText: '200',
+                    }) as AxiosResponse,
+            }),
+        )
+        vi.spyOn(authApi, 'logout').mockImplementation(() =>
+            wrongStatusApi.logout(),
+        )
+        const { router, store } = await renderAuthenticatedLayout()
+
+        await fireEvent.click(screen.getByRole('button', { name: '退出登录' }))
+
+        expect(
+            await screen.findByText('退出请求未完成，本机已退出。'),
+        ).toBeInTheDocument()
+        expect(router.currentRoute.value.path).toBe('/login')
+        expect(store.user).toBeNull()
+        expect(document.body.textContent).not.toMatch(/sentinel|cookie/i)
+    })
+
     test('does not carry a stale logout warning after successful remote logout', async () => {
         vi.spyOn(authApi, 'logout').mockResolvedValue()
         const { router, store } = await renderAuthenticatedLayout()

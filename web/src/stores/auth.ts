@@ -9,6 +9,7 @@ export const useAuthStore = defineStore('auth', () => {
     const isBootstrapped = ref(false)
     const errorMessage = ref('')
     let bootstrapPromise: Promise<void> | null = null
+    let refreshPromise: Promise<void> | null = null
 
     const isAuthenticated = computed(() => user.value !== null)
 
@@ -43,6 +44,28 @@ export const useAuthStore = defineStore('auth', () => {
         return bootstrapPromise
     }
 
+    const refresh = (): Promise<void> => {
+        if (refreshPromise) return refreshPromise
+        const pending = (async () => {
+            errorMessage.value = ''
+            try {
+                user.value = await authApi.me()
+            } catch (error) {
+                user.value = null
+                if (responseStatus(error) !== 401) {
+                    errorMessage.value = ApiContractError.safeMessage(error)
+                }
+                throw error
+            } finally {
+                isBootstrapped.value = true
+            }
+        })()
+        refreshPromise = pending.finally(() => {
+            refreshPromise = null
+        })
+        return refreshPromise
+    }
+
     const logout = async (): Promise<void> => {
         errorMessage.value = ''
         try {
@@ -62,6 +85,7 @@ export const useAuthStore = defineStore('auth', () => {
         isBootstrapped,
         logout,
         markAuthenticationLost,
+        refresh,
         user,
     }
 })

@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { inject, ref } from 'vue'
+import { routeLocationKey } from 'vue-router'
 
 import { authApi, navigateToAuthorization } from '../api/auth'
+import { clearPostLoginPath, rememberPostLoginPath } from '../app/router'
 import { useAuthStore } from '../stores/auth'
 
 const props = withDefaults(
@@ -16,6 +18,7 @@ const props = withDefaults(
 const pending = ref(false)
 const errorMessage = ref('')
 const auth = useAuthStore()
+const route = inject(routeLocationKey, undefined)
 
 async function login(): Promise<void> {
     if (pending.value) return
@@ -24,8 +27,10 @@ async function login(): Promise<void> {
     auth.clearError()
     try {
         const started = await authApi.startWeCom()
+        if (route) rememberPostLoginPath(route.query.redirect)
         navigateToAuthorization(started.authorization_url, props.navigate)
     } catch {
+        if (route) clearPostLoginPath()
         errorMessage.value = '登录暂时不可用，请稍后重试。'
     } finally {
         pending.value = false

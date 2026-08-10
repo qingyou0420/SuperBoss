@@ -1,4 +1,5 @@
 import {
+    AxiosHeaders,
     AxiosError,
     type AxiosAdapter,
     type AxiosRequestConfig,
@@ -104,6 +105,69 @@ describe('browser HTTP security boundary', () => {
         expect(seen?.responseType).toBe('text')
     })
 
+    test('reasserts every cookie-only same-origin option and strips mixed-case auth headers before the adapter', async () => {
+        setCookie(encodeURIComponent('reviewed csrf'))
+        let seen: InternalAxiosRequestConfig | undefined
+        const adapter: AxiosAdapter = async (config) => {
+            seen = config
+            return response(config, 204, null)
+        }
+        const client = createHttpClient({ adapter })
+
+        await client.post('/auth/logout', null, {
+            auth: { username: 'attacker', password: 'sentinel' },
+            baseURL: 'https://evil.example/api',
+            headers: {
+                aUtHoRiZaTiOn: 'Basic sentinel',
+                'x-CsRf-ToKeN': 'caller-controlled',
+            },
+            withCredentials: false,
+            xsrfCookieName: 'ATTACKER-XSRF',
+            xsrfHeaderName: 'X-Attacker-XSRF',
+        })
+
+        expect(seen?.url).toBe('/auth/logout')
+        expect(seen?.baseURL).toBe('/api/v1')
+        expect(seen?.withCredentials).toBe(true)
+        expect(seen?.xsrfCookieName).toBe('')
+        expect(seen?.xsrfHeaderName).toBe('')
+        expect(seen?.auth).toBeUndefined()
+        const headers = AxiosHeaders.from(seen?.headers)
+        expect(headers.has('Authorization')).toBe(false)
+        expect(headers.get('X-CSRF-Token')).toBe('reviewed csrf')
+        expect(JSON.stringify(seen)).not.toContain('sentinel')
+        expect(JSON.stringify(seen)).not.toContain('evil.example')
+    })
+
+    test('cannot replace the bounded text transform or size options per request', async () => {
+        let seen: InternalAxiosRequestConfig | undefined
+        const oversized = JSON.stringify({
+            pad: 'x'.repeat(MAX_API_RESPONSE_BYTES),
+        })
+        const adapter: AxiosAdapter = async (config) => {
+            seen = config
+            return response(config, 200, oversized, {
+                'content-type': 'application/json',
+            })
+        }
+        const client = createHttpClient({ adapter })
+
+        await expect(
+            client.get('/projects', {
+                maxBodyLength: Number.MAX_SAFE_INTEGER,
+                maxContentLength: Number.MAX_SAFE_INTEGER,
+                responseType: 'json',
+                transformResponse: [
+                    (data: string) => JSON.parse(data) as unknown,
+                ],
+            }),
+        ).rejects.toBeInstanceOf(ApiContractError)
+
+        expect(seen?.responseType).toBe('text')
+        expect(seen?.maxBodyLength).toBe(MAX_API_RESPONSE_BYTES)
+        expect(seen?.maxContentLength).toBe(MAX_API_RESPONSE_BYTES)
+    })
+
     test('rejects absolute and protocol-relative targets before cookies can leave the API boundary', async () => {
         let calls = 0
         const adapter: AxiosAdapter = async (config) => {
@@ -174,6 +238,87 @@ describe('browser HTTP security boundary', () => {
         expect(lost).not.toHaveBeenCalled()
     })
 
+    test('waits for one shared session-refresh hook before releasing concurrent business retries', async () => {
+        const events: string[] = []
+        const attempts = new Map<string, number>()
+        const adapter: AxiosAdapter = async (config) => {
+            const url = String(config.url)
+            if (url === '/auth/refresh') {
+                events.push('http-refresh')
+                return response(config, 204, null)
+            }
+            const count = (attempts.get(url) ?? 0) + 1
+            attempts.set(url, count)
+            if (count === 1) unauthorized(config)
+            events.push(`retry:${url}`)
+            return response(config, 200, { ok: true })
+        }
+        const sessionRefreshed = vi.fn(async () => {
+            events.push('session-role-refresh')
+        })
+        const client = createHttpClient({
+            adapter,
+            onSessionRefreshed: sessionRefreshed,
+        } as Parameters<typeof createHttpClient>[0] & {
+            onSessionRefreshed: () => Promise<void>
+        })
+
+        await Promise.all([
+            client.get('/projects/one'),
+            client.get('/projects/two'),
+        ])
+
+        expect(sessionRefreshed).toHaveBeenCalledTimes(1)
+        expect(events).toEqual([
+            'http-refresh',
+            'session-role-refresh',
+            'retry:/projects/one',
+            'retry:/projects/two',
+        ])
+        expect(attempts).toEqual(
+            new Map([
+                ['/projects/one', 2],
+                ['/projects/two', 2],
+            ]),
+        )
+    })
+
+    test('does not recursively refresh when the post-refresh /me probe is unauthorized', async () => {
+        let businessCalls = 0
+        let refreshCalls = 0
+        let meCalls = 0
+        const lost = vi.fn()
+        const adapter: AxiosAdapter = async (config) => {
+            if (config.url === '/auth/refresh') {
+                refreshCalls += 1
+                return response(config, 204, null)
+            }
+            if (config.url === '/auth/me') {
+                meCalls += 1
+                unauthorized(config)
+            }
+            businessCalls += 1
+            if (businessCalls === 1) unauthorized(config)
+            return response(config, 200, { ok: true })
+        }
+        const client = createHttpClient({
+            adapter,
+            onAuthenticationLost: lost,
+            onSessionRefreshed: () => client.get('/auth/me').then(() => {}),
+        } as Parameters<typeof createHttpClient>[0] & {
+            onSessionRefreshed: () => Promise<void>
+        })
+
+        await expect(client.get('/projects')).rejects.toMatchObject({
+            response: { status: 401 },
+        })
+
+        expect(refreshCalls).toBe(1)
+        expect(meCalls).toBe(1)
+        expect(businessCalls).toBe(1)
+        expect(lost).toHaveBeenCalledTimes(1)
+    })
+
     test('starts a fresh single-flight cycle after a prior refresh has settled', async () => {
         let refreshCalls = 0
         const attempts = new Map<string, number>()
@@ -201,6 +346,40 @@ describe('browser HTTP security boundary', () => {
             ]),
         )
     })
+
+    test.each([
+        { status: 200, data: null, label: 'wrong status' },
+        { status: 202, data: null, label: 'accepted status' },
+        { status: 204, data: { leaked: 'sentinel' }, label: 'non-empty body' },
+    ])(
+        'rejects a refresh $label before retrying the business request',
+        async ({ status, data }) => {
+            let businessCalls = 0
+            let refreshCalls = 0
+            const lost = vi.fn()
+            const adapter: AxiosAdapter = async (config) => {
+                if (config.url === '/auth/refresh') {
+                    refreshCalls += 1
+                    return response(config, status, data)
+                }
+                businessCalls += 1
+                if (businessCalls === 1) unauthorized(config)
+                return response(config, 200, { ok: true })
+            }
+            const client = createHttpClient({
+                adapter,
+                onAuthenticationLost: lost,
+            })
+
+            await expect(client.get('/projects')).rejects.toBeInstanceOf(
+                ApiContractError,
+            )
+
+            expect(refreshCalls).toBe(1)
+            expect(businessCalls).toBe(1)
+            expect(lost).toHaveBeenCalledTimes(1)
+        },
+    )
 
     test('never recursively refreshes refresh itself and clears auth after one failed retry', async () => {
         let refreshCalls = 0

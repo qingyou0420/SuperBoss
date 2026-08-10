@@ -32,6 +32,12 @@ function clientReturning(data: unknown) {
     return createHttpClient({ adapter })
 }
 
+function clientResponding(status: number, data: unknown) {
+    const adapter: AxiosAdapter = async (config) =>
+        response(config, status, data)
+    return createHttpClient({ adapter })
+}
+
 describe('strict authentication API contracts', () => {
     test('accepts the exact /me schema and rejects role aliases, extra keys, controls, and oversized identities', async () => {
         await expect(
@@ -139,5 +145,75 @@ describe('strict authentication API contracts', () => {
         expect(seen?.params).toEqual({ code: 'code_1', state: 'state-1' })
         expect(JSON.stringify(seen)).not.toContain('redirect')
         expect(JSON.stringify(seen)).not.toContain('Authorization')
+    })
+
+    test('accepts exact callback/logout 204 responses only when the body is empty', async () => {
+        await expect(
+            createAuthApi(clientResponding(204, null)).completeWeCom({
+                code: 'code-1',
+                state: 'state-1',
+            }),
+        ).resolves.toBeUndefined()
+        await expect(
+            createAuthApi(clientResponding(204, null)).logout(),
+        ).resolves.toBeUndefined()
+    })
+
+    test.each([
+        {
+            label: 'start wrong status',
+            status: 201,
+            data: {
+                state: 'state-1',
+                authorization_url:
+                    'https://open.weixin.qq.com/connect/oauth2/authorize?state=state-1',
+            },
+            operation: 'start' as const,
+        },
+        {
+            label: 'me wrong status',
+            status: 201,
+            data: { userid: 'owner-1', role: 'OWNER' as const },
+            operation: 'me' as const,
+        },
+        {
+            label: 'callback wrong status',
+            status: 200,
+            data: null,
+            operation: 'callback' as const,
+        },
+        {
+            label: 'callback non-empty body',
+            status: 204,
+            data: { detail: 'sentinel' },
+            operation: 'callback' as const,
+        },
+        {
+            label: 'logout wrong status',
+            status: 200,
+            data: null,
+            operation: 'logout' as const,
+        },
+        {
+            label: 'logout non-empty body',
+            status: 204,
+            data: { detail: 'sentinel' },
+            operation: 'logout' as const,
+        },
+    ])('rejects $label', async ({ status, data, operation }) => {
+        const api = createAuthApi(clientResponding(status, data))
+        const pending =
+            operation === 'start'
+                ? api.startWeCom()
+                : operation === 'me'
+                  ? api.me()
+                  : operation === 'callback'
+                    ? api.completeWeCom({
+                          code: 'code-1',
+                          state: 'state-1',
+                      })
+                    : api.logout()
+
+        await expect(pending).rejects.toBeInstanceOf(AuthContractError)
     })
 })
