@@ -86,20 +86,19 @@ afterEach(() => {
 })
 
 describe.sequential('narrow browser HTTP facade', () => {
-    test('is frozen and exposes only get and post rather than the Axios execution surface', () => {
+    test('is frozen and exposes only delete/get/post rather than the Axios execution surface', () => {
         const client = createHttpClient({
             adapter: async (config) => response(config, 200, {}),
         })
 
         expect(Object.isFrozen(client)).toBe(true)
-        expect(Object.keys(client).sort()).toEqual(['get', 'post'])
+        expect(Object.keys(client).sort()).toEqual(['delete', 'get', 'post'])
         for (const rawSurface of [
             'defaults',
             'interceptors',
             'request',
             'put',
             'patch',
-            'delete',
             'getUri',
         ]) {
             expect(client).not.toHaveProperty(rawSurface)

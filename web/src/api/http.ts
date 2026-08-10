@@ -30,7 +30,12 @@ export interface BrowserGetOptions {
     readonly params?: Readonly<Record<string, string>>
 }
 
+export interface BrowserPostOptions {
+    readonly idempotencyKey?: string
+}
+
 export interface BrowserHttpClient {
+    delete<T = unknown>(url: string): Promise<BrowserHttpResponse<T>>
     get<T = unknown>(
         url: string,
         options?: BrowserGetOptions,
@@ -38,6 +43,7 @@ export interface BrowserHttpClient {
     post<T = unknown>(
         url: string,
         data?: unknown,
+        options?: BrowserPostOptions,
     ): Promise<BrowserHttpResponse<T>>
 }
 
@@ -274,6 +280,31 @@ function copySafeParams(options: unknown): Readonly<Record<string, string>> {
     return Object.freeze(result)
 }
 
+function copyIdempotencyKey(options: unknown): string | undefined {
+    if (options === undefined) return undefined
+    if (typeof options !== 'object' || options === null) {
+        throw new ApiContractError('Invalid idempotency key')
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(
+        options,
+        'idempotencyKey',
+    )
+    if (!descriptor || !('value' in descriptor)) return undefined
+    const value = descriptor.value
+    if (
+        typeof value !== 'string' ||
+        value.length < 1 ||
+        value.length > 255 ||
+        [...value].some((character) => {
+            const code = character.charCodeAt(0)
+            return code < 33 || code > 126
+        })
+    ) {
+        throw new ApiContractError('Invalid idempotency key')
+    }
+    return value
+}
+
 function safeResponseData(data: unknown): unknown {
     if (data === undefined) return undefined
     const safe = copySafeJson(data)
@@ -352,7 +383,11 @@ export function createHttpClient(
         delete config.transport
         headers.delete('Authorization')
         headers.delete('X-CSRF-Token')
-        if (config.method?.toLowerCase() === 'post') {
+        if (
+            ['delete', 'patch', 'post', 'put'].includes(
+                config.method?.toLowerCase() ?? '',
+            )
+        ) {
             const csrf = readCsrfCookie()
             if (csrf) headers.set('X-CSRF-Token', csrf)
         }
@@ -420,10 +455,11 @@ export function createHttpClient(
     )
 
     const execute = async <T>(
-        method: 'get' | 'post',
+        method: 'delete' | 'get' | 'post',
         url: string,
         data?: unknown,
         params?: Readonly<Record<string, string>>,
+        idempotencyKey?: string,
     ): Promise<BrowserHttpResponse<T>> => {
         if (!isSafeRelativeTarget(url)) {
             throw new ApiContractError('Cross-origin API target rejected')
@@ -434,6 +470,7 @@ export function createHttpClient(
             const headers = new AxiosHeaders()
             if (encoded?.contentType)
                 headers.set('Content-Type', encoded.contentType)
+            if (idempotencyKey) headers.set('Idempotency-Key', idempotencyKey)
             const response = await client.request({
                 data: encoded?.data,
                 headers,
@@ -463,10 +500,21 @@ export function createHttpClient(
     }
 
     return Object.freeze({
+        delete: <T = unknown>(url: string) => execute<T>('delete', url),
         get: <T = unknown>(url: string, getOptions?: BrowserGetOptions) =>
             execute<T>('get', url, undefined, copySafeParams(getOptions)),
-        post: <T = unknown>(url: string, data?: unknown) =>
-            execute<T>('post', url, data),
+        post: async <T = unknown>(
+            url: string,
+            data?: unknown,
+            postOptions?: BrowserPostOptions,
+        ) =>
+            await execute<T>(
+                'post',
+                url,
+                data,
+                undefined,
+                copyIdempotencyKey(postOptions),
+            ),
     })
 }
 
