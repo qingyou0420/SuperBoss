@@ -107,8 +107,9 @@ class _PinnedNetworkBackend(httpcore.NetworkBackend):
         last_error: OSError | None = None
         for address in self._addresses:
             family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
-            sock = socket.socket(family, socket.SOCK_STREAM)
+            sock: socket.socket | None = None
             try:
+                sock = socket.socket(family, socket.SOCK_STREAM)
                 remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
                 sock.settimeout(remaining)
                 if local_address is not None:
@@ -132,7 +133,11 @@ class _PinnedNetworkBackend(httpcore.NetworkBackend):
                 return _PinnedSocketStream(sock)
             except OSError as error:
                 last_error = error
-                sock.close()
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
         if isinstance(last_error, TimeoutError):
             raise httpcore.ConnectTimeout from last_error
         raise httpcore.ConnectError from last_error

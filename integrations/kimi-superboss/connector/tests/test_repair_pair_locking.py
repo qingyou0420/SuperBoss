@@ -26,6 +26,8 @@ from conftest import (
 )
 from typer.testing import CliRunner
 
+from superboss_connector.errors import OUTBOX_INVALID, ConnectorError
+
 
 def _assert_state_has_no_secrets(state_dir: Path) -> None:
     secrets = (b"refresh-1", b"new-refresh", b"new-access", b"one-time-pair")
@@ -56,7 +58,11 @@ def _marker_document(
     return markers[0], document
 
 
-def _initial_pair_marker_document(state_dir: Path) -> dict[str, Any]:
+def _initial_pair_marker_document(
+    state_dir: Path,
+    *,
+    old_refresh: str | None = None,
+) -> dict[str, Any]:
     markers = list(state_dir.rglob("pair-completion.marker"))
     assert len(markers) == 1
     document = json.loads(markers[0].read_text(encoding="utf-8"))
@@ -64,8 +70,12 @@ def _initial_pair_marker_document(state_dir: Path) -> dict[str, Any]:
     for secret in ("initial-code", "initial-access", "initial-refresh"):
         assert secret not in serialized
     assert document["normalized_origin"] == ORIGIN
-    assert document["old_credential_state"] == "MISSING"
-    assert document["old_refresh_sha256"] is None
+    expected_state = "MISSING" if old_refresh is None else "PRESENT"
+    expected_fingerprint = (
+        None if old_refresh is None else hashlib.sha256(old_refresh.encode("utf-8")).hexdigest()
+    )
+    assert document["old_credential_state"] == expected_state
+    assert document["old_refresh_sha256"] == expected_fingerprint
     return document
 
 
@@ -144,9 +154,11 @@ def _configure_new_submit(
     return manifest
 
 
+@pytest.mark.parametrize("old_refresh", [None, "existing-initial-refresh"])
 @pytest.mark.parametrize("output_error", [BrokenPipeError, OSError])
 def test_initial_pair_output_failure_is_durable_and_replays_without_remote_pair(
     output_error: type[OSError],
+    old_refresh: str | None,
     runner: CliRunner,
     capsys: pytest.CaptureFixture[str],
     memory_keyring: MemoryKeyring,
@@ -156,6 +168,8 @@ def test_initial_pair_output_failure_is_durable_and_replays_without_remote_pair(
 ) -> None:
     app = load_app(monkeypatch, state_dir)
     cli_module = importlib.import_module("superboss_connector.cli")
+    if old_refresh is not None:
+        memory_keyring.values[(SERVICE, USERNAME)] = old_refresh
     pair_route = respx_mock.post(f"{ORIGIN}/api/v1/device-auth/pair").mock(
         return_value=httpx.Response(
             200,
@@ -194,7 +208,7 @@ def test_initial_pair_output_failure_is_durable_and_replays_without_remote_pair(
     assert failed_once
     assert pair_route.call_count == 1
     assert memory_keyring.values[(SERVICE, USERNAME)] == "initial-refresh"
-    _initial_pair_marker_document(state_dir)
+    _initial_pair_marker_document(state_dir, old_refresh=old_refresh)
     captured_output = capsys.readouterr()
     combined = f"{captured_output.out}\n{captured_output.err}"
     for secret in (
@@ -206,8 +220,220 @@ def test_initial_pair_output_failure_is_durable_and_replays_without_remote_pair(
         "Another operation is active",
     ):
         assert secret not in combined
+    assert "pair-completion.marker" not in combined
+    assert "old_refresh_sha256" not in combined
+    if old_refresh is not None:
+        assert hashlib.sha256(old_refresh.encode("utf-8")).hexdigest() not in combined
 
     recovered = runner.invoke(app, arguments)
+
+    assert recovered.exit_code == 0
+    assert pair_route.call_count == 1
+    assert "Device paired." in recovered.stdout
+    assert not list(state_dir.rglob("pair-completion.marker"))
+
+
+@pytest.mark.parametrize("old_refresh", [None, "old-device-refresh"])
+@pytest.mark.parametrize("blocked_command", ["status", "submit"])
+def test_failed_initial_pair_blocks_credential_mutation_until_real_second_pair(
+    old_refresh: str | None,
+    blocked_command: str,
+    tmp_path: Path,
+    runner: CliRunner,
+    memory_keyring: MemoryKeyring,
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    respx_mock: respx.MockRouter,
+) -> None:
+    app = load_app(monkeypatch, state_dir)
+    if old_refresh is not None:
+        memory_keyring.values[(SERVICE, USERNAME)] = old_refresh
+    pair_responses = iter(
+        [
+            httpx.Response(503),
+            httpx.Response(
+                200,
+                json=token_payload(access="repaired-access", refresh="repaired-refresh"),
+            ),
+        ]
+    )
+    pair_route = respx_mock.post(f"{ORIGIN}/api/v1/device-auth/pair").mock(
+        side_effect=lambda _request: next(pair_responses)
+    )
+    refresh_route = respx_mock.post(f"{ORIGIN}/api/v1/device-auth/refresh").mock(
+        return_value=httpx.Response(
+            200,
+            json=token_payload(access="old-device-access", refresh="old-device-rotated"),
+        )
+    )
+    job_id = uuid4()
+    business_route = respx_mock.get(f"{ORIGIN}/api/v1/device/import-jobs/{job_id}").mock(
+        return_value=httpx.Response(500)
+    )
+
+    first_pair = _run_pair(app, runner)
+
+    assert first_pair.exit_code == 6
+    assert pair_route.call_count == 1
+    _initial_pair_marker_document(state_dir, old_refresh=old_refresh)
+
+    if blocked_command == "status":
+        blocked = runner.invoke(
+            app,
+            ["status", "--server", ORIGIN, "--job-id", str(job_id)],
+        )
+    else:
+        manifest, _attachment, _payload = write_manifest(
+            tmp_path / "blocked-submit",
+            idempotency_key=f"kimi-{uuid4()}",
+        )
+        business_route = respx_mock.post(f"{ORIGIN}/api/v1/device/import-jobs").mock(
+            return_value=httpx.Response(500)
+        )
+        blocked = runner.invoke(
+            app,
+            ["submit", "--server", ORIGIN, "--manifest", str(manifest)],
+        )
+
+    assert blocked.exit_code == 2
+    assert refresh_route.call_count == 0
+    assert business_route.call_count == 0
+    assert pair_route.call_count == 1
+    assert memory_keyring.values.get((SERVICE, USERNAME)) == old_refresh
+    _initial_pair_marker_document(state_dir, old_refresh=old_refresh)
+    blocked_output = f"{blocked.stdout}\n{blocked.stderr}"
+    for secret in (
+        "old-device-refresh",
+        "old-device-access",
+        "old-device-rotated",
+        "repaired-access",
+        "repaired-refresh",
+    ):
+        assert secret not in blocked_output
+    assert "pair-completion.marker" not in blocked_output
+    assert "old_refresh_sha256" not in blocked_output
+    if old_refresh is not None:
+        assert hashlib.sha256(old_refresh.encode("utf-8")).hexdigest() not in blocked_output
+
+    repaired = _run_pair(app, runner)
+
+    assert repaired.exit_code == 0
+    assert pair_route.call_count == 2
+    assert memory_keyring.values[(SERVICE, USERNAME)] == "repaired-refresh"
+    assert not list(state_dir.rglob("pair-completion.marker"))
+
+
+def test_initial_pair_marker_save_failure_prevents_remote_pair(
+    runner: CliRunner,
+    memory_keyring: MemoryKeyring,
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    respx_mock: respx.MockRouter,
+) -> None:
+    app = load_app(monkeypatch, state_dir)
+    outbox_module = importlib.import_module("superboss_connector.outbox")
+    memory_keyring.values[(SERVICE, USERNAME)] = "marker-save-old-refresh"
+    pair_route = _pair_route(respx_mock)
+
+    def fail_marker_save(*_args: object, **_kwargs: object) -> None:
+        raise ConnectorError(2, OUTBOX_INVALID)
+
+    monkeypatch.setattr(
+        outbox_module.OutboxStore,
+        "save_pair_completion_marker",
+        fail_marker_save,
+    )
+
+    result = _run_pair(app, runner)
+
+    assert result.exit_code == 2
+    assert pair_route.call_count == 0
+    assert memory_keyring.values[(SERVICE, USERNAME)] == "marker-save-old-refresh"
+    assert not list(state_dir.rglob("pair-completion.marker"))
+    combined = f"{result.stdout}\n{result.stderr}"
+    assert "marker-save-old-refresh" not in combined
+    assert hashlib.sha256(b"marker-save-old-refresh").hexdigest() not in combined
+    assert "pair-completion.marker" not in combined
+
+
+@pytest.mark.parametrize("old_refresh", [None, "keyring-save-old-refresh"])
+def test_initial_pair_keyring_save_failure_requires_real_second_pair(
+    old_refresh: str | None,
+    runner: CliRunner,
+    memory_keyring: MemoryKeyring,
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    respx_mock: respx.MockRouter,
+) -> None:
+    app = load_app(monkeypatch, state_dir)
+    if old_refresh is not None:
+        memory_keyring.values[(SERVICE, USERNAME)] = old_refresh
+    pair_route = _pair_route(respx_mock)
+    memory_keyring.write_error = OSError("keyring-save-private-detail")
+
+    failed = _run_pair(app, runner)
+
+    assert failed.exit_code == 3
+    assert pair_route.call_count == 1
+    assert memory_keyring.values.get((SERVICE, USERNAME)) == old_refresh
+    _initial_pair_marker_document(state_dir, old_refresh=old_refresh)
+    failed_output = f"{failed.stdout}\n{failed.stderr}"
+    assert "keyring-save-private-detail" not in failed_output
+    assert "pair-completion.marker" not in failed_output
+    if old_refresh is not None:
+        assert hashlib.sha256(old_refresh.encode("utf-8")).hexdigest() not in failed_output
+
+    memory_keyring.write_error = None
+    repaired = _run_pair(app, runner)
+
+    assert repaired.exit_code == 0
+    assert pair_route.call_count == 2
+    assert memory_keyring.values[(SERVICE, USERNAME)] == "new-refresh"
+    assert not list(state_dir.rglob("pair-completion.marker"))
+
+
+@pytest.mark.parametrize("old_refresh", [None, "marker-delete-old-refresh"])
+def test_initial_pair_marker_delete_failure_replays_without_second_remote_pair(
+    old_refresh: str | None,
+    runner: CliRunner,
+    memory_keyring: MemoryKeyring,
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    respx_mock: respx.MockRouter,
+) -> None:
+    app = load_app(monkeypatch, state_dir)
+    outbox_module = importlib.import_module("superboss_connector.outbox")
+    if old_refresh is not None:
+        memory_keyring.values[(SERVICE, USERNAME)] = old_refresh
+    pair_route = _pair_route(respx_mock)
+    real_delete = outbox_module.OutboxStore.delete_pair_completion_marker
+    failed_once = False
+
+    def fail_delete_once(store: Any) -> None:
+        nonlocal failed_once
+        if not failed_once:
+            failed_once = True
+            raise ConnectorError(2, OUTBOX_INVALID)
+        real_delete(store)
+
+    monkeypatch.setattr(
+        outbox_module.OutboxStore,
+        "delete_pair_completion_marker",
+        fail_delete_once,
+    )
+
+    failed = _run_pair(app, runner)
+
+    assert failed.exit_code == 2
+    assert pair_route.call_count == 1
+    assert memory_keyring.values[(SERVICE, USERNAME)] == "new-refresh"
+    _initial_pair_marker_document(state_dir, old_refresh=old_refresh)
+    failed_output = f"{failed.stdout}\n{failed.stderr}"
+    assert "pair-completion.marker" not in failed_output
+    if old_refresh is not None:
+        assert hashlib.sha256(old_refresh.encode("utf-8")).hexdigest() not in failed_output
+
+    recovered = _run_pair(app, runner)
 
     assert recovered.exit_code == 0
     assert pair_route.call_count == 1

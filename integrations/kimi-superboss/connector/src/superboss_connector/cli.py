@@ -146,6 +146,11 @@ def _recover_initial_pair(store: OutboxStore, credentials: CredentialStore) -> b
     return False
 
 
+def _reject_pending_initial_pair(store: OutboxStore) -> None:
+    if store.load_pair_completion_marker() is not None:
+        raise ConnectorError(2, OUTBOX_CONFLICT)
+
+
 def _prepared_for_retry(entry: OutboxEntry) -> PreparedManifest:
     try:
         manifest = prepare_manifest(Path(entry.manifest_path))
@@ -384,6 +389,7 @@ def submit(
     prepared = prepare_manifest(manifest)
     store = OutboxStore(origin)
     with store.lock():
+        _reject_pending_initial_pair(store)
         credentials = CredentialStore(origin)
         _recover_replacement(store, credentials)
         store.ensure_available(prepared.idempotency_key)
@@ -409,8 +415,9 @@ def status(
     """Read one own-device import status."""
     origin = normalize_origin(server)
     store = OutboxStore(origin)
-    credentials = CredentialStore(origin)
     with store.lock():
+        _reject_pending_initial_pair(store)
+        credentials = CredentialStore(origin)
         _recover_replacement(store, credentials)
         with ApiClient(origin) as client:
             access_token = client.refresh(credentials)
@@ -428,6 +435,7 @@ def retry(server: Annotated[str, typer.Option("--server")]) -> None:
     origin = normalize_origin(server)
     store = OutboxStore(origin)
     with store.lock():
+        _reject_pending_initial_pair(store)
         credentials = CredentialStore(origin)
         _recover_replacement(store, credentials)
         path, entry = store.load()

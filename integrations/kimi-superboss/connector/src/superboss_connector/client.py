@@ -442,7 +442,7 @@ class ApiClient:
                     raise ConnectorError(5, SERVER_REJECTED)
                 raw_etag = response.headers.get("ETag")
                 etag = "" if raw_etag is None else str(raw_etag).strip()
-        except httpx.RequestError as error:
+        except (httpx.RequestError, OSError) as error:
             raise ConnectorError(6, TEMPORARY_FAILURE) from error
         if not 1 <= len(etag) <= ETAG_MAX_CHARS or any(
             ord(character) < 32 or ord(character) == 127 for character in etag

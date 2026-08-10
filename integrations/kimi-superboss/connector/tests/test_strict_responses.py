@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import importlib
+import ipaddress
+import json
 import socket
 import threading
 import time
@@ -27,6 +30,7 @@ from typer.testing import CliRunner
 from superboss_connector.client import ApiClient
 from superboss_connector.errors import ConnectorError
 from superboss_connector.outbox import OutboxStore
+from superboss_connector.pinned import _PinnedNetworkBackend
 
 
 @dataclass
@@ -768,3 +772,210 @@ def test_presigned_resolver_stall_is_bounded_and_releases_origin_lock(
     assert "resolver-stall-private-detail" not in combined
     with OutboxStore(ORIGIN).lock():
         pass
+
+
+def test_pinned_socket_constructor_failure_falls_through_to_next_approved_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pinned_module = importlib.import_module("superboss_connector.pinned")
+    attempts: list[int] = []
+    ipv4_socket: Any | None = None
+
+    class FakeSocket:
+        def __init__(self) -> None:
+            self.closed = False
+            self.connected: tuple[Any, ...] | None = None
+
+        def settimeout(self, _timeout: float | None) -> None:
+            pass
+
+        def setsockopt(self, *_option: object) -> None:
+            pass
+
+        def connect(self, target: tuple[Any, ...]) -> None:
+            self.connected = target
+
+        def getpeername(self) -> tuple[str, int]:
+            return ("93.184.216.34", 443)
+
+        def close(self) -> None:
+            self.closed = True
+
+    def socket_factory(family: int, _kind: int) -> FakeSocket:
+        nonlocal ipv4_socket
+        attempts.append(family)
+        if family == socket.AF_INET6:
+            raise OSError("ipv6-constructor-private-detail")
+        ipv4_socket = FakeSocket()
+        return ipv4_socket
+
+    monkeypatch.setattr(pinned_module.socket, "socket", socket_factory)
+    backend = _PinnedNetworkBackend(
+        "storage.public.example",
+        (
+            ipaddress.ip_address("2606:2800:220:1:248:1893:25c8:1946"),
+            ipaddress.ip_address("93.184.216.34"),
+        ),
+    )
+
+    stream = backend.connect_tcp("storage.public.example", 443, timeout=1.0)
+
+    assert attempts == [socket.AF_INET6, socket.AF_INET]
+    assert ipv4_socket is not None
+    assert ipv4_socket.connected == ("93.184.216.34", 443)
+    assert not ipv4_socket.closed
+    stream.close()
+    assert ipv4_socket.closed
+
+
+def test_all_pinned_socket_constructor_failures_are_temporary_and_secret_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pinned_module = importlib.import_module("superboss_connector.pinned")
+    attempts: list[int] = []
+
+    def public_resolution(
+        _host: str,
+        port: int,
+        *_args: object,
+        **_kwargs: object,
+    ) -> list[tuple[object, ...]]:
+        return [
+            (
+                socket.AF_INET6,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                ("2606:2800:220:1:248:1893:25c8:1946", port, 0, 0),
+            ),
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                ("93.184.216.34", port),
+            ),
+        ]
+
+    def fail_socket(family: int, _kind: int) -> Any:
+        attempts.append(family)
+        raise OSError("socket-constructor-private-detail")
+
+    monkeypatch.setattr(socket, "getaddrinfo", public_resolution)
+    monkeypatch.setattr(pinned_module.socket, "socket", fail_socket)
+
+    with ApiClient(ORIGIN) as client, pytest.raises(ConnectorError) as captured:
+        client.put_part(
+            "https://storage.public.example/upload",
+            b"constructor-failure-body-must-not-leave",
+        )
+
+    assert captured.value.exit_code == 6
+    assert attempts == [socket.AF_INET6, socket.AF_INET]
+    assert "socket-constructor-private-detail" not in captured.value.message
+    assert "constructor-failure-body" not in captured.value.message
+
+
+def test_tls_context_setup_oserror_is_temporary_and_secret_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pinned_module = importlib.import_module("superboss_connector.pinned")
+
+    def public_resolution(
+        _host: str,
+        port: int,
+        *_args: object,
+        **_kwargs: object,
+    ) -> list[tuple[object, ...]]:
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                ("93.184.216.34", port),
+            )
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", public_resolution)
+    with ApiClient(ORIGIN) as client:
+        monkeypatch.setattr(
+            pinned_module.ssl,
+            "create_default_context",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("tls-context-private-detail")),
+        )
+        with pytest.raises(ConnectorError) as captured:
+            client.put_part(
+                "https://storage.public.example/upload",
+                b"tls-context-body-must-not-leave",
+            )
+
+    assert captured.value.exit_code == 6
+    assert "tls-context-private-detail" not in captured.value.message
+    assert "tls-context-body" not in captured.value.message
+
+
+@pytest.mark.parametrize("fault_stage", ["tls-context", "transport", "upload-client"])
+def test_local_upload_setup_oserror_is_temporary_and_preserves_checkpoint(
+    fault_stage: str,
+    tmp_path: Path,
+    runner: CliRunner,
+    memory_keyring: MemoryKeyring,
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    respx_mock: respx.MockRouter,
+) -> None:
+    app = load_app(monkeypatch, state_dir)
+    client_module = importlib.import_module("superboss_connector.client")
+    pinned_module = importlib.import_module("superboss_connector.pinned")
+    flow = _single_part_flow(
+        tmp_path / fault_stage,
+        memory_keyring,
+        respx_mock,
+        put_response=httpx.Response(200, headers={"ETag": "must-not-upload"}),
+    )
+    private_detail = f"{fault_stage}-private-detail"
+
+    if fault_stage == "tls-context":
+
+        def arm_tls_fault(_request: httpx.Request) -> httpx.Response:
+            monkeypatch.setattr(
+                pinned_module.ssl,
+                "create_default_context",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError(private_detail)),
+            )
+            return httpx.Response(200, json={"url": "https://storage.local/strict-put"})
+
+        flow.part_route.mock(side_effect=arm_tls_fault)
+    elif fault_stage == "transport":
+        monkeypatch.setattr(
+            client_module,
+            "PinnedHTTPTransport",
+            lambda *_args: (_ for _ in ()).throw(OSError(private_detail)),
+        )
+    else:
+        real_client = client_module.httpx.Client
+
+        def client_factory(*args: object, **kwargs: object) -> httpx.Client:
+            if kwargs.get("transport") is not None:
+                raise OSError(private_detail)
+            return real_client(*args, **kwargs)
+
+        monkeypatch.setattr(client_module.httpx, "Client", client_factory)
+
+    result = runner.invoke(
+        app,
+        ["submit", "--server", ORIGIN, "--manifest", str(flow.manifest)],
+    )
+
+    assert result.exit_code == 6
+    assert flow.put_route.call_count == 0
+    assert not flow.complete_route.called and not flow.submit_route.called
+    outbox_paths = list(state_dir.rglob("*.json"))
+    assert len(outbox_paths) == 1
+    document = json.loads(outbox_paths[0].read_text(encoding="utf-8"))
+    assert document["phase"] == "UPLOAD"
+    assert document["attachments"][0]["completed_parts"] == []
+    combined = f"{result.stdout}\n{result.stderr}"
+    assert private_detail not in combined
+    assert "must-not-upload" not in combined
