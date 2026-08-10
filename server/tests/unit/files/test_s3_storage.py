@@ -2,9 +2,11 @@
 
 import asyncio
 import inspect
+import socket
 import threading
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 from botocore.exceptions import ClientError
@@ -111,6 +113,123 @@ async def test_lazy_client_factory_failure_is_not_cached(monkeypatch) -> None:
     await storage.delete_object("objects/two")
 
     assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_public_presign_client_is_lazy_isolated_and_concurrency_safe(monkeypatch) -> None:
+    from superboss.infrastructure import s3
+
+    factory_calls: list[dict[str, object]] = []
+    public_factory_entered = threading.Event()
+    release_public_factory = threading.Event()
+
+    class InternalClient:
+        def delete_object(self, **_kwargs: object) -> None:
+            return None
+
+    class PublicClient:
+        def generate_presigned_url(self, operation: str, **_kwargs: object) -> str:
+            return f"https://objects.nightforest.com/{operation}"
+
+    def client(*_args: object, **kwargs: object) -> object:
+        factory_calls.append(kwargs)
+        if kwargs["endpoint_url"] == "https://objects.nightforest.com":
+            public_factory_entered.set()
+            assert release_public_factory.wait(timeout=1)
+            return PublicClient()
+        return InternalClient()
+
+    monkeypatch.setattr(s3.boto3, "client", client)
+    storage = Boto3ObjectStorage(
+        bucket="files-bucket",
+        endpoint_url="http://minio:9000",
+        public_endpoint_url="https://objects.nightforest.com",
+        access_key_id="access",
+        secret_access_key="secret",
+    )
+    assert factory_calls == []
+
+    await storage.delete_object("objects/one")
+    upload = asyncio.create_task(
+        storage.presign_upload_part("objects/one", "upload-1", 1, 900)
+    )
+    assert await asyncio.to_thread(public_factory_entered.wait, 1)
+    download = asyncio.create_task(storage.presign_get("objects/one", 60))
+    await asyncio.sleep(0.05)
+    release_public_factory.set()
+
+    assert await upload == "https://objects.nightforest.com/upload_part"
+    assert await download == "https://objects.nightforest.com/get_object"
+    assert [call["endpoint_url"] for call in factory_calls] == [
+        "http://minio:9000",
+        "https://objects.nightforest.com",
+    ]
+    assert all(call["aws_access_key_id"] == "access" for call in factory_calls)
+    assert all(call["aws_secret_access_key"] == "secret" for call in factory_calls)
+
+
+@pytest.mark.asyncio
+async def test_public_presign_client_factory_failure_is_not_cached(monkeypatch) -> None:
+    from superboss.infrastructure import s3
+
+    attempts = 0
+
+    class PublicClient:
+        def generate_presigned_url(self, operation: str, **_kwargs: object) -> str:
+            return f"https://objects.nightforest.com/{operation}"
+
+    def client(*_args: object, **kwargs: object) -> object:
+        nonlocal attempts
+        assert kwargs["endpoint_url"] == "https://objects.nightforest.com"
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("credential provider unavailable")
+        return PublicClient()
+
+    monkeypatch.setattr(s3.boto3, "client", client)
+    storage = Boto3ObjectStorage(
+        bucket="files-bucket",
+        endpoint_url="http://minio:9000",
+        public_endpoint_url="https://objects.nightforest.com",
+        access_key_id="access",
+        secret_access_key="secret",
+    )
+
+    with pytest.raises(RuntimeError, match="credential provider unavailable"):
+        await storage.presign_get("objects/one", 60)
+    assert await storage.presign_get("objects/one", 60) == (
+        "https://objects.nightforest.com/get_object"
+    )
+    assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_real_presigning_uses_the_exact_public_host_without_network(monkeypatch) -> None:
+    attempted: list[object] = []
+
+    def deny_connect(sock: socket.socket, address: object) -> None:
+        attempted.append((sock, address))
+        raise AssertionError("presigning attempted a network connection")
+
+    monkeypatch.setattr(socket.socket, "connect", deny_connect)
+    storage = Boto3ObjectStorage(
+        bucket="files-bucket",
+        endpoint_url="http://minio:9000",
+        public_endpoint_url="https://objects.nightforest.com",
+        access_key_id="access",
+        secret_access_key="secret",
+    )
+
+    upload_url, download_url = await asyncio.gather(
+        storage.presign_upload_part("objects/one", "upload-1", 1, 900),
+        storage.presign_get("objects/one", 60),
+    )
+
+    assert {
+        (urlsplit(url).scheme, urlsplit(url).hostname)
+        for url in (upload_url, download_url)
+    } == {("https", "objects.nightforest.com")}
+    assert attempted == []
 
 
 @dataclass

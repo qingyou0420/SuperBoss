@@ -25,6 +25,8 @@ class Boto3ObjectStorage:
         access_key_id: str | None = None,
         secret_access_key: str | None = None,
         client: S3Client | None = None,
+        public_endpoint_url: str | None = None,
+        public_client: S3Client | None = None,
     ) -> None:
         self.bucket = bucket
         self._client = client
@@ -32,6 +34,22 @@ class Boto3ObjectStorage:
         self._access_key_id = access_key_id
         self._secret_access_key = secret_access_key
         self._client_lock = Lock()
+        self._public_endpoint_url = public_endpoint_url
+        self._public_client = public_client
+        self._public_client_lock = Lock()
+
+    def _build_client(self, endpoint_url: str | None) -> S3Client:
+        return boto3.client(
+            "s3",
+            endpoint_url=endpoint_url,
+            aws_access_key_id=self._access_key_id or None,
+            aws_secret_access_key=self._secret_access_key or None,
+            config=Config(
+                connect_timeout=5,
+                read_timeout=10,
+                retries={"max_attempts": 2},
+            ),
+        )
 
     @property
     def client(self) -> S3Client:
@@ -41,18 +59,22 @@ class Boto3ObjectStorage:
         with self._client_lock:
             client = self._client
             if client is None:
-                client = boto3.client(
-                    "s3",
-                    endpoint_url=self._endpoint_url,
-                    aws_access_key_id=self._access_key_id or None,
-                    aws_secret_access_key=self._secret_access_key or None,
-                    config=Config(
-                        connect_timeout=5,
-                        read_timeout=10,
-                        retries={"max_attempts": 2},
-                    ),
-                )
+                client = self._build_client(self._endpoint_url)
                 self._client = client
+        return client
+
+    @property
+    def presign_client(self) -> S3Client:
+        if self._public_endpoint_url is None:
+            return self.client
+        client = self._public_client
+        if client is not None:
+            return client
+        with self._public_client_lock:
+            client = self._public_client
+            if client is None:
+                client = self._build_client(self._public_endpoint_url)
+                self._public_client = client
         return client
 
     def _list_multipart_uploads_page(
@@ -129,7 +151,7 @@ class Boto3ObjectStorage:
         self, object_key: str, multipart_id: str, part_number: int, expires_seconds: int
     ) -> str:
         return await asyncio.to_thread(
-            lambda: self.client.generate_presigned_url(
+            lambda: self.presign_client.generate_presigned_url(
                 "upload_part",
                 Params={
                     "Bucket": self.bucket,
@@ -175,7 +197,7 @@ class Boto3ObjectStorage:
 
     async def presign_get(self, object_key: str, expires_seconds: int) -> str:
         return await asyncio.to_thread(
-            lambda: self.client.generate_presigned_url(
+            lambda: self.presign_client.generate_presigned_url(
                 "get_object",
                 Params={"Bucket": self.bucket, "Key": object_key},
                 ExpiresIn=expires_seconds,

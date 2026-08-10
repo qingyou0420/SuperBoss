@@ -93,6 +93,7 @@ async def test_production_runner_constructs_dependencies_and_always_disposes_eng
         database_url="postgresql+asyncpg://local/test",
         s3_bucket="files",
         s3_endpoint_url="http://minio:9000",
+        s3_public_endpoint_url="https://objects.nightforest.com",
         s3_access_key_id="access",
         s3_secret_access_key="secret",
     )
@@ -116,8 +117,8 @@ async def test_production_runner_constructs_dependencies_and_always_disposes_eng
         created["factory"] = (received_engine, expire_on_commit)
         return factory
 
-    def build_storage(*args: object) -> object:
-        created["storage"] = args
+    def build_storage(*args: object, **kwargs: object) -> object:
+        created["storage"] = (args, kwargs)
         return storage
 
     async def execute(**kwargs: object) -> int:
@@ -142,10 +143,13 @@ async def test_production_runner_constructs_dependencies_and_always_disposes_eng
         "engine": (settings.database_url, True),
         "factory": (engine, False),
         "storage": (
-            settings.s3_bucket,
-            settings.s3_endpoint_url,
-            settings.s3_access_key_id,
-            settings.s3_secret_access_key,
+            (
+                settings.s3_bucket,
+                settings.s3_endpoint_url,
+                settings.s3_access_key_id,
+                settings.s3_secret_access_key,
+            ),
+            {"public_endpoint_url": settings.s3_public_endpoint_url},
         ),
         "execute": {
             "session_factory": factory,

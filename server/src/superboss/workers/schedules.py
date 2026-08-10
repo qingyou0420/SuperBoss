@@ -35,6 +35,7 @@ async def _run_lifecycle_reconcile() -> int:
             settings.s3_endpoint_url,
             settings.s3_access_key_id,
             settings.s3_secret_access_key,
+            public_endpoint_url=settings.s3_public_endpoint_url,
         )
         return await execute_lifecycle_reconcile(
             session_factory=session_factory,

@@ -64,9 +64,16 @@ def create_app(
     app = FastAPI(title="SuperBoss API", version="1.0.0", lifespan=lifespan)
     app.state.settings = active_settings
     app.state.engine = engine
+    app.state.readiness_checker = None
     app.state.session_factory = async_sessionmaker(engine, expire_on_commit=False)
     app.state.wecom_provider = build_wecom_provider(active_settings)
-    app.state.object_storage = object_storage or Boto3ObjectStorage(active_settings.s3_bucket, active_settings.s3_endpoint_url, active_settings.s3_access_key_id, active_settings.s3_secret_access_key)
+    app.state.object_storage = object_storage or Boto3ObjectStorage(
+        active_settings.s3_bucket,
+        active_settings.s3_endpoint_url,
+        active_settings.s3_access_key_id,
+        active_settings.s3_secret_access_key,
+        public_endpoint_url=active_settings.s3_public_endpoint_url,
+    )
     app.state.enqueue_file_scan = enqueue_file_scan or celery_enqueue_file_scan
 
     def request_id(request: Request) -> str:

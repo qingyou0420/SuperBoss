@@ -1,0 +1,5 @@
+# RFC 5737 documentation networks only. Replace these examples before deployment.
+allow 192.0.2.0/24;
+allow 198.51.100.0/24;
+allow 203.0.113.0/24;
+deny all;

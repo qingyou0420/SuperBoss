@@ -1,0 +1,259 @@
+x-backend-build: &backend-build
+  context: ./server
+
+x-backend-environment: &backend-environment
+  SUPERBOSS_ENVIRONMENT: production
+  SUPERBOSS_DATABASE_URL: "postgresql+asyncpg://${SUPERBOSS_POSTGRES_USER:-superboss}:${SUPERBOSS_POSTGRES_PASSWORD:?set SUPERBOSS_POSTGRES_PASSWORD}@postgres:5432/${SUPERBOSS_POSTGRES_DB:-superboss}"
+  SUPERBOSS_JWT_SECRET: "${SUPERBOSS_JWT_SECRET:?set SUPERBOSS_JWT_SECRET}"
+  SUPERBOSS_WECOM_CORP_ID: "${SUPERBOSS_WECOM_CORP_ID:?set SUPERBOSS_WECOM_CORP_ID}"
+  SUPERBOSS_WECOM_AGENT_ID: "${SUPERBOSS_WECOM_AGENT_ID:?set SUPERBOSS_WECOM_AGENT_ID}"
+  SUPERBOSS_WECOM_CORP_SECRET: "${SUPERBOSS_WECOM_CORP_SECRET:?set SUPERBOSS_WECOM_CORP_SECRET}"
+  SUPERBOSS_WECOM_REDIRECT_URI: "${SUPERBOSS_WECOM_REDIRECT_URI:?set SUPERBOSS_WECOM_REDIRECT_URI}"
+  SUPERBOSS_OWNER_WECOM_USERID: "${SUPERBOSS_OWNER_WECOM_USERID:?set SUPERBOSS_OWNER_WECOM_USERID}"
+  SUPERBOSS_S3_BUCKET: "${SUPERBOSS_S3_BUCKET:-superboss-files}"
+  SUPERBOSS_S3_ENDPOINT_URL: "http://minio:9000"
+  SUPERBOSS_S3_PUBLIC_ENDPOINT_URL: "https://${SUPERBOSS_OBJECTS_HOST:?set SUPERBOSS_OBJECTS_HOST}"
+  SUPERBOSS_S3_ACCESS_KEY_ID: "${SUPERBOSS_S3_ACCESS_KEY_ID:?set SUPERBOSS_S3_ACCESS_KEY_ID}"
+  SUPERBOSS_S3_SECRET_ACCESS_KEY: "${SUPERBOSS_S3_SECRET_ACCESS_KEY:?set SUPERBOSS_S3_SECRET_ACCESS_KEY}"
+  SUPERBOSS_REDIS_URL: "redis://:${SUPERBOSS_REDIS_PASSWORD:?set SUPERBOSS_REDIS_PASSWORD}@redis:6379/0"
+  SUPERBOSS_CLAMAV_HOST: clamav
+  SUPERBOSS_CLAMAV_PORT: "3310"
+  SUPERBOSS_CLAMAV_CONNECT_TIMEOUT_SECONDS: "3"
+  SUPERBOSS_CLAMAV_IO_TIMEOUT_SECONDS: "10"
+  SUPERBOSS_CLAMAV_TOTAL_TIMEOUT_SECONDS: "600"
+  SUPERBOSS_CLAMAV_MAX_CHUNK_BYTES: "1048576"
+  SUPERBOSS_CLAMAV_MAX_STREAM_BYTES: "104857600"
+  SUPERBOSS_CLAMAV_MAX_RESPONSE_BYTES: "1024"
+  SUPERBOSS_SCAN_SOFT_TIME_LIMIT_SECONDS: "660"
+  SUPERBOSS_SCAN_HARD_TIME_LIMIT_SECONDS: "720"
+
+services:
+  nginx:
+    image: nginx@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de # nginx:1.29-alpine
+    environment:
+      SUPERBOSS_APP_HOST: "${SUPERBOSS_APP_HOST:?set SUPERBOSS_APP_HOST}"
+      SUPERBOSS_OBJECTS_HOST: "${SUPERBOSS_OBJECTS_HOST:?set SUPERBOSS_OBJECTS_HOST}"
+    volumes:
+      - ./ops/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ops/nginx/conf.d/superboss.conf:/etc/nginx/templates/superboss.conf.template:ro
+      - "${SUPERBOSS_ALLOWLIST_PATH:?set SUPERBOSS_ALLOWLIST_PATH}:/etc/nginx/allowlist.conf:ro"
+      - "${SUPERBOSS_TLS_CERT_PATH:?set SUPERBOSS_TLS_CERT_PATH}:/etc/nginx/tls/tls.crt:ro"
+      - "${SUPERBOSS_TLS_KEY_PATH:?set SUPERBOSS_TLS_KEY_PATH}:/etc/nginx/tls/tls.key:ro"
+    ports:
+      - "443:443"
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          wget -q -O /dev/null
+          http://api:8000/api/v1/health/live
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      edge: {}
+      backend:
+        aliases:
+          - "${SUPERBOSS_OBJECTS_HOST:?set SUPERBOSS_OBJECTS_HOST}"
+    restart: unless-stopped
+
+  web:
+    image: "superboss-web:${SUPERBOSS_RELEASE_TAG:-local}"
+    build:
+      context: ./web
+      args:
+        VITE_OBJECT_STORAGE_ORIGIN: "https://${SUPERBOSS_OBJECTS_HOST:?set SUPERBOSS_OBJECTS_HOST}"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks:
+      - edge
+    restart: unless-stopped
+
+  api:
+    image: "superboss-api:${SUPERBOSS_RELEASE_TAG:-local}"
+    build: *backend-build
+    command: ["uvicorn", "superboss.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment: *backend-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/live', timeout=2)
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks:
+      - backend
+    restart: unless-stopped
+
+  worker:
+    image: "superboss-api:${SUPERBOSS_RELEASE_TAG:-local}"
+    build: *backend-build
+    command:
+      - celery
+      - -A
+      - superboss.workers.celery_app:celery_app
+      - worker
+      - --loglevel=INFO
+      - --queues=file-scan,file-maintenance
+      - --concurrency=1
+      - --prefetch-multiplier=1
+    environment: *backend-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      clamav:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+
+  scheduler:
+    image: "superboss-api:${SUPERBOSS_RELEASE_TAG:-local}"
+    build: *backend-build
+    command:
+      - celery
+      - -A
+      - superboss.workers.celery_app:celery_app
+      - beat
+      - --loglevel=INFO
+      - --pidfile=
+      - --schedule=/var/lib/celery/celerybeat-schedule
+    environment: *backend-environment
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - celery-scheduler-data:/var/lib/celery
+    networks:
+      - backend
+    restart: unless-stopped
+
+  postgres:
+    image: postgres@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15 # postgres:18-alpine
+    environment:
+      POSTGRES_DB: "${SUPERBOSS_POSTGRES_DB:-superboss}"
+      POSTGRES_USER: "${SUPERBOSS_POSTGRES_USER:-superboss}"
+      POSTGRES_PASSWORD: "${SUPERBOSS_POSTGRES_PASSWORD:?set SUPERBOSS_POSTGRES_PASSWORD}"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - backend
+    restart: unless-stopped
+
+  redis:
+    image: redis@sha256:978f0e01593e65eed801f2402944efcd936d43b5027e4908a7897baf88ed6241 # redis:8-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - "${SUPERBOSS_REDIS_PASSWORD:?set SUPERBOSS_REDIS_PASSWORD}"
+    environment:
+      SUPERBOSS_REDIS_PASSWORD: "${SUPERBOSS_REDIS_PASSWORD:?set SUPERBOSS_REDIS_PASSWORD}"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - redis-cli --no-auth-warning -a "$${SUPERBOSS_REDIS_PASSWORD}" ping | grep -qx PONG
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - backend
+    restart: unless-stopped
+
+  minio:
+    image: quay.io/minio/minio@sha256:064117214caceaa8d8a90ef7caa58f2b2aeb316b5156afe9ee8da5b4d83e12c8 # quay.io/minio/minio:RELEASE.2025-06-13T11-33-47Z
+    command: ["server", "/data"]
+    environment:
+      MINIO_ROOT_USER: "${SUPERBOSS_S3_ACCESS_KEY_ID:?set SUPERBOSS_S3_ACCESS_KEY_ID}"
+      MINIO_ROOT_PASSWORD: "${SUPERBOSS_S3_SECRET_ACCESS_KEY:?set SUPERBOSS_S3_SECRET_ACCESS_KEY}"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks:
+      - backend
+    restart: unless-stopped
+
+  minio-init:
+    image: quay.io/minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727 # quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        mc alias set local http://minio:9000
+        "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" &&
+        mc mb --ignore-existing "local/$${MINIO_BUCKET}"
+    environment:
+      MINIO_ROOT_USER: "${SUPERBOSS_S3_ACCESS_KEY_ID:?set SUPERBOSS_S3_ACCESS_KEY_ID}"
+      MINIO_ROOT_PASSWORD: "${SUPERBOSS_S3_SECRET_ACCESS_KEY:?set SUPERBOSS_S3_SECRET_ACCESS_KEY}"
+      MINIO_BUCKET: "${SUPERBOSS_S3_BUCKET:-superboss-files}"
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: "no"
+
+  clamav:
+    image: clamav/clamav@sha256:d06c1d6a451d616e1dd79b42f44c8c8c291bba9cf4e75ebc4d0e43c1c6dd87bb # clamav/clamav:1.5.3
+    volumes:
+      - clamav-database:/var/lib/clamav
+      - ./server/config/clamd.conf:/etc/clamav/clamd.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "clamdscan --ping=1 --wait=10 >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 12s
+      retries: 40
+      start_period: 120s
+    networks:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:
+  clamav-database:
+  celery-scheduler-data:
+
+networks:
+  backend: {}
+  edge: {}

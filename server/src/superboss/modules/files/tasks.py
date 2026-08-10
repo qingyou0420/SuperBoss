@@ -39,6 +39,7 @@ async def _run_scan_file(file_id: str) -> None:
             active_settings.s3_endpoint_url,
             active_settings.s3_access_key_id,
             active_settings.s3_secret_access_key,
+            public_endpoint_url=active_settings.s3_public_endpoint_url,
         )
         scanner = ClamAVScanner(
             host=active_settings.clamav_host,

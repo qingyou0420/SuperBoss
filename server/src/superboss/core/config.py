@@ -1,6 +1,7 @@
 import base64
 import re
 from functools import lru_cache
+from urllib.parse import urlsplit
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -18,6 +19,7 @@ class Settings(BaseSettings):
     owner_wecom_userid: str = ""
     s3_bucket: str = "superboss-files"
     s3_endpoint_url: str = "http://127.0.0.1:9000"
+    s3_public_endpoint_url: str | None = None
     s3_access_key_id: str = ""
     s3_secret_access_key: str = ""
     redis_url: str = "redis://127.0.0.1:6379/0"
@@ -38,6 +40,36 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_secure_jwt_secret(self) -> "Settings":
+        public_endpoint = self.s3_public_endpoint_url
+        if self.environment == "production" and not public_endpoint:
+            raise ValueError("public S3 endpoint must be an HTTPS origin")
+        if public_endpoint is not None:
+            try:
+                parsed_public_endpoint = urlsplit(public_endpoint)
+                public_port = parsed_public_endpoint.port
+            except ValueError:
+                raise ValueError("public S3 endpoint must be an HTTPS origin") from None
+            public_hostname = parsed_public_endpoint.hostname
+            hostname_labels = public_hostname.split(".") if public_hostname is not None else []
+            canonical_hostname = bool(hostname_labels) and len(public_hostname or "") <= 253 and all(
+                re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                for label in hostname_labels
+            )
+            canonical_authority = public_hostname or ""
+            if public_port is not None:
+                canonical_authority = f"{canonical_authority}:{public_port}"
+            if (
+                parsed_public_endpoint.scheme != "https"
+                or not canonical_hostname
+                or parsed_public_endpoint.username is not None
+                or parsed_public_endpoint.password is not None
+                or parsed_public_endpoint.path
+                or parsed_public_endpoint.query
+                or parsed_public_endpoint.fragment
+                or public_port in {0, 443}
+                or public_endpoint != f"https://{canonical_authority}"
+            ):
+                raise ValueError("public S3 endpoint must be an HTTPS origin")
         if self.lifecycle_reconcile_interval_seconds < 0:
             raise ValueError("Lifecycle reconcile interval must be non-negative")
         if self.environment != "test" and self.lifecycle_reconcile_interval_seconds <= 0:
