@@ -3,6 +3,7 @@ import axios, {
     type AxiosAdapter,
     type AxiosError,
     type AxiosInstance,
+    type AxiosRequestTransformer,
     type InternalAxiosRequestConfig,
 } from 'axios'
 
@@ -10,6 +11,15 @@ export const MAX_API_RESPONSE_BYTES = 256 * 1024
 
 const UNSAFE_METHODS = new Set(['post', 'put', 'patch', 'delete'])
 const REFRESH_PATH = '/auth/refresh'
+const DEFAULT_TRANSFORM_REQUEST = axios.defaults.transformRequest
+const SAFE_TRANSFORM_REQUEST: readonly AxiosRequestTransformer[] =
+    Object.freeze(
+        DEFAULT_TRANSFORM_REQUEST
+            ? Array.isArray(DEFAULT_TRANSFORM_REQUEST)
+                ? [...DEFAULT_TRANSFORM_REQUEST]
+                : [DEFAULT_TRANSFORM_REQUEST]
+            : [],
+    )
 
 type RetriableConfig = InternalAxiosRequestConfig & {
     _superbossAuthRetried?: boolean
@@ -108,6 +118,7 @@ export function createHttpClient(
         config.xsrfCookieName = ''
         config.xsrfHeaderName = ''
         delete config.auth
+        config.transformRequest = [...SAFE_TRANSFORM_REQUEST]
         config.responseType = 'text'
         config.transformResponse = [parseBoundedResponse]
         config.maxBodyLength = MAX_API_RESPONSE_BYTES

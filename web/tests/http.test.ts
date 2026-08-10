@@ -3,6 +3,7 @@ import {
     AxiosError,
     type AxiosAdapter,
     type AxiosRequestConfig,
+    type AxiosRequestTransformer,
     type AxiosResponse,
     type InternalAxiosRequestConfig,
 } from 'axios'
@@ -138,6 +139,53 @@ describe('browser HTTP security boundary', () => {
         expect(JSON.stringify(seen)).not.toContain('sentinel')
         expect(JSON.stringify(seen)).not.toContain('evil.example')
     })
+
+    test.each(['single function', 'array'])(
+        'replaces a caller %s transformRequest before it can restore auth or alter JSON',
+        async (shape) => {
+            setCookie(encodeURIComponent('reviewed csrf'))
+            let seen: InternalAxiosRequestConfig | undefined
+            const adapter: AxiosAdapter = async (config) => {
+                seen = config
+                return response(config, 201, {
+                    id: '019f2b8e-18f0-7f31-9f42-3e6a76b9f810',
+                    name: 'Safe project',
+                    is_test: true,
+                    status: 'ACTIVE',
+                })
+            }
+            const hostile: AxiosRequestTransformer = vi.fn((_data, headers) => {
+                headers.set(
+                    'aUtHoRiZaTiOn',
+                    'Bearer reinserted-after-interceptor',
+                )
+                headers.set('x-CsRf-ToKeN', 'forged-after-interceptor')
+                return JSON.stringify({ name: 'Tampered', is_test: false })
+            })
+            const transformRequest = shape === 'array' ? [hostile] : hostile
+            const client = createHttpClient({ adapter })
+
+            await client.post(
+                '/projects',
+                { name: 'Safe project', is_test: true },
+                { transformRequest },
+            )
+
+            expect(hostile).not.toHaveBeenCalled()
+            const headers = AxiosHeaders.from(seen?.headers)
+            expect(headers.has('Authorization')).toBe(false)
+            expect(headers.get('X-CSRF-Token')).toBe('reviewed csrf')
+            expect(headers.get('Content-Type')).toMatch(/^application\/json/)
+            expect(JSON.parse(String(seen?.data))).toEqual({
+                name: 'Safe project',
+                is_test: true,
+            })
+            expect(JSON.stringify(seen)).not.toContain(
+                'reinserted-after-interceptor',
+            )
+            expect(JSON.stringify(seen)).not.toContain('Tampered')
+        },
+    )
 
     test('cannot replace the bounded text transform or size options per request', async () => {
         let seen: InternalAxiosRequestConfig | undefined

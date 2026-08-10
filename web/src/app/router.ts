@@ -27,6 +27,7 @@ declare module 'vue-router' {
 
 const FALLBACK_OWNER_PATH = '/owner'
 const POST_LOGIN_PATH_KEY = 'superboss.auth.post-login-path'
+let postLoginPathInvalid = false
 
 function hasUnsafePathText(value: string): boolean {
     for (let index = 0; index < value.length; index += 1) {
@@ -85,29 +86,42 @@ export function safePostLoginPath(value: unknown): string {
 }
 
 export function rememberPostLoginPath(value: unknown): void {
+    postLoginPathInvalid = true
+    removePostLoginPath()
     try {
         sessionStorage.setItem(POST_LOGIN_PATH_KEY, safePostLoginPath(value))
+        postLoginPathInvalid = false
     } catch {
-        // Storage is optional. The callback safely falls back to the owner home.
+        removePostLoginPath()
     }
 }
 
 export function clearPostLoginPath(): void {
-    try {
-        sessionStorage.removeItem(POST_LOGIN_PATH_KEY)
-    } catch {
-        // A failed cleanup must not expose or persist OAuth parameters.
-    }
+    postLoginPathInvalid = !removePostLoginPath()
 }
 
 export function consumePostLoginPath(fallback?: unknown): string {
+    if (postLoginPathInvalid) {
+        postLoginPathInvalid = !removePostLoginPath()
+        return FALLBACK_OWNER_PATH
+    }
     try {
         if (sessionStorage.length === 0) return safePostLoginPath(fallback)
         const stored = sessionStorage.getItem(POST_LOGIN_PATH_KEY)
         sessionStorage.removeItem(POST_LOGIN_PATH_KEY)
         return safePostLoginPath(stored ?? fallback)
     } catch {
+        postLoginPathInvalid = !removePostLoginPath()
         return FALLBACK_OWNER_PATH
+    }
+}
+
+function removePostLoginPath(): boolean {
+    try {
+        sessionStorage.removeItem(POST_LOGIN_PATH_KEY)
+        return true
+    } catch {
+        return false
     }
 }
 

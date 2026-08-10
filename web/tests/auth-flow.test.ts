@@ -118,6 +118,84 @@ describe('complete protected-route OAuth return flow', () => {
         expect(sessionStorage).toHaveLength(0)
     })
 
+    test('a failed new-target write deletes the old target and callback falls back safely', async () => {
+        const router = await renderAnonymousFlow('/owner/projects?view=old')
+        await beginLogin()
+        const stored = storedReturnTarget()
+        expect(stored.value).toBe('/owner/projects?view=old')
+
+        await router.push('/login?redirect=%2Fowner%2Fprojects%3Fview%3Dnew')
+        const setItem = vi
+            .spyOn(Storage.prototype, 'setItem')
+            .mockImplementation(() => {
+                throw new DOMException(
+                    'quota provider_token=sentinel',
+                    'QuotaExceededError',
+                )
+            })
+        await beginLogin()
+        setItem.mockRestore()
+
+        await router.push('/auth/callback?code=code_3&state=state-3')
+        await waitFor(() =>
+            expect(router.currentRoute.value.fullPath).toBe('/owner'),
+        )
+        expect(sessionStorage).toHaveLength(0)
+        expect(document.body.textContent).not.toMatch(
+            /sentinel|provider_token|quota/i,
+        )
+    })
+
+    test('a failed write and failed cleanup cannot revive an old target after storage recovers', async () => {
+        const router = await renderAnonymousFlow('/owner/projects?view=old')
+        await beginLogin()
+        storedReturnTarget()
+
+        await router.push('/login?redirect=%2Fowner%2Fprojects%3Fview%3Dnew')
+        const setItem = vi
+            .spyOn(Storage.prototype, 'setItem')
+            .mockImplementation(() => {
+                throw new Error('set refresh_token=sentinel')
+            })
+        const removeItem = vi
+            .spyOn(Storage.prototype, 'removeItem')
+            .mockImplementation(() => {
+                throw new Error('remove code=sentinel')
+            })
+        await beginLogin()
+        expect(document.body.textContent).not.toMatch(
+            /sentinel|refresh_token|code=/i,
+        )
+        setItem.mockRestore()
+        removeItem.mockRestore()
+
+        await router.push('/auth/callback?code=code_4&state=state-4')
+        await waitFor(() =>
+            expect(router.currentRoute.value.fullPath).toBe('/owner'),
+        )
+        expect(sessionStorage).toHaveLength(0)
+    })
+
+    test.each(['getItem', 'removeItem'] as const)(
+        'a callback %s fault falls back and best-effort consumes the pending target',
+        async (method) => {
+            const router = await renderAnonymousFlow('/owner/projects?view=old')
+            await beginLogin()
+            storedReturnTarget()
+            vi.spyOn(Storage.prototype, method).mockImplementationOnce(() => {
+                throw new Error(`${method} state=sentinel`)
+            })
+
+            await router.push('/auth/callback?code=code_5&state=state-5')
+            await waitFor(() =>
+                expect(router.currentRoute.value.fullPath).toBe('/owner'),
+            )
+
+            expect(sessionStorage).toHaveLength(0)
+            expect(document.body.textContent).not.toMatch(/sentinel|state=/i)
+        },
+    )
+
     test.each([
         '/login?redirect=%2F%2Fevil.example%2Fpath',
         '/login?redirect=%2F%252e%252e%2F%2Fevil.example%2Fpath',
