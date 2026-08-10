@@ -133,6 +133,14 @@ def _run_pair(app: Any, runner: CliRunner) -> Any:
     )
 
 
+def _assert_pair_recovery_guidance(output: str) -> None:
+    lowered = output.lower()
+    for required in ("superboss pair", "--server", "--code", "--name", "one-time", "local"):
+        assert required in lowered
+    assert "retry" not in lowered
+    assert "one-time-pair" not in output
+
+
 def _configure_new_submit(
     flow: Any,
     *,
@@ -234,7 +242,7 @@ def test_initial_pair_output_failure_is_durable_and_replays_without_remote_pair(
 
 
 @pytest.mark.parametrize("old_refresh", [None, "old-device-refresh"])
-@pytest.mark.parametrize("blocked_command", ["status", "submit"])
+@pytest.mark.parametrize("blocked_command", ["status", "submit", "retry"])
 def test_failed_initial_pair_blocks_credential_mutation_until_real_second_pair(
     old_refresh: str | None,
     blocked_command: str,
@@ -276,13 +284,14 @@ def test_failed_initial_pair_blocks_credential_mutation_until_real_second_pair(
     assert first_pair.exit_code == 6
     assert pair_route.call_count == 1
     _initial_pair_marker_document(state_dir, old_refresh=old_refresh)
+    _assert_pair_recovery_guidance(f"{first_pair.stdout}\n{first_pair.stderr}")
 
     if blocked_command == "status":
         blocked = runner.invoke(
             app,
             ["status", "--server", ORIGIN, "--job-id", str(job_id)],
         )
-    else:
+    elif blocked_command == "submit":
         manifest, _attachment, _payload = write_manifest(
             tmp_path / "blocked-submit",
             idempotency_key=f"kimi-{uuid4()}",
@@ -294,6 +303,8 @@ def test_failed_initial_pair_blocks_credential_mutation_until_real_second_pair(
             app,
             ["submit", "--server", ORIGIN, "--manifest", str(manifest)],
         )
+    else:
+        blocked = runner.invoke(app, ["retry", "--server", ORIGIN])
 
     assert blocked.exit_code == 2
     assert refresh_route.call_count == 0
@@ -314,6 +325,7 @@ def test_failed_initial_pair_blocks_credential_mutation_until_real_second_pair(
     assert "old_refresh_sha256" not in blocked_output
     if old_refresh is not None:
         assert hashlib.sha256(old_refresh.encode("utf-8")).hexdigest() not in blocked_output
+    _assert_pair_recovery_guidance(blocked_output)
 
     repaired = _run_pair(app, runner)
 
@@ -567,6 +579,9 @@ def test_successful_repair_abandons_old_job_and_new_key_can_reach_create(
     combined = f"{paired.stdout}\n{paired.stderr}\n{submitted.stdout}\n{submitted.stderr}"
     for secret in ("refresh-1", "new-refresh", "new-access", "one-time-pair"):
         assert secret not in combined
+    submitted_output = f"{submitted.stdout}\n{submitted.stderr}".lower()
+    assert "run retry" in submitted_output
+    assert "superboss pair" not in submitted_output
 
 
 @pytest.mark.parametrize(

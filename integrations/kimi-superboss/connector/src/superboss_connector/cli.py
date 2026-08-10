@@ -19,6 +19,8 @@ from .errors import (
     INVALID_INPUT,
     OUTBOX_CONFLICT,
     OUTBOX_INVALID,
+    PAIR_INCOMPLETE,
+    PAIR_TEMPORARY_FAILURE,
     ConnectorError,
 )
 from .manifest import PreparedManifest, prepare_manifest, verify_attachment
@@ -148,7 +150,7 @@ def _recover_initial_pair(store: OutboxStore, credentials: CredentialStore) -> b
 
 def _reject_pending_initial_pair(store: OutboxStore) -> None:
     if store.load_pair_completion_marker() is not None:
-        raise ConnectorError(2, OUTBOX_CONFLICT)
+        raise ConnectorError(2, PAIR_INCOMPLETE)
 
 
 def _prepared_for_retry(entry: OutboxEntry) -> PreparedManifest:
@@ -367,8 +369,13 @@ def pair(
             store.save_pair_completion_marker(
                 old_refresh_sha256=_refresh_fingerprint(old_refresh),
             )
-        with ApiClient(origin) as client:
-            client.pair(code, name, credentials)
+        try:
+            with ApiClient(origin) as client:
+                client.pair(code, name, credentials)
+        except ConnectorError as error:
+            if error.exit_code == 6:
+                raise ConnectorError(6, PAIR_TEMPORARY_FAILURE) from error
+            raise
         if existing is not None:
             store.delete(existing[0])
             _report_replacement()

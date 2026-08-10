@@ -42,9 +42,9 @@ When `base_sha256` is not null, include exactly one attachment with kind `ORIGIN
 null, `ORIGINAL` is optional.
 
 Generate `idempotency_key` once as `kimi-` followed by a fresh UUIDv7 or UUIDv4. Keep that exact
-key stable only for this submission and an exit 6 retry whose manifest content is unchanged. For
-exit 4 or any new submission, create a new manifest and a fresh UUID key because the connector has
-discarded the old recovery state.
+key stable only for this submission and an exit 6 submission retry whose manifest content is
+unchanged. For exit 4 or any new submission, create a new manifest and a fresh UUID key because the
+connector has discarded the old recovery state.
 
 ## Preview
 
@@ -88,13 +88,25 @@ Report completion or archive state only when later SuperBoss evidence explicitly
 
 ## Recovery
 
+### Pairing failure
+
+If `superboss pair` returns any nonzero exit or pairing remains incomplete, direct the OWNER to
+enter a current valid one-time code locally in this exact command:
+
+```powershell
+superboss pair --server <ORIGIN> --code <ONE_TIME_CODE> --name "OWNER-PC"
+```
+
+Kimi does not request, read, receive, repeat, store, or echo the actual code.
+Never use the `superboss retry` command to recover pairing.
+
 | Exit | Action |
 |---:|---|
 | 2 | Correct the local input, manifest, or recovery-state ambiguity, then show the resulting preview again. |
 | 3 | Pair the device again or inspect device revocation with the OWNER. |
 | 4 | Create a new manifest and fresh UUID idempotency key, then repeat the preview and confirmation. |
 | 5 | Inspect and resolve the stable server rejection before proposing another action. |
-| 6 | Keep the existing manifest and key, then offer `superboss retry --server <ORIGIN>`. |
+| 6 | For submission or recovery state only, keep the existing manifest and key, then offer `superboss retry --server <ORIGIN>`. |
 
 ## Security
 

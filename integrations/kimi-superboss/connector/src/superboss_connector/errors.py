@@ -16,6 +16,14 @@ INVALID_INPUT = "Input validation failed."
 OUTBOX_BUSY = "Another operation is active; retry this command shortly."
 OUTBOX_CONFLICT = "An unfinished operation exists; run retry first."
 OUTBOX_INVALID = "Local recovery state is invalid."
+PAIR_INCOMPLETE = (
+    "Pairing is incomplete; locally rerun superboss pair --server <ORIGIN> "
+    "--code <ONE_TIME_CODE> --name <DEVICE_NAME> with a valid one-time code."
+)
+PAIR_TEMPORARY_FAILURE = (
+    "Pairing did not finish; locally rerun superboss pair --server <ORIGIN> "
+    "--code <ONE_TIME_CODE> --name <DEVICE_NAME> with a valid one-time code."
+)
 CREDENTIAL_ERROR = "Device credentials are unavailable or invalid."
 FILE_CHANGED = "A local attachment changed; submit a new result package."
 SERVER_REJECTED = "The server rejected the operation."

@@ -336,6 +336,35 @@ def test_skill_status_recovery_and_evidence_contract_is_structured() -> None:
     assert "superboss retry" in rows[6]
 
 
+def test_skill_recovery_separates_pairing_from_submission_retry() -> None:
+    _metadata, body = _frontmatter(_skill_text())
+    headings, sections = _sections(body)
+    _recovery_index, recovery = _concept_section(headings, sections, "recovery")
+    pairing_match = re.search(
+        r"(?ims)^###\s+pairing[^\n]*\n(?P<guidance>.*?)(?=^###\s|^\|\s*exit\s*\|)",
+        recovery,
+    )
+    assert pairing_match is not None, "Recovery must contain a pairing-specific branch"
+    pairing = pairing_match.group("guidance")
+    lowered_pairing = pairing.lower()
+    for concept in ("nonzero", "owner", "local", "valid", "one-time", "kimi"):
+        assert concept in lowered_pairing
+    assert re.search(
+        r'(?m)^superboss pair --server <ORIGIN> --code <ONE_TIME_CODE> --name "OWNER-PC"$',
+        pairing,
+    )
+    assert re.search(r"(do not|never).{0,50}superboss retry", lowered_pairing)
+    assert re.search(
+        r"kimi.{0,50}(does not|do not|never).{0,50}(read|receive|echo)", lowered_pairing
+    )
+
+    exit_six = re.search(r"(?m)^\|\s*6\s*\|(?P<action>.+?)\|\s*$", recovery)
+    assert exit_six is not None
+    generic = exit_six.group("action").lower()
+    for concept in ("submission", "manifest", "key", "superboss retry"):
+        assert concept in generic
+
+
 def test_skill_keeps_secrets_out_of_every_transfer_surface() -> None:
     _metadata, body = _frontmatter(_skill_text())
     headings, sections = _sections(body)
