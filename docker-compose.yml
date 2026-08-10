@@ -238,7 +238,7 @@ services:
       - clamav-database:/var/lib/clamav
       - ./server/config/clamd.conf:/etc/clamav/clamd.conf:ro
     healthcheck:
-      test: ["CMD-SHELL", "clamdscan --ping=1 --wait=10 >/dev/null 2>&1"]
+      test: ["CMD-SHELL", "clamdscan --ping=1 >/dev/null 2>&1"]
       interval: 15s
       timeout: 12s
       retries: 40

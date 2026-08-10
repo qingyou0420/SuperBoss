@@ -300,6 +300,49 @@ async def test_default_probes_use_postgres_redis_minio_and_clamd_protocols() -> 
     assert observed["clamav"] == b"zPING\0"
 
 
+@pytest.mark.asyncio
+async def test_redis_probe_treats_empty_username_as_password_only_auth() -> None:
+    from superboss.modules.health.readiness import _probe_redis
+
+    observed: list[list[bytes]] = []
+
+    async def redis_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            while True:
+                prefix = await asyncio.wait_for(reader.readline(), timeout=0.2)
+                if not prefix:
+                    return
+                arguments: list[bytes] = []
+                for _ in range(int(prefix[1:-2])):
+                    length_line = await asyncio.wait_for(reader.readline(), timeout=0.2)
+                    length = int(length_line[1:-2])
+                    argument = await asyncio.wait_for(reader.readexactly(length + 2), timeout=0.2)
+                    arguments.append(argument[:-2])
+                observed.append(arguments)
+                command = arguments[0].upper()
+                if command == b"AUTH" and len(arguments) != 2:
+                    writer.write(b"-ERR invalid username-password pair\r\n")
+                else:
+                    writer.write(b"+PONG\r\n" if command == b"PING" else b"+OK\r\n")
+                await writer.drain()
+                if command == b"PING":
+                    return
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(redis_handler, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        await _probe_redis(f"redis://:probe-secret@127.0.0.1:{port}/0")
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert observed[0] == [b"AUTH", b"probe-secret"]
+    assert observed[-1] == [b"PING"]
+
+
 def test_readiness_module_import_and_app_construction_open_no_network() -> None:
     script = """
 import asyncio

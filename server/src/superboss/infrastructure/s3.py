@@ -1,16 +1,21 @@
 """Async wrapper around the blocking boto3 S3 client."""
 
+from __future__ import annotations
+
 import asyncio
 from collections.abc import AsyncIterator
 from threading import Lock
+from typing import TYPE_CHECKING
 
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
-from mypy_boto3_s3 import S3Client
-from mypy_boto3_s3.type_defs import ListMultipartUploadsOutputTypeDef
 
 from superboss.modules.files.storage import CompletedPart, ObjectMetadata
+
+if TYPE_CHECKING:
+    from mypy_boto3_s3 import S3Client
+    from mypy_boto3_s3.type_defs import ListMultipartUploadsOutputTypeDef
 
 
 class MultipartPaginationError(RuntimeError):

@@ -104,7 +104,7 @@ async def _probe_redis(redis_url: str) -> None:
             ssl=tls_context,
             server_hostname=parsed.hostname if use_tls else None,
         )
-        username = unquote(parsed.username) if parsed.username is not None else None
+        username = unquote(parsed.username) if parsed.username else None
         password = unquote(parsed.password) if parsed.password is not None else None
         if password is not None:
             auth = ("AUTH", username, password) if username is not None else ("AUTH", password)
