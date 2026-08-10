@@ -45,6 +45,14 @@ export interface BrowserHttpClient {
         data?: unknown,
         options?: BrowserPostOptions,
     ): Promise<BrowserHttpResponse<T>>
+    patch<T = unknown>(
+        url: string,
+        data?: unknown,
+    ): Promise<BrowserHttpResponse<T>>
+    put<T = unknown>(
+        url: string,
+        data?: unknown,
+    ): Promise<BrowserHttpResponse<T>>
 }
 
 export class HttpClientError extends Error {
@@ -455,7 +463,7 @@ export function createHttpClient(
     )
 
     const execute = async <T>(
-        method: 'delete' | 'get' | 'post',
+        method: 'delete' | 'get' | 'patch' | 'post' | 'put',
         url: string,
         data?: unknown,
         params?: Readonly<Record<string, string>>,
@@ -466,7 +474,9 @@ export function createHttpClient(
         }
         try {
             const encoded =
-                method === 'post' ? encodeJsonRequest(data) : undefined
+                method === 'post' || method === 'patch' || method === 'put'
+                    ? encodeJsonRequest(data)
+                    : undefined
             const headers = new AxiosHeaders()
             if (encoded?.contentType)
                 headers.set('Content-Type', encoded.contentType)
@@ -515,6 +525,10 @@ export function createHttpClient(
                 undefined,
                 copyIdempotencyKey(postOptions),
             ),
+        patch: <T = unknown>(url: string, data?: unknown) =>
+            execute<T>('patch', url, data),
+        put: <T = unknown>(url: string, data?: unknown) =>
+            execute<T>('put', url, data),
     })
 }
 

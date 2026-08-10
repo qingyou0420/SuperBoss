@@ -106,6 +106,7 @@ def create_app(
                 "/api/v1/projects/",
                 "/api/v1/files/",
                 "/api/v1/owner/devices",
+                "/api/v1/owner/users",
                 "/api/v1/device/import-jobs/",
             )
         )

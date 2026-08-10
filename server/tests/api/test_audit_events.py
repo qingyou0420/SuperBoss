@@ -376,6 +376,24 @@ _UNSAFE_ALLOWLIST = {
     ),
     (
         "POST",
+        "/api/v1/owner/users",
+        "superboss.modules.users.router",
+        "create_staff",
+    ),
+    (
+        "PATCH",
+        "/api/v1/owner/users/{user_id}",
+        "superboss.modules.users.router",
+        "update_staff",
+    ),
+    (
+        "PUT",
+        "/api/v1/owner/users/{user_id}/projects",
+        "superboss.modules.users.router",
+        "replace_projects",
+    ),
+    (
+        "POST",
         "/api/v1/device/import-jobs",
         "superboss.modules.imports.router",
         "create_import",

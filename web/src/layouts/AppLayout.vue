@@ -21,6 +21,7 @@ async function logout(): Promise<void> {
                 <router-link to="/owner/drive">文件上传</router-link>
                 <router-link to="/owner/devices">设备</router-link>
                 <router-link to="/owner/import-jobs">导入任务</router-link>
+                <router-link to="/owner/users">Users</router-link>
             </nav>
             <div class="app-layout__account">
                 <span>{{ auth.user?.userid }}</span>

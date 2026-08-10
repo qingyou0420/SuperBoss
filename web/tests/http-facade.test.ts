@@ -69,6 +69,34 @@ function containsCallable(value: unknown, seen = new Set<unknown>()): boolean {
     return Object.values(value).some((item) => containsCallable(item, seen))
 }
 
+test('exposes exact enumerable PATCH and PUT JSON operations without a raw transport escape hatch', async () => {
+    let patchConfig: InternalAxiosRequestConfig | undefined
+    let putConfig: InternalAxiosRequestConfig | undefined
+    const client = createHttpClient({
+        adapter: async (config) => {
+            if (config.method === 'patch') patchConfig = config
+            if (config.method === 'put') putConfig = config
+            return response(config, 200, { ok: true })
+        },
+    })
+
+    expect(Object.keys(client).sort()).toEqual([
+        'delete',
+        'get',
+        'patch',
+        'post',
+        'put',
+    ])
+    await client.patch('/owner/users/1', { status: 'DISABLED' })
+    await client.put('/owner/users/1/projects', { project_ids: [] })
+    expect(JSON.parse(String(patchConfig?.data))).toEqual({
+        status: 'DISABLED',
+    })
+    expect(JSON.parse(String(putConfig?.data))).toEqual({ project_ids: [] })
+    expect('request' in client).toBe(false)
+    expect('defaults' in client).toBe(false)
+})
+
 beforeEach(() => {
     setCookie('')
 })
@@ -86,19 +114,23 @@ afterEach(() => {
 })
 
 describe.sequential('narrow browser HTTP facade', () => {
-    test('is frozen and exposes only delete/get/post rather than the Axios execution surface', () => {
+    test('is frozen and exposes only bounded verb methods rather than the Axios execution surface', () => {
         const client = createHttpClient({
             adapter: async (config) => response(config, 200, {}),
         })
 
         expect(Object.isFrozen(client)).toBe(true)
-        expect(Object.keys(client).sort()).toEqual(['delete', 'get', 'post'])
+        expect(Object.keys(client).sort()).toEqual([
+            'delete',
+            'get',
+            'patch',
+            'post',
+            'put',
+        ])
         for (const rawSurface of [
             'defaults',
             'interceptors',
             'request',
-            'put',
-            'patch',
             'getUri',
         ]) {
             expect(client).not.toHaveProperty(rawSurface)

@@ -58,13 +58,19 @@ afterEach(() => {
 })
 
 describe('safe browser DELETE facade', () => {
-    test('exposes only frozen delete/get/post methods', () => {
+    test('exposes only frozen bounded verb methods', () => {
         const client = createHttpClient({
             adapter: vi.fn() as unknown as AxiosAdapter,
         })
 
         expect(Object.isFrozen(client)).toBe(true)
-        expect(Object.keys(client).sort()).toEqual(['delete', 'get', 'post'])
+        expect(Object.keys(client).sort()).toEqual([
+            'delete',
+            'get',
+            'patch',
+            'post',
+            'put',
+        ])
         expect('request' in client).toBe(false)
         expect('defaults' in client).toBe(false)
         expect('interceptors' in client).toBe(false)
@@ -169,7 +175,13 @@ describe('narrow idempotent POST option', () => {
         expect(headers.get('Idempotency-Key')).toBe(key)
         expect(headers.get('X-CSRF-Token')).toBe('csrf-post')
         expect(headers.get('Authorization')).toBeUndefined()
-        expect(Object.keys(client).sort()).toEqual(['delete', 'get', 'post'])
+        expect(Object.keys(client).sort()).toEqual([
+            'delete',
+            'get',
+            'patch',
+            'post',
+            'put',
+        ])
     })
 
     test.each([

@@ -20,6 +20,7 @@ import OwnerDevicesPage from '../pages/owner/DevicesPage.vue'
 import OwnerDrivePage from '../pages/owner/DrivePage.vue'
 import OwnerImportJobsPage from '../pages/owner/ImportJobsPage.vue'
 import OwnerProjectsPage from '../pages/owner/ProjectsPage.vue'
+import OwnerUsersPage from '../pages/owner/UsersPage.vue'
 
 declare module 'vue-router' {
     interface RouteMeta {
@@ -162,6 +163,11 @@ export function createAppRouter(
                         path: 'projects',
                         name: 'owner-projects',
                         component: OwnerProjectsPage,
+                    },
+                    {
+                        path: 'users',
+                        name: 'owner-users',
+                        component: OwnerUsersPage,
                     },
                     {
                         path: 'drive',
