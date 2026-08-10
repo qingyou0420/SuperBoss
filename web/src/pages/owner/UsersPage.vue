@@ -1,7 +1,15 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { projectsApi, type Project } from '../../api/projects'
-import { userErrorMessage, usersApi, type OwnerUser } from '../../api/users'
+import {
+    userErrorMessage,
+    usersApi as defaultUsersApi,
+    type OwnerUser,
+    type UsersApi,
+} from '../../api/users'
+
+const props = defineProps<{ readonly userApi?: UsersApi }>()
+const activeUsersApi = props.userApi ?? defaultUsersApi
 
 const users = ref<OwnerUser[]>([])
 const projects = ref<Project[]>([])
@@ -32,7 +40,7 @@ async function load(): Promise<void> {
     errorMessage.value = ''
     try {
         const [loadedUsers, loadedProjects] = await Promise.all([
-            usersApi.list(),
+            activeUsersApi.list(),
             projectsApi.list(),
         ])
         users.value = loadedUsers
@@ -48,7 +56,7 @@ async function add(): Promise<void> {
     saving.value = true
     errorMessage.value = ''
     try {
-        const created = await usersApi.create({
+        const created = await activeUsersApi.create({
             wecom_userid: wecomUserid.value,
             display_name: displayName.value,
             project_ids: [],
@@ -70,14 +78,14 @@ async function toggle(user: OwnerUser): Promise<void> {
     )
         return
     try {
-        replace(await usersApi.update(user.id, { status }))
+        replace(await activeUsersApi.update(user.id, { status }))
     } catch (error) {
         errorMessage.value = userErrorMessage(error)
     }
 }
 async function assign(user: OwnerUser, projectIds: string[]): Promise<void> {
     try {
-        replace(await usersApi.replaceProjects(user.id, projectIds))
+        replace(await activeUsersApi.replaceProjects(user.id, projectIds))
     } catch (error) {
         errorMessage.value = userErrorMessage(error)
     }

@@ -25,6 +25,12 @@ export interface StaffUpdate {
     display_name?: string
     status?: 'ACTIVE' | 'DISABLED'
 }
+export interface UsersApi {
+    list(): Promise<OwnerUser[]>
+    create(command: StaffCreate): Promise<OwnerUser>
+    update(userId: string, command: StaffUpdate): Promise<OwnerUser>
+    replaceProjects(userId: string, projectIds: string[]): Promise<OwnerUser>
+}
 export class UserContractError extends Error {
     constructor() {
         super('Invalid user data')
@@ -139,7 +145,7 @@ export function userErrorMessage(error: unknown): string {
         return '员工状态与现有记录冲突，请刷新后重试。'
     return '员工操作暂时无法完成，请稍后重试。'
 }
-export function createUsersApi(client: BrowserHttpClient) {
+export function createUsersApi(client: BrowserHttpClient): UsersApi {
     return {
         async list(): Promise<OwnerUser[]> {
             const response = await client.get('/owner/users')

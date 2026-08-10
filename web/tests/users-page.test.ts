@@ -29,16 +29,14 @@ vi.mock('../src/api/users', async () => {
 })
 vi.mock('../src/api/projects', () => ({
     projectsApi: {
-        list: vi
-            .fn()
-            .mockResolvedValue([
-                {
-                    id: '019f2b8e-18f0-7f31-9f42-3e6a76b9f810',
-                    name: '验收项目',
-                    is_test: false,
-                    status: 'ACTIVE',
-                },
-            ]),
+        list: vi.fn().mockResolvedValue([
+            {
+                id: '019f2b8e-18f0-7f31-9f42-3e6a76b9f810',
+                name: '验收项目',
+                is_test: false,
+                status: 'ACTIVE',
+            },
+        ]),
     },
 }))
 
@@ -74,6 +72,50 @@ beforeEach(() => {
 })
 
 describe('OWNER user management', () => {
+    test('creates and renders staff-acceptance through an injected narrow facade', async () => {
+        const seen: InternalAxiosRequestConfig[] = []
+        const adapter: AxiosAdapter = async (config) => {
+            seen.push(config)
+            if (config.method === 'get') return response(config, [])
+            return response(
+                config,
+                {
+                    ...staff,
+                    wecom_userid: 'staff-acceptance',
+                    display_name: 'Acceptance',
+                },
+                201,
+            )
+        }
+        render(UsersPage, {
+            props: { userApi: createUsersApi(createHttpClient({ adapter })) },
+            global: { plugins: [ElementPlus] },
+        })
+        const createButton = screen
+            .getAllByRole('button')
+            .find(
+                (button) =>
+                    button instanceof HTMLButtonElement &&
+                    button.type === 'submit',
+            )
+        if (!createButton) throw new Error('create button missing')
+        const [wecomUserId, displayName] = screen.getAllByRole('textbox')
+        await fireEvent.update(wecomUserId, 'staff-acceptance')
+        await fireEvent.update(displayName, 'Acceptance')
+        await fireEvent.click(createButton)
+
+        expect(await screen.findByText('staff-acceptance')).toBeInTheDocument()
+        expect(screen.getAllByText('STAFF').length).toBeGreaterThan(0)
+        expect(screen.queryByLabelText(/role/i)).not.toBeInTheDocument()
+        const post = seen.find((config) => config.method === 'post')
+        expect(post?.url).toBe('/owner/users')
+        expect(JSON.parse(String(post?.data))).toEqual({
+            wecom_userid: 'staff-acceptance',
+            display_name: 'Acceptance',
+            project_ids: [],
+        })
+    })
+
     test('creates a STAFF whitelist account through the narrow HTTP facade contract', async () => {
         const adapter: AxiosAdapter = async (config) =>
             response(

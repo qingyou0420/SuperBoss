@@ -13,7 +13,7 @@ class StaffCreate(BaseModel):
 
     wecom_userid: StrictStr = Field(min_length=1, max_length=255)
     display_name: StrictStr = Field(min_length=1, max_length=255)
-    project_ids: list[UUID]
+    project_ids: list[UUID] = Field(max_length=1000)
 
     @field_validator("project_ids")
     @classmethod
@@ -29,16 +29,11 @@ class StaffUpdate(BaseModel):
     display_name: StrictStr | None = Field(default=None, min_length=1, max_length=255)
     status: UserStatus | None = None
 
-    @field_validator("display_name")
-    @classmethod
-    def ensure_update_present(cls, value: StrictStr | None) -> StrictStr | None:
-        return value
-
 
 class ProjectAssignments(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    project_ids: list[UUID]
+    project_ids: list[UUID] = Field(max_length=1000)
 
     @field_validator("project_ids")
     @classmethod
