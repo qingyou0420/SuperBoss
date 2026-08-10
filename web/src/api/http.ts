@@ -1,25 +1,14 @@
 import axios, {
     AxiosHeaders,
     type AxiosAdapter,
-    type AxiosError,
-    type AxiosInstance,
-    type AxiosRequestTransformer,
     type InternalAxiosRequestConfig,
 } from 'axios'
 
 export const MAX_API_RESPONSE_BYTES = 256 * 1024
 
-const UNSAFE_METHODS = new Set(['post', 'put', 'patch', 'delete'])
+const MAX_JSON_DEPTH = 64
+const MAX_JSON_NODES = 20_000
 const REFRESH_PATH = '/auth/refresh'
-const DEFAULT_TRANSFORM_REQUEST = axios.defaults.transformRequest
-const SAFE_TRANSFORM_REQUEST: readonly AxiosRequestTransformer[] =
-    Object.freeze(
-        DEFAULT_TRANSFORM_REQUEST
-            ? Array.isArray(DEFAULT_TRANSFORM_REQUEST)
-                ? [...DEFAULT_TRANSFORM_REQUEST]
-                : [DEFAULT_TRANSFORM_REQUEST]
-            : [],
-    )
 
 type RetriableConfig = InternalAxiosRequestConfig & {
     _superbossAuthRetried?: boolean
@@ -31,6 +20,42 @@ export interface HttpClientOptions {
     onSessionRefreshed?: () => void | Promise<void>
 }
 
+export interface BrowserHttpResponse<T = unknown> {
+    readonly status: number
+    readonly data: T
+}
+
+export interface BrowserGetOptions {
+    readonly params?: Readonly<Record<string, string>>
+}
+
+export interface BrowserHttpClient {
+    get<T = unknown>(
+        url: string,
+        options?: BrowserGetOptions,
+    ): Promise<BrowserHttpResponse<T>>
+    post<T = unknown>(
+        url: string,
+        data?: unknown,
+    ): Promise<BrowserHttpResponse<T>>
+}
+
+export class HttpClientError extends Error {
+    readonly status: number | undefined
+    readonly data: unknown
+
+    constructor(status?: number, data?: unknown) {
+        super('HTTP request failed')
+        this.name = 'HttpClientError'
+        this.status =
+            Number.isInteger(status) && status! >= 100 && status! <= 599
+                ? status
+                : undefined
+        this.data = safeErrorData(data)
+        Object.freeze(this)
+    }
+}
+
 export class ApiContractError extends Error {
     constructor(message = 'Invalid API response') {
         super(message)
@@ -38,7 +63,7 @@ export class ApiContractError extends Error {
     }
 
     static safeMessage(error: unknown): string {
-        if (axios.isAxiosError(error) && error.response?.status === 401) {
+        if (responseStatus(error) === 401) {
             return '登录状态已失效，请重新登录。'
         }
         return '服务暂时不可用，请稍后重试。'
@@ -61,9 +86,13 @@ function readCsrfCookie(): string | undefined {
     return undefined
 }
 
+function utf8Size(value: string): number {
+    return new TextEncoder().encode(value).byteLength
+}
+
 function parseBoundedResponse(data: unknown): unknown {
     if (typeof data !== 'string') return data
-    if (new TextEncoder().encode(data).byteLength > MAX_API_RESPONSE_BYTES) {
+    if (utf8Size(data) > MAX_API_RESPONSE_BYTES) {
         throw new ApiContractError('API response is too large')
     }
     if (!data) return null
@@ -84,15 +113,201 @@ function isRefresh(config: InternalAxiosRequestConfig | undefined): boolean {
     return config?.url === REFRESH_PATH
 }
 
+function isPlainObject(value: object): boolean {
+    const prototype = Object.getPrototypeOf(value)
+    return prototype === Object.prototype || prototype === null
+}
+
+interface CopyState {
+    nodes: number
+    readonly active: WeakSet<object>
+}
+
+function safeJsonCopy(
+    value: unknown,
+    state: CopyState,
+    depth: number,
+): unknown {
+    state.nodes += 1
+    if (state.nodes > MAX_JSON_NODES || depth > MAX_JSON_DEPTH) {
+        throw new ApiContractError('JSON value is too complex')
+    }
+    if (
+        value === null ||
+        typeof value === 'boolean' ||
+        typeof value === 'string'
+    ) {
+        return value
+    }
+    if (typeof value === 'number') {
+        if (!Number.isFinite(value)) throw new ApiContractError()
+        return value
+    }
+    if (typeof value !== 'object') throw new ApiContractError()
+    if (state.active.has(value)) throw new ApiContractError()
+    state.active.add(value)
+    try {
+        if (Array.isArray(value)) {
+            const descriptors = Object.getOwnPropertyDescriptors(value)
+            const keys = Reflect.ownKeys(descriptors)
+            if (
+                keys.some(
+                    (key) =>
+                        typeof key !== 'string' ||
+                        (key !== 'length' && !/^(0|[1-9][0-9]*)$/.test(key)),
+                )
+            ) {
+                throw new ApiContractError()
+            }
+            const result: unknown[] = []
+            for (let index = 0; index < value.length; index += 1) {
+                const descriptor = descriptors[String(index)]
+                if (!descriptor?.enumerable || !('value' in descriptor)) {
+                    throw new ApiContractError()
+                }
+                result.push(safeJsonCopy(descriptor.value, state, depth + 1))
+            }
+            return Object.freeze(result)
+        }
+        if (!isPlainObject(value)) throw new ApiContractError()
+        const result: Record<string, unknown> = {}
+        const descriptors = Object.getOwnPropertyDescriptors(value)
+        for (const key of Reflect.ownKeys(descriptors)) {
+            if (typeof key !== 'string') throw new ApiContractError()
+            const descriptor = descriptors[key]
+            if (!descriptor.enumerable || !('value' in descriptor)) {
+                throw new ApiContractError()
+            }
+            Object.defineProperty(result, key, {
+                configurable: false,
+                enumerable: true,
+                value: safeJsonCopy(descriptor.value, state, depth + 1),
+                writable: false,
+            })
+        }
+        return Object.freeze(result)
+    } catch (error) {
+        if (error instanceof ApiContractError) throw error
+        throw new ApiContractError()
+    } finally {
+        state.active.delete(value)
+    }
+}
+
+function copySafeJson(value: unknown): unknown {
+    return safeJsonCopy(value, { nodes: 0, active: new WeakSet() }, 0)
+}
+
+interface EncodedRequestBody {
+    readonly data: string | undefined
+    readonly contentType: string | undefined
+}
+
+const encodeJsonRequest = Object.freeze(
+    (value: unknown): EncodedRequestBody => {
+        if (value === undefined || value === null) {
+            return Object.freeze({ data: undefined, contentType: undefined })
+        }
+        const safe = copySafeJson(value)
+        let data: string
+        try {
+            data = JSON.stringify(safe)
+        } catch {
+            throw new ApiContractError()
+        }
+        if (utf8Size(data) > MAX_API_RESPONSE_BYTES) {
+            throw new ApiContractError('API request is too large')
+        }
+        return Object.freeze({
+            data,
+            contentType: 'application/json',
+        })
+    },
+)
+
+function copySafeParams(options: unknown): Readonly<Record<string, string>> {
+    if (options === undefined) return Object.freeze({})
+    if (
+        typeof options !== 'object' ||
+        options === null ||
+        !isPlainObject(options)
+    ) {
+        throw new ApiContractError('Invalid query parameters')
+    }
+    const optionDescriptor = Object.getOwnPropertyDescriptor(options, 'params')
+    if (!optionDescriptor || !('value' in optionDescriptor)) {
+        return Object.freeze({})
+    }
+    const params = optionDescriptor.value
+    if (
+        typeof params !== 'object' ||
+        params === null ||
+        !isPlainObject(params)
+    ) {
+        throw new ApiContractError('Invalid query parameters')
+    }
+    const result: Record<string, string> = {}
+    for (const key of Reflect.ownKeys(params)) {
+        if (typeof key !== 'string') throw new ApiContractError()
+        const descriptor = Object.getOwnPropertyDescriptor(params, key)
+        if (
+            !descriptor?.enumerable ||
+            !('value' in descriptor) ||
+            typeof descriptor.value !== 'string'
+        ) {
+            throw new ApiContractError('Invalid query parameters')
+        }
+        Object.defineProperty(result, key, {
+            configurable: false,
+            enumerable: true,
+            value: descriptor.value,
+            writable: false,
+        })
+    }
+    return Object.freeze(result)
+}
+
+function safeResponseData(data: unknown): unknown {
+    if (data === undefined) return undefined
+    const safe = copySafeJson(data)
+    let serialized: string
+    try {
+        serialized = JSON.stringify(safe)
+    } catch {
+        throw new ApiContractError()
+    }
+    if (utf8Size(serialized) > MAX_API_RESPONSE_BYTES) {
+        throw new ApiContractError('API response is too large')
+    }
+    return safe
+}
+
+function safeErrorData(data: unknown): unknown {
+    try {
+        return safeResponseData(data)
+    } catch {
+        return undefined
+    }
+}
+
+function approvedAdapter(adapter: AxiosAdapter | undefined): AxiosAdapter {
+    const selected = adapter ?? axios.getAdapter(axios.defaults.adapter)
+    return Object.freeze((config: InternalAxiosRequestConfig) =>
+        Reflect.apply(selected, undefined, [config]),
+    )
+}
+
 export function createHttpClient(
     options: HttpClientOptions = {},
-): AxiosInstance {
+): BrowserHttpClient {
+    const transport = approvedAdapter(options.adapter)
     const client = axios.create({
-        adapter: options.adapter,
+        adapter: transport,
         baseURL: '/api/v1',
         maxBodyLength: MAX_API_RESPONSE_BYTES,
         maxContentLength: MAX_API_RESPONSE_BYTES,
         responseType: 'text',
+        transformRequest: [],
         transformResponse: [parseBoundedResponse],
         withCredentials: true,
         xsrfCookieName: '',
@@ -113,19 +328,24 @@ export function createHttpClient(
             throw new ApiContractError('Cross-origin API target rejected')
         }
         const headers = AxiosHeaders.from(config.headers)
+        config.adapter = transport
         config.baseURL = '/api/v1'
         config.withCredentials = true
         config.xsrfCookieName = ''
         config.xsrfHeaderName = ''
         delete config.auth
-        config.transformRequest = [...SAFE_TRANSFORM_REQUEST]
+        config.transformRequest = []
         config.responseType = 'text'
         config.transformResponse = [parseBoundedResponse]
         config.maxBodyLength = MAX_API_RESPONSE_BYTES
         config.maxContentLength = MAX_API_RESPONSE_BYTES
+        delete config.beforeRedirect
+        delete config.env
+        delete config.fetchOptions
+        delete config.transport
         headers.delete('Authorization')
         headers.delete('X-CSRF-Token')
-        if (UNSAFE_METHODS.has(config.method?.toLowerCase() ?? '')) {
+        if (config.method?.toLowerCase() === 'post') {
             const csrf = readCsrfCookie()
             if (csrf) headers.set('X-CSRF-Token', csrf)
         }
@@ -192,7 +412,55 @@ export function createHttpClient(
         },
     )
 
-    return client
+    const execute = async <T>(
+        method: 'get' | 'post',
+        url: string,
+        data?: unknown,
+        params?: Readonly<Record<string, string>>,
+    ): Promise<BrowserHttpResponse<T>> => {
+        if (!isSafeRelativeTarget(url)) {
+            throw new ApiContractError('Cross-origin API target rejected')
+        }
+        try {
+            const encoded =
+                method === 'post' ? encodeJsonRequest(data) : undefined
+            const headers = new AxiosHeaders()
+            if (encoded?.contentType)
+                headers.set('Content-Type', encoded.contentType)
+            const response = await client.request({
+                data: encoded?.data,
+                headers,
+                method,
+                params,
+                url,
+            })
+            return Object.freeze({
+                status: response.status,
+                data: safeResponseData(response.data) as T,
+            })
+        } catch (error) {
+            if (
+                error instanceof ApiContractError ||
+                error instanceof HttpClientError
+            ) {
+                throw error
+            }
+            if (axios.isAxiosError(error)) {
+                throw new HttpClientError(
+                    error.response?.status,
+                    error.response?.data,
+                )
+            }
+            throw new HttpClientError()
+        }
+    }
+
+    return Object.freeze({
+        get: <T = unknown>(url: string, getOptions?: BrowserGetOptions) =>
+            execute<T>('get', url, undefined, copySafeParams(getOptions)),
+        post: <T = unknown>(url: string, data?: unknown) =>
+            execute<T>('post', url, data),
+    })
 }
 
 let authenticationLostHandler: (() => void | Promise<void>) | undefined
@@ -216,7 +484,5 @@ export const apiClient = createHttpClient({
 })
 
 export function responseStatus(error: unknown): number | undefined {
-    return axios.isAxiosError(error)
-        ? (error as AxiosError).response?.status
-        : undefined
+    return error instanceof HttpClientError ? error.status : undefined
 }

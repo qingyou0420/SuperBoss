@@ -1,5 +1,4 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/vue'
-import { AxiosError, type AxiosResponse } from 'axios'
 import ElementPlus from 'element-plus'
 import { createPinia, setActivePinia } from 'pinia'
 import { defineComponent } from 'vue'
@@ -8,6 +7,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest'
 
 import * as authModule from '../src/api/auth'
 import { authApi } from '../src/api/auth'
+import { HttpClientError } from '../src/api/http'
 import { projectsApi } from '../src/api/projects'
 import { createAppRouter } from '../src/app/router'
 
@@ -18,14 +18,10 @@ const safeStart = {
         'https://open.weixin.qq.com/connect/oauth2/authorize?state=state-1',
 }
 
-function unauthorized(): AxiosError {
-    return new AxiosError('unsafe', 'ERR_BAD_REQUEST', undefined, undefined, {
-        config: {},
-        data: { detail: 'Authentication required' },
-        headers: {},
-        status: 401,
-        statusText: '401',
-    } as AxiosResponse)
+function unauthorized(): HttpClientError {
+    return new HttpClientError(401, {
+        detail: 'Authentication required',
+    })
 }
 
 async function renderAnonymousFlow(initialPath: string): Promise<Router> {

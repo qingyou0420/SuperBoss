@@ -1,6 +1,4 @@
-import axios, { type AxiosInstance } from 'axios'
-
-import { apiClient } from './http'
+import { HttpClientError, apiClient, type BrowserHttpClient } from './http'
 
 export const MAX_PROJECTS_PER_RESPONSE = 1000
 
@@ -103,10 +101,10 @@ function validatedCreate(value: unknown): ProjectCreate {
 }
 
 export function projectErrorMessage(error: unknown): string {
-    if (!axios.isAxiosError(error) || !isRecord(error.response?.data)) {
+    if (!(error instanceof HttpClientError) || !isRecord(error.data)) {
         return '项目操作失败，请稍后重试。'
     }
-    const body = error.response.data
+    const body = error.data
     if (!exactKeys(body, ['error']) || !isRecord(body.error)) {
         return '项目操作失败，请稍后重试。'
     }
@@ -125,7 +123,7 @@ export function projectErrorMessage(error: unknown): string {
     return '项目操作失败，请稍后重试。'
 }
 
-export function createProjectsApi(client: AxiosInstance) {
+export function createProjectsApi(client: BrowserHttpClient) {
     return {
         async list(): Promise<Project[]> {
             const response = await client.get('/projects')

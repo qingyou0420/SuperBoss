@@ -1,10 +1,10 @@
-import { AxiosError, type AxiosResponse } from 'axios'
 import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory } from 'vue-router'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { authApi } from '../src/api/auth'
 import * as httpModule from '../src/api/http'
+import { HttpClientError } from '../src/api/http'
 import { createAppRouter, safePostLoginPath } from '../src/app/router'
 import OwnerProjectsPage from '../src/pages/owner/ProjectsPage.vue'
 
@@ -20,14 +20,10 @@ vi.mock('../src/api/auth', () => ({
 
 const mockedAuth = vi.mocked(authApi)
 
-function unauthorized(): AxiosError {
-    return new AxiosError('unsafe', 'ERR_BAD_REQUEST', undefined, undefined, {
-        config: {},
-        data: { detail: 'Authentication required' },
-        headers: {},
-        status: 401,
-        statusText: '401',
-    } as AxiosResponse)
+function unauthorized(): HttpClientError {
+    return new HttpClientError(401, {
+        detail: 'Authentication required',
+    })
 }
 
 beforeEach(() => {

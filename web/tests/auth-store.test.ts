@@ -1,8 +1,8 @@
-import { AxiosError, type AxiosResponse } from 'axios'
 import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { authApi } from '../src/api/auth'
+import { HttpClientError } from '../src/api/http'
 import { useAuthStore } from '../src/stores/auth'
 
 vi.mock('../src/api/auth', () => ({
@@ -14,20 +14,10 @@ vi.mock('../src/api/auth', () => ({
 
 const mockedAuth = vi.mocked(authApi)
 
-function rejected(status: number): AxiosError {
-    return new AxiosError(
-        'unsafe detail',
-        'ERR_BAD_REQUEST',
-        undefined,
-        undefined,
-        {
-            config: {},
-            data: { detail: 'provider traceback sentinel' },
-            headers: {},
-            status,
-            statusText: String(status),
-        } as AxiosResponse,
-    )
+function rejected(status: number): HttpClientError {
+    return new HttpClientError(status, {
+        detail: 'provider traceback sentinel',
+    })
 }
 
 beforeEach(() => {
@@ -104,6 +94,7 @@ describe('auth store lifecycle', () => {
 
         expect(store.user).toBeNull()
         expect(store.isAuthenticated).toBe(false)
+        expect(store.errorMessage).toBe('')
         expect(getItem).not.toHaveBeenCalled()
         expect(setItem).not.toHaveBeenCalled()
     })

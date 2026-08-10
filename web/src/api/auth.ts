@@ -1,6 +1,4 @@
-import type { AxiosInstance } from 'axios'
-
-import { ApiContractError, apiClient } from './http'
+import { ApiContractError, apiClient, type BrowserHttpClient } from './http'
 
 const OAUTH_VALUE = /^[A-Za-z0-9._~-]{1,2048}$/
 
@@ -168,7 +166,7 @@ export function navigateToAuthorization(
     navigate(validateProviderUrl(url))
 }
 
-export function createAuthApi(client: AxiosInstance) {
+export function createAuthApi(client: BrowserHttpClient) {
     return {
         async startWeCom(): Promise<AuthStart> {
             const response = await client.get('/auth/wecom/start')

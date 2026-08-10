@@ -1,4 +1,3 @@
-import { AxiosError } from 'axios'
 import type {
     AxiosAdapter,
     AxiosRequestConfig,
@@ -7,7 +6,7 @@ import type {
 } from 'axios'
 import { describe, expect, test } from 'vitest'
 
-import { createHttpClient } from '../src/api/http'
+import { HttpClientError, createHttpClient } from '../src/api/http'
 import {
     MAX_PROJECTS_PER_RESPONSE,
     ProjectContractError,
@@ -153,25 +152,13 @@ describe('strict project API contracts', () => {
     })
 
     test('maps only a strict project error envelope and never renders its server message', () => {
-        const conflict = new AxiosError(
-            'raw',
-            'ERR_BAD_REQUEST',
-            undefined,
-            undefined,
-            {
-                config: {},
-                data: {
-                    error: {
-                        code: 'PROJECT_NAME_CONFLICT',
-                        message: 'A project with this name already exists',
-                        request_id: 'bba39a39-47ba-4ac5-9250-ccdba1d7f25e',
-                    },
-                },
-                headers: {},
-                status: 409,
-                statusText: '409',
-            } as AxiosResponse,
-        )
+        const conflict = new HttpClientError(409, {
+            error: {
+                code: 'PROJECT_NAME_CONFLICT',
+                message: 'A project with this name already exists',
+                request_id: 'bba39a39-47ba-4ac5-9250-ccdba1d7f25e',
+            },
+        })
         expect(projectErrorMessage(conflict)).toBe('项目名称已存在。')
 
         for (const data of [
@@ -199,19 +186,7 @@ describe('strict project API contracts', () => {
                 },
             },
         ]) {
-            const malformed = new AxiosError(
-                'raw sentinel',
-                'ERR_BAD_RESPONSE',
-                undefined,
-                undefined,
-                {
-                    config: {},
-                    data,
-                    headers: {},
-                    status: 500,
-                    statusText: '500',
-                } as AxiosResponse,
-            )
+            const malformed = new HttpClientError(500, data)
             expect(projectErrorMessage(malformed)).toBe(
                 '项目操作失败，请稍后重试。',
             )

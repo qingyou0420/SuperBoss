@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest'
 
 import {
     ApiContractError,
+    HttpClientError,
     MAX_API_RESPONSE_BYTES,
     createHttpClient,
 } from '../src/api/http'
@@ -59,7 +60,7 @@ describe('browser HTTP security boundary', () => {
         expect(MAX_API_RESPONSE_BYTES).toBe(256 * 1024)
     })
 
-    test('uses cookie credentials, never manufactures bearer auth, and attaches decoded CSRF only to unsafe methods', async () => {
+    test('uses cookie credentials, never manufactures bearer auth, and attaches decoded CSRF only to the POST surface', async () => {
         setCookie(encodeURIComponent('csrf value/+=_'))
         localStorage.setItem('access_token', 'attacker-local-access')
         sessionStorage.setItem('refresh_token', 'attacker-session-refresh')
@@ -73,23 +74,18 @@ describe('browser HTTP security boundary', () => {
 
         await client.get('/projects')
         await client.post('/projects', { name: 'Safe' })
-        await client.put('/projects/1', {})
-        await client.patch('/projects/1', {})
-        await client.delete('/projects/1')
 
-        expect(client.defaults.withCredentials).toBe(true)
-        expect(client.defaults.baseURL).toBe('/api/v1')
-        expect(client.defaults.responseType).toBe('text')
-        expect(client.defaults.xsrfCookieName).toBe('')
-        expect(client.defaults.xsrfHeaderName).toBe('')
-        expect(seen).toHaveLength(5)
+        expect(seen).toHaveLength(2)
         for (const request of seen) {
             expect(request.headers?.Authorization).toBeUndefined()
+            expect(request.withCredentials).toBe(true)
+            expect(request.baseURL).toBe('/api/v1')
+            expect(request.responseType).toBe('text')
+            expect(request.xsrfCookieName).toBe('')
+            expect(request.xsrfHeaderName).toBe('')
         }
         expect(seen[0].headers?.['X-CSRF-Token']).toBeUndefined()
-        for (const request of seen.slice(1)) {
-            expect(request.headers?.['X-CSRF-Token']).toBe('csrf value/+=_')
-        }
+        expect(seen[1].headers?.['X-CSRF-Token']).toBe('csrf value/+=_')
         expect(getItem).not.toHaveBeenCalled()
     })
 
@@ -101,7 +97,10 @@ describe('browser HTTP security boundary', () => {
         }
         const client = createHttpClient({ adapter })
 
-        await client.get('/projects', { responseType: 'json' })
+        await (client.get as (...args: unknown[]) => Promise<unknown>)(
+            '/projects',
+            { responseType: 'json' },
+        )
 
         expect(seen?.responseType).toBe('text')
     })
@@ -115,17 +114,21 @@ describe('browser HTTP security boundary', () => {
         }
         const client = createHttpClient({ adapter })
 
-        await client.post('/auth/logout', null, {
-            auth: { username: 'attacker', password: 'sentinel' },
-            baseURL: 'https://evil.example/api',
-            headers: {
-                aUtHoRiZaTiOn: 'Basic sentinel',
-                'x-CsRf-ToKeN': 'caller-controlled',
+        await (client.post as (...args: unknown[]) => Promise<unknown>)(
+            '/auth/logout',
+            null,
+            {
+                auth: { username: 'attacker', password: 'sentinel' },
+                baseURL: 'https://evil.example/api',
+                headers: {
+                    aUtHoRiZaTiOn: 'Basic sentinel',
+                    'x-CsRf-ToKeN': 'caller-controlled',
+                },
+                withCredentials: false,
+                xsrfCookieName: 'ATTACKER-XSRF',
+                xsrfHeaderName: 'X-Attacker-XSRF',
             },
-            withCredentials: false,
-            xsrfCookieName: 'ATTACKER-XSRF',
-            xsrfHeaderName: 'X-Attacker-XSRF',
-        })
+        )
 
         expect(seen?.url).toBe('/auth/logout')
         expect(seen?.baseURL).toBe('/api/v1')
@@ -165,7 +168,7 @@ describe('browser HTTP security boundary', () => {
             const transformRequest = shape === 'array' ? [hostile] : hostile
             const client = createHttpClient({ adapter })
 
-            await client.post(
+            await (client.post as (...args: unknown[]) => Promise<unknown>)(
                 '/projects',
                 { name: 'Safe project', is_test: true },
                 { transformRequest },
@@ -201,14 +204,17 @@ describe('browser HTTP security boundary', () => {
         const client = createHttpClient({ adapter })
 
         await expect(
-            client.get('/projects', {
-                maxBodyLength: Number.MAX_SAFE_INTEGER,
-                maxContentLength: Number.MAX_SAFE_INTEGER,
-                responseType: 'json',
-                transformResponse: [
-                    (data: string) => JSON.parse(data) as unknown,
-                ],
-            }),
+            (client.get as (...args: unknown[]) => Promise<unknown>)(
+                '/projects',
+                {
+                    maxBodyLength: Number.MAX_SAFE_INTEGER,
+                    maxContentLength: Number.MAX_SAFE_INTEGER,
+                    responseType: 'json',
+                    transformResponse: [
+                        (data: string) => JSON.parse(data) as unknown,
+                    ],
+                },
+            ),
         ).rejects.toBeInstanceOf(ApiContractError)
 
         expect(seen?.responseType).toBe('text')
@@ -245,9 +251,12 @@ describe('browser HTTP security boundary', () => {
             return response(config, 204, null)
         }
 
-        await createHttpClient({ adapter }).post('/auth/logout', null, {
-            headers: { 'X-CSRF-Token': 'caller-controlled' },
-        })
+        const client = createHttpClient({ adapter })
+        await (client.post as (...args: unknown[]) => Promise<unknown>)(
+            '/auth/logout',
+            null,
+            { headers: { 'X-CSRF-Token': 'caller-controlled' } },
+        )
 
         expect(seen?.headers?.['X-CSRF-Token']).toBeUndefined()
     })
@@ -358,7 +367,7 @@ describe('browser HTTP security boundary', () => {
         })
 
         await expect(client.get('/projects')).rejects.toMatchObject({
-            response: { status: 401 },
+            status: 401,
         })
 
         expect(refreshCalls).toBe(1)
@@ -439,7 +448,7 @@ describe('browser HTTP security boundary', () => {
         const client = createHttpClient({ adapter, onAuthenticationLost: lost })
 
         await expect(client.get('/projects')).rejects.toMatchObject({
-            response: { status: 401 },
+            status: 401,
         })
 
         expect(refreshCalls).toBe(1)
@@ -524,24 +533,12 @@ describe('browser HTTP security boundary', () => {
     })
 
     test('maps hostile server details to a fixed safe message', () => {
-        const error = new AxiosError(
-            'raw transport secret',
-            'ERR_BAD_RESPONSE',
-            undefined,
-            undefined,
-            {
-                config: {},
-                data: {
-                    error: {
-                        code: 'INTERNAL',
-                        message: 'postgres password=sentinel',
-                    },
-                },
-                headers: {},
-                status: 500,
-                statusText: '500',
-            } as AxiosResponse,
-        )
+        const error = new HttpClientError(500, {
+            error: {
+                code: 'INTERNAL',
+                message: 'postgres password=sentinel',
+            },
+        })
 
         expect(ApiContractError.safeMessage(error)).toBe(
             '服务暂时不可用，请稍后重试。',
