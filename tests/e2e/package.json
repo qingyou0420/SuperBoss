@@ -1,0 +1,21 @@
+{
+  "name": "superboss-live-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "lint": "eslint .",
+    "test": "playwright test",
+    "test:contracts": "playwright test --config playwright.contract.config.ts",
+    "test:list": "playwright test --list",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.62.1",
+    "@types/node": "^26.2.0",
+    "eslint": "^10.8.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.66.0"
+  }
+}

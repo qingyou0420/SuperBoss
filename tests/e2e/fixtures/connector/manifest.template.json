@@ -1,0 +1,23 @@
+{
+  "idempotency_key": "__IDEMPOTENCY_KEY__",
+  "project_id": "__PROJECT_ID__",
+  "local_task_id": "m1-e2e-connector",
+  "external_document_reference": "m1-e2e-fixture",
+  "base_sha256": null,
+  "k3_result": {
+    "model_label": "K3",
+    "processed_at": "2026-08-10T00:00:00Z",
+    "modification_details": ["M1 acceptance fixture."],
+    "knowledge_points": ["Connector submission is verified against a live deployment."],
+    "risks": [],
+    "suggested_title": "M1 connector acceptance",
+    "suggested_tags": ["acceptance", "m1"]
+  },
+  "attachments": [
+    {
+      "kind": "K3_RAW",
+      "path": "k3-result.json",
+      "content_type": "application/json"
+    }
+  ]
+}
