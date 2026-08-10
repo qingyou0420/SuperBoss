@@ -85,6 +85,15 @@ function idempotencyKey(value: unknown): value is string {
     })
 }
 
+function calendarDate(value: string): boolean {
+    if (!DATE.test(value) || value.slice(0, 4) === '0000') return false
+    const parsed = new Date(`${value}T00:00:00.000Z`)
+    return (
+        Number.isFinite(parsed.getTime()) &&
+        parsed.toISOString().slice(0, 10) === value
+    )
+}
+
 function canonicalStart(value: unknown): FileUploadStart {
     if (
         !isRecord(value) ||
@@ -106,8 +115,7 @@ function canonicalStart(value: unknown): FileUploadStart {
         !SHA256.test(value.sha256) ||
         !safeText(value.category, 255) ||
         typeof value.file_date !== 'string' ||
-        !DATE.test(value.file_date) ||
-        Number.isNaN(Date.parse(`${value.file_date}T00:00:00Z`)) ||
+        !calendarDate(value.file_date) ||
         typeof value.content_type !== 'string' ||
         value.content_type.length > 255 ||
         !MIME.test(value.content_type)

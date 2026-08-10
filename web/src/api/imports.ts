@@ -139,27 +139,13 @@ function parseAttachment(value: unknown): OwnerImportAttachment {
 function validStateSemantics(
     status: JobStatus,
     resultCode: string | null,
-    attachments: readonly OwnerImportAttachment[],
+    submittedAt: string | null,
 ): boolean {
-    const states = attachments.map((attachment) => attachment.file_state)
     if (status === 'UPLOADING')
-        return resultCode === null && states.includes('UPLOADING')
-    if (status === 'SCANNING')
-        return (
-            resultCode === null &&
-            states.every((state) =>
-                ['QUARANTINED', 'SCANNING', 'CLEAN'].includes(state),
-            ) &&
-            states.some((state) => state !== 'CLEAN')
-        )
-    if (status === 'RECEIVED')
-        return resultCode === null && states.every((state) => state === 'CLEAN')
-    if (status === 'CONFLICT')
-        return resultCode !== null && states.every((state) => state === 'CLEAN')
-    return (
-        resultCode !== null &&
-        states.some((state) => state === 'INFECTED' || state === 'FAILED')
-    )
+        return resultCode === null && submittedAt === null
+    if (status === 'SCANNING' || status === 'RECEIVED')
+        return resultCode === null && submittedAt !== null
+    return resultCode !== null && submittedAt !== null
 }
 
 function parseSummary(value: unknown): OwnerImportSummary {
@@ -210,12 +196,11 @@ function parseSummary(value: unknown): OwnerImportSummary {
     }
     const status = value.status as JobStatus
     const resultCode = value.result_code as string | null
-    if (!validStateSemantics(status, resultCode, attachments))
-        throw new ImportContractError()
     const createdAt = timestamp(value.created_at)
     const submittedAt = nullableTimestamp(value.submitted_at)
     const updatedAt = timestamp(value.updated_at)
     if (
+        !validStateSemantics(status, resultCode, submittedAt) ||
         createdAt > updatedAt ||
         (submittedAt !== null &&
             (submittedAt < createdAt || submittedAt > updatedAt))

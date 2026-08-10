@@ -355,6 +355,117 @@ async def test_repeat_complete_is_rejected_without_redelivery(file_client, db_se
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "terminal_state",
+    ["QUARANTINED", "SCANNING", "CLEAN", "INFECTED", "FAILED"],
+)
+async def test_exact_complete_replay_returns_current_terminal_state_without_redelivery(
+    file_client,
+    db_session: AsyncSession,
+    terminal_state: str,
+) -> None:
+    from uuid import UUID
+
+    from sqlalchemy import select
+
+    from superboss.modules.audit.models import AuditLog
+    from superboss.modules.files.models import (
+        File,
+        FileLifecycleOutbox,
+        FileState,
+        FileStorageCleanup,
+        Upload,
+    )
+
+    client, storage = file_client
+    app = client.app
+    project = Project(name=f"Terminal replay {terminal_state}")
+    db_session.add(project)
+    await db_session.commit()
+    _login(client)
+    dispatched: list[UUID] = []
+    app.state.enqueue_file_scan = (
+        lambda file_id, _delivery_key: dispatched.append(file_id)
+    )
+    csrf = str(client.cookies.get("XSRF-TOKEN"))
+    started = client.post(
+        "/api/v1/files/uploads",
+        json={
+            "project_id": str(project.id),
+            "filename": "x.pdf",
+            "size_bytes": 1,
+            "sha256": "0" * 64,
+            "category": "资料",
+            "file_date": "2026-08-09",
+        },
+        headers={
+            "X-CSRF-Token": csrf,
+            "Idempotency-Key": f"terminal-{terminal_state.lower()}",
+        },
+    )
+    upload = await db_session.get(Upload, started.json()["upload_id"])
+    assert upload is not None
+    body = {"parts": [{"part_number": 1, "etag": "stable-etag"}]}
+    first = client.post(
+        f"/api/v1/files/uploads/{upload.id}/complete",
+        json=body,
+        headers={"X-CSRF-Token": csrf},
+    )
+    file = await db_session.get(File, upload.file_id)
+    assert first.status_code == 200 and file is not None
+    file.state = FileState(terminal_state)
+    await db_session.commit()
+    completion_events_before = list(
+        await db_session.scalars(
+            select(AuditLog).where(AuditLog.action == "file.upload.complete")
+        )
+    )
+    outbox_before = list(await db_session.scalars(select(FileLifecycleOutbox)))
+    cleanup_before = list(await db_session.scalars(select(FileStorageCleanup)))
+
+    replay = client.post(
+        f"/api/v1/files/uploads/{upload.id}/complete",
+        json=body,
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    completion_events_after = list(
+        await db_session.scalars(
+            select(AuditLog).where(AuditLog.action == "file.upload.complete")
+        )
+    )
+    outbox_after = list(await db_session.scalars(select(FileLifecycleOutbox)))
+    cleanup_after = list(await db_session.scalars(select(FileStorageCleanup)))
+    assert replay.status_code == 200
+    assert replay.json() == {
+        "file_id": str(upload.file_id),
+        "state": terminal_state,
+    }
+    assert storage.complete_calls == 1
+    assert len(storage.completed) == 1
+    assert dispatched == [upload.file_id]
+    assert [event.id for event in completion_events_after] == [
+        event.id for event in completion_events_before
+    ]
+    assert [entry.id for entry in outbox_after] == [
+        entry.id for entry in outbox_before
+    ]
+    assert [entry.id for entry in cleanup_after] == [
+        entry.id for entry in cleanup_before
+    ]
+
+    conflict = client.post(
+        f"/api/v1/files/uploads/{upload.id}/complete",
+        json={"parts": [{"part_number": 1, "etag": "different-etag"}]},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "FILE_UPLOAD_CONFLICT"
+    assert storage.complete_calls == 1
+    assert dispatched == [upload.file_id]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("key", ["x", "!" * 255])
 async def test_start_accepts_idempotency_key_boundaries(file_client, db_session: AsyncSession, key: str) -> None:
     client, storage = file_client; project = Project(name=f"Key {len(key)}"); db_session.add(project); await db_session.commit(); _login(client)

@@ -1,11 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 
-import {
-    fileErrorMessage,
-    filesApi,
-    type FileUploadCompleted,
-} from '../../api/files'
+import { filesApi, type FileUploadCompleted } from '../../api/files'
 import { projectsApi, type Project } from '../../api/projects'
 import MultipartUploader from '../../components/files/MultipartUploader.vue'
 
@@ -60,12 +56,13 @@ function showCompleted(result: FileUploadCompleted): void {
 
 async function prepareDownload(): Promise<void> {
     const result = currentResult.value
-    if (!result || result.state !== 'CLEAN') return
+    if (!result) return
     errorMessage.value = ''
     try {
         downloadUrl.value = await filesApi.download(result.file_id)
-    } catch (error) {
-        errorMessage.value = fileErrorMessage(error)
+        currentResult.value = { ...result, state: 'CLEAN' }
+    } catch {
+        errorMessage.value = '文件仍在扫描中，请稍后重试。'
     }
 }
 
@@ -126,11 +123,8 @@ onMounted(loadProjects)
                 {{ currentResult.state === 'CLEAN' ? '处理完成' : '扫描中' }}
             </p>
             <p>{{ currentResult.file_id }}</p>
-            <el-button
-                v-if="currentResult.state === 'CLEAN' && !downloadUrl"
-                @click="prepareDownload"
-            >
-                获取下载链接
+            <el-button v-if="!downloadUrl" @click="prepareDownload">
+                检查并获取下载
             </el-button>
             <a v-if="downloadUrl" :href="downloadUrl">下载本次文件</a>
         </el-card>

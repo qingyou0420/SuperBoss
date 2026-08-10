@@ -85,15 +85,7 @@ async function revoke(device: OwnerDevice): Promise<void> {
     errorMessage.value = ''
     try {
         await devicesApi.revoke(device.id)
-        devices.value = devices.value.map((item) =>
-            item.id === device.id
-                ? {
-                      ...item,
-                      revoked_at: new Date().toISOString(),
-                      status: 'REVOKED',
-                  }
-                : item,
-        )
+        devices.value = await devicesApi.list()
     } catch (error) {
         errorMessage.value = deviceErrorMessage(error)
     }
@@ -160,6 +152,9 @@ onBeforeUnmount(clearPairingCode)
                         <p>首次配对：{{ formatTimestamp(device.paired_at) }}</p>
                         <p>
                             最近使用：{{ formatTimestamp(device.last_used_at) }}
+                        </p>
+                        <p v-if="device.revoked_at">
+                            撤销时间：{{ formatTimestamp(device.revoked_at) }}
                         </p>
                         <p>
                             授权项目：{{

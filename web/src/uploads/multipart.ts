@@ -157,6 +157,15 @@ function isEtag(value: unknown): value is string {
     )
 }
 
+function isCalendarDate(value: string): boolean {
+    if (!DATE.test(value) || value.slice(0, 4) === '0000') return false
+    const parsed = new Date(`${value}T00:00:00.000Z`)
+    return (
+        Number.isFinite(parsed.getTime()) &&
+        parsed.toISOString().slice(0, 10) === value
+    )
+}
+
 function canonicalCommand(value: unknown): UploadCommand {
     if (
         !isRecord(value) ||
@@ -169,7 +178,7 @@ function canonicalCommand(value: unknown): UploadCommand {
         value.file.lastModified < 0 ||
         !isSafeText(value.category, 255) ||
         typeof value.file_date !== 'string' ||
-        !DATE.test(value.file_date) ||
+        !isCalendarDate(value.file_date) ||
         typeof value.project_id !== 'string' ||
         !UUID.test(value.project_id)
     ) {

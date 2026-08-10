@@ -3,22 +3,31 @@ import ElementPlus from 'element-plus'
 import { createPinia, setActivePinia } from 'pinia'
 import { defineComponent } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
-import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { createAppRouter } from '../src/app/router'
 import AppLayout from '../src/layouts/AppLayout.vue'
 
 const DRIVE_PATH = '../src/pages/owner/DrivePage.vue'
 const PROJECT_ID = '019f2b8e-18f0-7f31-9f42-3e6a76b9f810'
+const FILE_ID = '019f2b8e-18f0-7f31-9f42-3e6a76b9f811'
 
 const mocks = vi.hoisted(() => ({
+    filesApi: { download: vi.fn() },
     projectsApi: { list: vi.fn() },
 }))
 
+vi.mock('../src/api/files', () => ({
+    fileErrorMessage: () => '文件操作失败，请稍后重试。',
+    filesApi: mocks.filesApi,
+}))
 vi.mock('../src/api/projects', () => ({ projectsApi: mocks.projectsApi }))
 
 beforeEach(() => {
     vi.clearAllMocks()
+    mocks.filesApi.download.mockReset()
+    localStorage.clear()
+    sessionStorage.clear()
     setActivePinia(createPinia())
     mocks.projectsApi.list.mockResolvedValue([
         {
@@ -28,6 +37,10 @@ beforeEach(() => {
             status: 'ACTIVE',
         },
     ])
+})
+
+afterEach(() => {
+    vi.restoreAllMocks()
 })
 
 describe('Task13 OWNER navigation and Drive integration', () => {
@@ -100,5 +113,64 @@ describe('Task13 OWNER navigation and Drive integration', () => {
         await fireEvent.click(screen.getByRole('button', { name: '完成上传' }))
         expect(screen.getByText('扫描中')).toBeInTheDocument()
         expect(screen.getByText('file-1')).toBeInTheDocument()
+    })
+
+    test('rechecks only the current quarantined file until its download becomes ready', async () => {
+        const module = await import(/* @vite-ignore */ DRIVE_PATH)
+        const storageWrite = vi.spyOn(Storage.prototype, 'setItem')
+        const consoleWrite = vi
+            .spyOn(console, 'log')
+            .mockImplementation(() => undefined)
+        mocks.filesApi.download
+            .mockRejectedValueOnce(
+                new Error('FILE_NOT_CLEAN provider sentinel signed-url'),
+            )
+            .mockResolvedValueOnce(
+                'https://objects.example/download/current?signature=secret',
+            )
+        const MultipartStub = defineComponent({
+            emits: ['completed'],
+            template:
+                "<button @click=\"$emit('completed', { file_id: '" +
+                FILE_ID +
+                "', state: 'QUARANTINED' })\">完成上传</button>",
+        })
+        render(module.default, {
+            props: { allowedObjectOrigin: 'https://objects.example' },
+            global: {
+                plugins: [ElementPlus],
+                stubs: { MultipartUploader: MultipartStub },
+            },
+        })
+        await screen.findByText('客户方案')
+        await fireEvent.click(screen.getByRole('button', { name: '完成上传' }))
+
+        const check = screen.getByRole('button', {
+            name: '检查并获取下载',
+        })
+        await fireEvent.click(check)
+        expect(
+            await screen.findByText('文件仍在扫描中，请稍后重试。'),
+        ).toBeInTheDocument()
+        expect(
+            screen.queryByRole('link', { name: '下载本次文件' }),
+        ).not.toBeInTheDocument()
+        expect(check).toBeInTheDocument()
+
+        await fireEvent.click(check)
+        const link = await screen.findByRole('link', {
+            name: '下载本次文件',
+        })
+        expect(link).toHaveAttribute(
+            'href',
+            'https://objects.example/download/current?signature=secret',
+        )
+        expect(mocks.filesApi.download).toHaveBeenNthCalledWith(1, FILE_ID)
+        expect(mocks.filesApi.download).toHaveBeenNthCalledWith(2, FILE_ID)
+        expect(storageWrite).not.toHaveBeenCalled()
+        expect(localStorage).toHaveLength(0)
+        expect(sessionStorage).toHaveLength(0)
+        expect(consoleWrite).not.toHaveBeenCalled()
+        expect(screen.queryByText(/历史文件|全部文件/)).not.toBeInTheDocument()
     })
 })

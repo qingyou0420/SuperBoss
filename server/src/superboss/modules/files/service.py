@@ -516,7 +516,13 @@ class FileService:
             json.dumps(encoded_parts, separators=(",", ":"), ensure_ascii=False).encode()
         ).hexdigest()
         if lifecycle.completion_state == "QUARANTINED":
-            if lifecycle.parts_digest == digest and file.state == FileState.QUARANTINED:
+            if lifecycle.parts_digest == digest and file.state in {
+                FileState.QUARANTINED,
+                FileState.SCANNING,
+                FileState.CLEAN,
+                FileState.INFECTED,
+                FileState.FAILED,
+            }:
                 return file
             raise FileUploadConflictError()
         if lifecycle.completion_state == "NONE":

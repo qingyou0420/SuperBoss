@@ -1,3 +1,5 @@
+import { Blob as NodeBlob } from 'node:buffer'
+
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 const MODULE_PATH = '../src/uploads/multipart'
@@ -190,6 +192,29 @@ describe('supervised multipart upload orchestration', () => {
         expect(fixture.store.value()).toBeNull()
     })
 
+    test('rejects an impossible calendar date before hashing, storage, or network', async () => {
+        const mod = await multipartModule()
+        const fixture = uploaderFixture({ fileSize: 1 })
+        const uploader = mod.createMultipartUploader({
+            filesApi: fixture.filesApi,
+            hasher: fixture.hasher,
+            progressStore: fixture.store,
+            uploadPart: fixture.uploadPart,
+        })
+
+        await expect(
+            uploader.upload({
+                ...uploadCommand(fixture.file),
+                file_date: '2026-02-31',
+            }),
+        ).rejects.toBeInstanceOf(mod.UploadContractError)
+        expect(fixture.hasher.hash).not.toHaveBeenCalled()
+        expect(fixture.store.load).not.toHaveBeenCalled()
+        expect(fixture.filesApi.start).not.toHaveBeenCalled()
+        expect(fixture.filesApi.partUrl).not.toHaveBeenCalled()
+        expect(fixture.uploadPart).not.toHaveBeenCalled()
+    })
+
     test('deterministically derives a stable high-entropy key from the full upload intent', async () => {
         const mod = await multipartModule()
         const first = uploaderFixture({ fileSize: 1 })
@@ -281,6 +306,56 @@ describe('supervised multipart upload orchestration', () => {
             { etag: 'etag', part_number: 3 },
         ])
         expect(resumed.store.delete).toHaveBeenCalledTimes(1)
+    })
+
+    test('reload acknowledges a terminal completion after the first response is lost', async () => {
+        const mod = await multipartModule()
+        const first = uploaderFixture({ fileSize: 1 })
+        first.filesApi.complete.mockRejectedValueOnce(
+            new Error('completion response lost after server commit'),
+        )
+        const firstUploader = mod.createMultipartUploader({
+            filesApi: first.filesApi,
+            hasher: first.hasher,
+            progressStore: first.store,
+            uploadPart: first.uploadPart,
+        })
+
+        await expect(
+            firstUploader.upload(uploadCommand(first.file)),
+        ).rejects.toBeInstanceOf(mod.UploadContractError)
+        const saved = first.store.value()
+        expect(saved).not.toBeNull()
+        if (saved === null) throw new Error('expected resumable progress')
+        expect(Object.keys(saved).sort()).toEqual([
+            'completed_parts',
+            'fingerprint',
+            'upload_id',
+        ])
+
+        const resumed = uploaderFixture({ fileSize: 1, progress: saved })
+        resumed.filesApi.complete.mockResolvedValueOnce({
+            file_id: FILE_ID,
+            state: 'CLEAN',
+        })
+        const resumedUploader = mod.createMultipartUploader({
+            filesApi: resumed.filesApi,
+            hasher: resumed.hasher,
+            progressStore: resumed.store,
+            uploadPart: resumed.uploadPart,
+        })
+
+        await expect(
+            resumedUploader.upload(uploadCommand(resumed.file)),
+        ).resolves.toEqual({ file_id: FILE_ID, state: 'CLEAN' })
+        expect(resumed.filesApi.start).not.toHaveBeenCalled()
+        expect(resumed.filesApi.partUrl).not.toHaveBeenCalled()
+        expect(resumed.uploadPart).not.toHaveBeenCalled()
+        expect(resumed.filesApi.complete).toHaveBeenCalledWith(UPLOAD_ID, [
+            { etag: 'etag', part_number: 1 },
+        ])
+        expect(resumed.store.delete).toHaveBeenCalledTimes(1)
+        expect(resumed.store.value()).toBeNull()
     })
 
     test('discards a fingerprint mismatch before creating a fresh upload', async () => {
@@ -489,9 +564,9 @@ describe('worker hash and isolated presigned PUT boundaries', () => {
 
     test('uses an exact injected HTTPS origin and omits browser credentials', async () => {
         const mod = await multipartModule()
+        const finalRequests: Request[] = []
         const fetcher = vi.fn(async (input: string, options?: RequestInit) => {
-            void input
-            void options
+            finalRequests.push(new Request(input, options))
             return {
                 arrayBuffer: () => {
                     throw new Error('response body must not be read')
@@ -507,7 +582,9 @@ describe('worker hash and isolated presigned PUT boundaries', () => {
             allowedObjectOrigin: 'https://objects.example',
             fetch: fetcher,
         })
-        const body = new Blob(['part'])
+        const body = new NodeBlob(['part'], {
+            type: 'application/pdf',
+        }) as Blob
 
         await expect(
             transport.put('https://objects.example/upload/1?signature=x', body),
@@ -519,9 +596,16 @@ describe('worker hash and isolated presigned PUT boundaries', () => {
             method: 'PUT',
             redirect: 'error',
         })
-        expect(new Headers(options?.headers).has('Authorization')).toBe(false)
-        expect(new Headers(options?.headers).has('Cookie')).toBe(false)
-        expect(new Headers(options?.headers).has('X-CSRF-Token')).toBe(false)
+        expect(finalRequests).toHaveLength(1)
+        const finalRequest = finalRequests[0]
+        expect(finalRequest?.credentials).toBe('omit')
+        expect(finalRequest?.redirect).toBe('error')
+        expect(finalRequest?.headers.get('Content-Type')).toBe(
+            'application/pdf',
+        )
+        expect(finalRequest?.headers.has('Authorization')).toBe(false)
+        expect(finalRequest?.headers.has('Cookie')).toBe(false)
+        expect(finalRequest?.headers.has('X-CSRF-Token')).toBe(false)
     })
 
     test.each([

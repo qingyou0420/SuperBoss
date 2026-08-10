@@ -171,6 +171,10 @@ describe('strict browser file API', () => {
                 command: { ...startCommand, content_type: 'not-mime' },
                 key: idempotencyKey,
             },
+            {
+                command: { ...startCommand, file_date: '2026-02-31' },
+                key: idempotencyKey,
+            },
             { command: startCommand, key: '' },
             { command: startCommand, key: 'bad key' },
             { command: startCommand, key: 'é' },

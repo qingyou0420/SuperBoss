@@ -97,9 +97,36 @@ describe('strict bounded OWNER import summaries', () => {
                 attachments: [{ ...summary.attachments[0], file_state }],
                 result_code,
                 status,
+                submitted_at:
+                    status === 'UPLOADING' ? null : summary.submitted_at,
             }
             await expect(
                 mod.createImportsApi(clientReturning([value]).client).list(),
+            ).resolves.toHaveLength(1)
+        },
+    )
+
+    test.each([
+        ['UPLOADING', null, null, 'QUARANTINED'],
+        ['SCANNING', null, summary.submitted_at, 'CLEAN'],
+        ['SCANNING', null, summary.submitted_at, 'INFECTED'],
+        ['SCANNING', null, summary.submitted_at, 'FAILED'],
+    ])(
+        'accepts live attachment snapshot %s/%s independently of job reconciliation',
+        async (status, result_code, submitted_at, file_state) => {
+            const mod = await importsModule()
+            const liveSnapshot = {
+                ...summary,
+                attachments: [{ ...summary.attachments[0], file_state }],
+                result_code,
+                status,
+                submitted_at,
+            }
+
+            await expect(
+                mod
+                    .createImportsApi(clientReturning([liveSnapshot]).client)
+                    .list(),
             ).resolves.toHaveLength(1)
         },
     )
@@ -113,6 +140,15 @@ describe('strict bounded OWNER import summaries', () => {
             { ...summary, created_at: '2026-08-10T02:00:00' },
             { ...summary, status: 'DONE' },
             { ...summary, status: 'RECEIVED', result_code: 'SHOULD_BE_NULL' },
+            {
+                ...summary,
+                attachments: [
+                    { ...summary.attachments[0], file_state: 'UPLOADING' },
+                ],
+                status: 'UPLOADING',
+                submitted_at: summary.submitted_at,
+            },
+            { ...summary, status: 'SCANNING', submitted_at: null },
             { ...summary, local_task_id: 'x'.repeat(256) },
             {
                 ...summary,

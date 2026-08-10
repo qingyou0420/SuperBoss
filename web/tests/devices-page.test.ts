@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/vue'
 import ElementPlus from 'element-plus'
-import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 const PAGE_PATH = '../src/pages/owner/DevicesPage.vue'
 const DEVICE_ID = '019f2b8e-18f0-7f31-9f42-3e6a76b9f810'
@@ -62,6 +62,10 @@ beforeEach(() => {
         raw_code: 'ABCD-EFGH',
     })
     mocks.devicesApi.revoke.mockResolvedValue(undefined)
+})
+
+afterEach(() => {
+    vi.restoreAllMocks()
 })
 
 describe('OWNER device management page', () => {
@@ -152,6 +156,15 @@ describe('OWNER device management page', () => {
 
     test('requires explicit revoke confirmation and honors cancel', async () => {
         const confirm = vi.spyOn(window, 'confirm')
+        mocks.devicesApi.list
+            .mockResolvedValueOnce([activeDevice])
+            .mockResolvedValueOnce([
+                {
+                    ...activeDevice,
+                    revoked_at: '2026-08-10T04:00:00.000Z',
+                    status: 'REVOKED',
+                },
+            ])
         await renderPage()
         await screen.findByText('Kimi-PC')
 
@@ -165,6 +178,31 @@ describe('OWNER device management page', () => {
             expect(mocks.devicesApi.revoke).toHaveBeenCalledWith(DEVICE_ID),
         )
         expect(await screen.findByText('已撤销')).toBeInTheDocument()
+    })
+
+    test('reloads the authoritative server revocation timestamp after revoke', async () => {
+        const serverRevokedAt = '2025-01-02T03:04:05.000Z'
+        mocks.devicesApi.list
+            .mockReset()
+            .mockResolvedValueOnce([activeDevice])
+            .mockResolvedValueOnce([
+                {
+                    ...activeDevice,
+                    revoked_at: serverRevokedAt,
+                    status: 'REVOKED',
+                },
+            ])
+        vi.spyOn(window, 'confirm').mockReturnValue(true)
+        await renderPage()
+        await screen.findByText('Kimi-PC')
+
+        await fireEvent.click(screen.getByRole('button', { name: '撤销设备' }))
+
+        await waitFor(() =>
+            expect(mocks.devicesApi.list).toHaveBeenCalledTimes(2),
+        )
+        expect(await screen.findByText(/撤销时间：.*2025/)).toBeInTheDocument()
+        expect(screen.getByText('已撤销')).toBeInTheDocument()
     })
 
     test('does not leak API/provider details through page errors', async () => {
