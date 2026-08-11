@@ -161,6 +161,17 @@ def test_posix_smoke_executes_the_same_contract_when_bash_is_available(tmp_path:
     bash = shutil.which("bash")
     if bash is None:
         pytest.skip("bash is unavailable on this Windows host")
+    try:
+        probe = subprocess.run(
+            [bash, "-c", "exit 0"],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pytest.skip("bash is not executable on this Windows host")
+    if probe.returncode != 0:
+        pytest.skip("bash is not configured on this Windows host")
 
     docker = tmp_path / "docker"
     docker.write_text(
