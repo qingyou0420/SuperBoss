@@ -1,5 +1,9 @@
 # Anonymous Refresh Boundary Design
 
+> Superseded by `2026-08-11-local-password-auth-design.md`. Local password login requires an
+> anonymous CSRF cookie, so CSRF-cookie presence is no longer a valid refresh-session hint. This
+> document remains as historical evidence and must not be implemented independently.
+
 ## Context
 
 A fresh browser has no authenticated session and no `XSRF-TOKEN` cookie. Its initial
