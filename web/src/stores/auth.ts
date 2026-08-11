@@ -1,7 +1,12 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 
-import { authApi, type AuthUser } from '../api/auth'
+import {
+    authApi,
+    type AuthUser,
+    type LoginCredentials,
+    type PasswordChangeCommand,
+} from '../api/auth'
 import { ApiContractError, responseStatus } from '../api/http'
 
 export const useAuthStore = defineStore('auth', () => {
@@ -66,6 +71,20 @@ export const useAuthStore = defineStore('auth', () => {
         return refreshPromise
     }
 
+    const login = async (credentials: LoginCredentials): Promise<void> => {
+        errorMessage.value = ''
+        await authApi.login(credentials)
+        await refresh()
+    }
+
+    const changePassword = async (
+        command: PasswordChangeCommand,
+    ): Promise<void> => {
+        errorMessage.value = ''
+        await authApi.changePassword(command)
+        await refresh()
+    }
+
     const logout = async (): Promise<void> => {
         errorMessage.value = ''
         try {
@@ -79,10 +98,12 @@ export const useAuthStore = defineStore('auth', () => {
 
     return {
         bootstrap,
+        changePassword,
         clearError,
         errorMessage,
         isAuthenticated,
         isBootstrapped,
+        login,
         logout,
         markAuthenticationLost,
         refresh,

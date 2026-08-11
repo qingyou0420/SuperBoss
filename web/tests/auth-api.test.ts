@@ -1,219 +1,144 @@
-import type {
-    AxiosAdapter,
-    AxiosRequestConfig,
-    AxiosResponse,
-    InternalAxiosRequestConfig,
-} from 'axios'
-import { describe, expect, test } from 'vitest'
+import { beforeEach, describe, expect, test, vi } from 'vitest'
 
 import {
     AuthContractError,
     createAuthApi,
-    parseOAuthCallback,
+    type AuthUser,
 } from '../src/api/auth'
-import { createHttpClient } from '../src/api/http'
+import type { BrowserHttpClient, BrowserHttpResponse } from '../src/api/http'
 
-function response(
-    config: InternalAxiosRequestConfig,
-    status: number,
-    data: unknown,
-): AxiosResponse {
+const owner: AuthUser = {
+    username: 'owner',
+    display_name: 'Owner',
+    role: 'OWNER',
+    must_change_password: false,
+}
+
+function response<T>(status: number, data: T): BrowserHttpResponse<T> {
+    return Object.freeze({ status, data })
+}
+
+function client(): BrowserHttpClient {
     return {
-        config,
-        data,
-        headers: {},
-        status,
-        statusText: String(status),
-    } as AxiosResponse
+        delete: vi.fn(),
+        get: vi.fn(),
+        patch: vi.fn(),
+        post: vi.fn(),
+        put: vi.fn(),
+    }
 }
 
-function clientReturning(data: unknown) {
-    const adapter: AxiosAdapter = async (config) => response(config, 200, data)
-    return createHttpClient({ adapter })
-}
+beforeEach(() => {
+    vi.restoreAllMocks()
+    localStorage.clear()
+    sessionStorage.clear()
+})
 
-function clientResponding(status: number, data: unknown) {
-    const adapter: AxiosAdapter = async (config) =>
-        response(config, status, data)
-    return createHttpClient({ adapter })
-}
+describe('local auth API', () => {
+    test('prepares CSRF before sending the exact local login body', async () => {
+        const http = client()
+        vi.mocked(http.get).mockResolvedValue(response(204, null))
+        vi.mocked(http.post).mockResolvedValue(response(204, null))
+        const api = createAuthApi(http)
 
-describe('strict authentication API contracts', () => {
-    test('accepts the exact /me schema and rejects role aliases, extra keys, controls, and oversized identities', async () => {
-        await expect(
-            createAuthApi(
-                clientReturning({ userid: 'owner-1', role: 'OWNER' }),
-            ).me(),
-        ).resolves.toEqual({ userid: 'owner-1', role: 'OWNER' })
-        const unicodeUserid = '😀'.repeat(255)
-        await expect(
-            createAuthApi(
-                clientReturning({ userid: unicodeUserid, role: 'STAFF' }),
-            ).me(),
-        ).resolves.toEqual({ userid: unicodeUserid, role: 'STAFF' })
-
-        for (const invalid of [
-            { userid: 'owner-1', role: 'owner' },
-            { userid: 'owner-1', role: 'OWNER', token: 'leak' },
-            { userid: 'bad\r\nid', role: 'OWNER' },
-            { userid: 'x'.repeat(256), role: 'STAFF' },
-            null,
-            [],
-        ]) {
-            await expect(
-                createAuthApi(clientReturning(invalid)).me(),
-            ).rejects.toBeInstanceOf(AuthContractError)
-        }
-    })
-
-    test('accepts only a safe HTTPS provider URL containing the server state exactly once', async () => {
-        const state = 'safe_state-123'
-        const valid = {
-            state,
-            authorization_url: `https://open.work.weixin.qq.com/wwopen/sso/qrConnect?state=${state}`,
-        }
-        await expect(
-            createAuthApi(clientReturning(valid)).startWeCom(),
-        ).resolves.toEqual(valid)
-
-        for (const invalid of [
-            { ...valid, extra: true },
-            { ...valid, authorization_url: 'javascript:alert(1)' },
-            {
-                ...valid,
-                authorization_url: 'http://open.work.weixin.qq.com/authorize',
-            },
-            {
-                ...valid,
-                authorization_url: `https://user:pass@example.com/?state=${state}`,
-            },
-            { ...valid, authorization_url: 'https://example.com/?state=other' },
-            {
-                ...valid,
-                authorization_url: `https://example.com/?state=${state}&state=${state}`,
-            },
-            { ...valid, state: 'bad\nstate' },
-        ]) {
-            await expect(
-                createAuthApi(clientReturning(invalid)).startWeCom(),
-            ).rejects.toBeInstanceOf(AuthContractError)
-        }
-    })
-
-    test('parses one bounded ASCII code/state and rejects unrecognized redirect parameters', () => {
-        expect(parseOAuthCallback('?code=code_1&state=state-1')).toEqual({
-            code: 'code_1',
-            state: 'state-1',
-        })
-        expect(
-            parseOAuthCallback(
-                '?code=code_1&state=state-1&redirect=%2Fowner%2Fprojects',
-            ),
-        ).toEqual({
-            code: 'code_1',
-            state: 'state-1',
-            redirect: '/owner/projects',
+        await api.login({
+            username: 'owner',
+            password: 'correct horse battery staple',
         })
 
-        for (const search of [
-            '',
-            '?code=x',
-            '?state=x',
-            '?code=x&code=y&state=z',
-            '?code=x&state=y&redirect=%2Fowner&redirect=%2Fowner%2Fprojects',
-            '?code=x&state=y&next=https%3A%2F%2Fevil.example',
-            '?code=%0D%0Aevil&state=safe',
-            `?code=${'x'.repeat(2049)}&state=safe`,
-            '?code=中文&state=safe',
-        ]) {
-            expect(() => parseOAuthCallback(search)).toThrow(AuthContractError)
-        }
+        expect(http.get).toHaveBeenCalledWith('/auth/csrf')
+        expect(http.post).toHaveBeenCalledWith('/auth/login', {
+            username: 'owner',
+            password: 'correct horse battery staple',
+        })
+        expect(vi.mocked(http.get).mock.invocationCallOrder[0]).toBeLessThan(
+            vi.mocked(http.post).mock.invocationCallOrder[0],
+        )
     })
 
-    test('callback forwards only validated code/state to the fixed same-origin endpoint', async () => {
-        let seen: AxiosRequestConfig | undefined
-        const adapter: AxiosAdapter = async (config) => {
-            seen = config
-            return response(config, 204, null)
-        }
-        const api = createAuthApi(createHttpClient({ adapter }))
+    test('sends exact password-change data and accepts only empty 204', async () => {
+        const http = client()
+        vi.mocked(http.post).mockResolvedValue(response(204, null))
+        const api = createAuthApi(http)
 
-        await api.completeWeCom({ code: 'code_1', state: 'state-1' })
+        await api.changePassword({
+            current_password: 'temporary local password',
+            new_password: 'replacement local password',
+        })
 
-        expect(seen?.url).toBe('/auth/wecom/callback')
-        expect(seen?.method).toBe('get')
-        expect(seen?.params).toEqual({ code: 'code_1', state: 'state-1' })
-        expect(JSON.stringify(seen)).not.toContain('redirect')
-        expect(JSON.stringify(seen)).not.toContain('Authorization')
+        expect(http.post).toHaveBeenCalledWith('/auth/password/change', {
+            current_password: 'temporary local password',
+            new_password: 'replacement local password',
+        })
     })
 
-    test('accepts exact callback/logout 204 responses only when the body is empty', async () => {
-        await expect(
-            createAuthApi(clientResponding(204, null)).completeWeCom({
-                code: 'code-1',
-                state: 'state-1',
-            }),
-        ).resolves.toBeUndefined()
-        await expect(
-            createAuthApi(clientResponding(204, null)).logout(),
-        ).resolves.toBeUndefined()
+    test('decodes the exact local identity shape', async () => {
+        const http = client()
+        vi.mocked(http.get).mockResolvedValue(response(200, owner))
+
+        await expect(createAuthApi(http).me()).resolves.toEqual(owner)
+        expect(http.get).toHaveBeenCalledWith('/auth/me')
     })
 
     test.each([
-        {
-            label: 'start wrong status',
-            status: 201,
-            data: {
-                state: 'state-1',
-                authorization_url:
-                    'https://open.weixin.qq.com/connect/oauth2/authorize?state=state-1',
-            },
-            operation: 'start' as const,
-        },
-        {
-            label: 'me wrong status',
-            status: 201,
-            data: { userid: 'owner-1', role: 'OWNER' as const },
-            operation: 'me' as const,
-        },
-        {
-            label: 'callback wrong status',
-            status: 200,
-            data: null,
-            operation: 'callback' as const,
-        },
-        {
-            label: 'callback non-empty body',
-            status: 204,
-            data: { detail: 'sentinel' },
-            operation: 'callback' as const,
-        },
-        {
-            label: 'logout wrong status',
-            status: 200,
-            data: null,
-            operation: 'logout' as const,
-        },
-        {
-            label: 'logout non-empty body',
-            status: 204,
-            data: { detail: 'sentinel' },
-            operation: 'logout' as const,
-        },
-    ])('rejects $label', async ({ status, data, operation }) => {
-        const api = createAuthApi(clientResponding(status, data))
-        const pending =
-            operation === 'start'
-                ? api.startWeCom()
-                : operation === 'me'
-                  ? api.me()
-                  : operation === 'callback'
-                    ? api.completeWeCom({
-                          code: 'code-1',
-                          state: 'state-1',
-                      })
-                    : api.logout()
-
-        await expect(pending).rejects.toBeInstanceOf(AuthContractError)
+        { ...owner, userid: 'legacy-wecom' },
+        { ...owner, must_change_password: 'false' },
+        { ...owner, password_hash: 'secret' },
+        { username: 'owner', role: 'OWNER' },
+    ])('rejects malformed or expanded /me data %#', async (body) => {
+        const http = client()
+        vi.mocked(http.get).mockResolvedValue(response(200, body))
+        await expect(createAuthApi(http).me()).rejects.toBeInstanceOf(
+            AuthContractError,
+        )
     })
+
+    test.each([
+        { username: 'Owner', password: 'correct horse battery staple' },
+        { username: 'ab', password: 'correct horse battery staple' },
+        { username: 'owner', password: 'too short' },
+        { username: 'owner', password: 'line\nbreak password' },
+    ])(
+        'rejects invalid credentials before CSRF or login I/O %#',
+        async (input) => {
+            const http = client()
+            const api = createAuthApi(http)
+            await expect(api.login(input)).rejects.toBeInstanceOf(
+                AuthContractError,
+            )
+            expect(http.get).not.toHaveBeenCalled()
+            expect(http.post).not.toHaveBeenCalled()
+        },
+    )
+
+    test.each([
+        ['csrf', 200, null],
+        ['login', 200, null],
+        ['login-body', 204, { token: 'secret' }],
+        ['change', 200, null],
+        ['logout', 200, null],
+    ] as const)(
+        'rejects wrong success contract for %s',
+        async (kind, status, data) => {
+            const http = client()
+            vi.mocked(http.get).mockResolvedValue(response(status, data))
+            vi.mocked(http.post).mockResolvedValue(response(status, data))
+            const api = createAuthApi(http)
+            const operation =
+                kind === 'csrf'
+                    ? api.prepareCsrf()
+                    : kind === 'change'
+                      ? api.changePassword({
+                            current_password: 'temporary local password',
+                            new_password: 'replacement local password',
+                        })
+                      : kind === 'logout'
+                        ? api.logout()
+                        : api.login({
+                              username: 'owner',
+                              password: 'correct horse battery staple',
+                          })
+            await expect(operation).rejects.toBeInstanceOf(AuthContractError)
+        },
+    )
 })

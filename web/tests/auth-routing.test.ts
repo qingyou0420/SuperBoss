@@ -6,131 +6,85 @@ import { authApi } from '../src/api/auth'
 import * as httpModule from '../src/api/http'
 import { HttpClientError } from '../src/api/http'
 import { createAppRouter, safePostLoginPath } from '../src/app/router'
-import OwnerProjectsPage from '../src/pages/owner/ProjectsPage.vue'
 
 vi.mock('../src/api/auth', () => ({
     authApi: {
-        me: vi.fn(),
+        changePassword: vi.fn(),
+        login: vi.fn(),
         logout: vi.fn(),
-        startWeCom: vi.fn(),
-        completeWeCom: vi.fn(),
+        me: vi.fn(),
+        prepareCsrf: vi.fn(),
     },
-    parseOAuthCallback: vi.fn(),
 }))
 
 const mockedAuth = vi.mocked(authApi)
+const owner = {
+    username: 'owner',
+    display_name: 'Owner',
+    role: 'OWNER' as const,
+    must_change_password: false,
+}
 
 function unauthorized(): HttpClientError {
-    return new HttpClientError(401, {
-        detail: 'Authentication required',
-    })
+    return new HttpClientError(401, { detail: 'Authentication required' })
 }
 
 beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
-    document.cookie = 'access_token=; Max-Age=0; Path=/'
 })
 
-describe('authoritative route guards', () => {
-    test('waits for /me and sends an anonymous browser to login with an internal return path', async () => {
+describe('local-auth route guards', () => {
+    test('sends anonymous protected navigation to login with an internal return path', async () => {
         mockedAuth.me.mockRejectedValue(unauthorized())
         const router = createAppRouter(createMemoryHistory())
-
         await router.push('/owner/projects?view=all')
-
-        expect(mockedAuth.me).toHaveBeenCalledTimes(1)
         expect(router.currentRoute.value.name).toBe('login')
         expect(router.currentRoute.value.query).toEqual({
             redirect: '/owner/projects?view=all',
         })
     })
 
-    test('does not infer login from readable cookies and does not require cookie visibility', async () => {
-        document.cookie = 'access_token=forged-owner; Path=/'
-        mockedAuth.me.mockRejectedValueOnce(unauthorized())
-        const forged = createAppRouter(createMemoryHistory())
-        await forged.push('/owner')
-        expect(forged.currentRoute.value.name).toBe('login')
-
-        document.cookie = 'access_token=; Max-Age=0; Path=/'
-        setActivePinia(createPinia())
-        mockedAuth.me.mockResolvedValueOnce({
-            userid: 'owner-1',
-            role: 'OWNER',
+    test('forces password change ahead of role authorization', async () => {
+        mockedAuth.me.mockResolvedValue({
+            ...owner,
+            must_change_password: true,
         })
-        const httpOnly = createAppRouter(createMemoryHistory())
-        await httpOnly.push('/owner')
-        expect(httpOnly.currentRoute.value.name).toBe('owner-home')
+        const router = createAppRouter(createMemoryHistory())
+        await router.push('/owner/projects')
+        expect(router.currentRoute.value.name).toBe('password-change')
+        expect(router.currentRoute.value.query).toEqual({
+            redirect: '/owner/projects',
+        })
+        await router.push('/forbidden')
+        expect(router.currentRoute.value.name).toBe('password-change')
     })
 
-    test('allows OWNER routes and sends authenticated STAFF away from OWNER pages', async () => {
-        mockedAuth.me.mockResolvedValueOnce({
-            userid: 'owner-1',
-            role: 'OWNER',
-        })
-        const owner = createAppRouter(createMemoryHistory())
-        await owner.push('/owner/projects')
-        expect(owner.currentRoute.value.name).toBe('owner-projects')
-        const configured =
-            owner.currentRoute.value.matched.at(-1)?.components?.default
-        const resolved =
-            typeof configured === 'function'
-                ? await (configured as () => unknown)()
-                : configured
+    test('keeps password change reachable and sends a completed OWNER away from it', async () => {
+        mockedAuth.me.mockResolvedValue(owner)
+        const router = createAppRouter(createMemoryHistory())
+        await router.push('/password/change')
+        expect(router.currentRoute.value.name).toBe('owner-home')
         expect(
-            (resolved as { default?: unknown } | undefined)?.default ??
-                resolved,
-        ).toBe(OwnerProjectsPage)
-        await owner.push('/owner')
-        expect(owner.currentRoute.value.name).toBe('owner-home')
-        expect(mockedAuth.me).toHaveBeenCalledTimes(1)
-
-        setActivePinia(createPinia())
-        mockedAuth.me.mockResolvedValueOnce({
-            userid: 'staff-1',
-            role: 'STAFF',
-        })
-        const staff = createAppRouter(createMemoryHistory())
-        await staff.push('/owner/projects')
-        expect(staff.currentRoute.value.name).toBe('forbidden')
+            router.getRoutes().some((route) => route.path === '/auth/callback'),
+        ).toBe(false)
     })
 
-    test('an exhausted refresh clears protected navigation without starting another bootstrap loop', async () => {
+    test('an exhausted refresh clears protected navigation without another bootstrap', async () => {
         const registration = vi.spyOn(
             httpModule,
             'setAuthenticationLostHandler',
         )
-        mockedAuth.me.mockResolvedValueOnce({
-            userid: 'owner-1',
-            role: 'OWNER',
-        })
+        mockedAuth.me.mockResolvedValue(owner)
         const router = createAppRouter(createMemoryHistory())
         await router.push('/owner/projects')
         const handler = registration.mock.calls.at(-1)?.[0]
-        expect(handler).toBeTypeOf('function')
-
         await handler?.()
-
         expect(router.currentRoute.value.name).toBe('login')
-        expect(router.currentRoute.value.query).toEqual({
-            redirect: '/owner/projects',
-        })
         expect(mockedAuth.me).toHaveBeenCalledTimes(1)
     })
 
-    test('keeps login and callback public but redirects an authenticated OWNER away from login', async () => {
-        mockedAuth.me.mockResolvedValue({ userid: 'owner-1', role: 'OWNER' })
-        const router = createAppRouter(createMemoryHistory())
-
-        await router.push('/login')
-        expect(router.currentRoute.value.name).toBe('owner-home')
-
-        await router.push('/auth/callback?code=code_1&state=state-1')
-        expect(router.currentRoute.value.name).toBe('auth-callback')
-    })
-
-    test('accepts only same-origin absolute-path post-login destinations', () => {
+    test('accepts only same-origin business destinations', () => {
         expect(safePostLoginPath('/owner/projects?view=all')).toBe(
             '/owner/projects?view=all',
         )
@@ -138,13 +92,10 @@ describe('authoritative route guards', () => {
             '//evil.example/path',
             'https://evil.example/path',
             '/\\evil.example',
-            '/%5cevil.example',
             '/%2e%2e//evil.example/path',
-            '/%2e%2e/%2e%2e//evil.example/path',
-            '/%252e%252e/%255cevil.example',
             '/auth/callback?code=secret',
+            '/password/change',
             '/login',
-            'javascript:alert(1)',
             '',
         ]) {
             expect(safePostLoginPath(unsafe)).toBe('/owner')

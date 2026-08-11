@@ -443,6 +443,13 @@ export function createHttpClient(
             }
             const config = error.config as RetriableConfig
             if (isRefresh(config)) throw error
+            const responseHeaders = AxiosHeaders.from(
+                error.response.headers as AxiosHeaders,
+            )
+            if (responseHeaders.get('X-SuperBoss-Refreshable') !== '1') {
+                await notifyAuthenticationLost()
+                throw error
+            }
             if (sessionRefreshHookRunning && config.url === '/auth/me') {
                 await notifyAuthenticationLost()
                 throw error

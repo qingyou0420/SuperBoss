@@ -31,10 +31,16 @@ function response(
     } as AxiosResponse
 }
 
-function unauthorized(config: InternalAxiosRequestConfig): never {
-    const rejected = response(config, 401, {
-        detail: 'Authentication required',
-    })
+function unauthorized(
+    config: InternalAxiosRequestConfig,
+    refreshable = true,
+): never {
+    const rejected = response(
+        config,
+        401,
+        { detail: 'Authentication required' },
+        refreshable ? { 'X-SuperBoss-Refreshable': '1' } : {},
+    )
     throw new AxiosError(
         'rejected',
         'ERR_BAD_REQUEST',
@@ -293,6 +299,26 @@ describe('browser HTTP security boundary', () => {
             ]),
         )
         expect(lost).not.toHaveBeenCalled()
+    })
+
+    test('does not refresh an anonymous 401 without the exact server hint', async () => {
+        let refreshCalls = 0
+        const lost = vi.fn()
+        const adapter: AxiosAdapter = async (config) => {
+            if (config.url === '/auth/refresh') refreshCalls += 1
+            unauthorized(config, false)
+        }
+        const client = createHttpClient({
+            adapter,
+            onAuthenticationLost: lost,
+        })
+
+        await expect(client.get('/auth/me')).rejects.toMatchObject({
+            status: 401,
+        })
+
+        expect(refreshCalls).toBe(0)
+        expect(lost).toHaveBeenCalledTimes(1)
     })
 
     test('waits for one shared session-refresh hook before releasing concurrent business retries', async () => {

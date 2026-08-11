@@ -24,7 +24,9 @@ async function logout(): Promise<void> {
                 <router-link to="/owner/users">Users</router-link>
             </nav>
             <div class="app-layout__account">
-                <span>{{ auth.user?.userid }}</span>
+                <span>{{
+                    auth.user?.display_name || auth.user?.username
+                }}</span>
                 <el-button text @click="logout">退出登录</el-button>
             </div>
         </header>

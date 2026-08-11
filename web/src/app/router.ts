@@ -11,10 +11,10 @@ import {
     setSessionRefreshedHandler,
 } from '../api/http'
 import AppLayout from '../layouts/AppLayout.vue'
-import AuthCallbackPage from '../pages/AuthCallbackPage.vue'
 import ForbiddenPage from '../pages/ForbiddenPage.vue'
 import HealthPage from '../pages/HealthPage.vue'
 import LoginPage from '../pages/LoginPage.vue'
+import PasswordChangePage from '../pages/PasswordChangePage.vue'
 import OwnerHomePage from '../pages/owner/OwnerHomePage.vue'
 import OwnerDevicesPage from '../pages/owner/DevicesPage.vue'
 import OwnerDrivePage from '../pages/owner/DrivePage.vue'
@@ -30,8 +30,6 @@ declare module 'vue-router' {
 }
 
 const FALLBACK_OWNER_PATH = '/owner'
-const POST_LOGIN_PATH_KEY = 'superboss.auth.post-login-path'
-let postLoginPathInvalid = false
 const objectOriginEnvironmentValue = (
     import.meta as ImportMeta & {
         readonly env?: Readonly<Record<string, unknown>>
@@ -91,51 +89,12 @@ export function safePostLoginPath(value: unknown): string {
         decodedPath.startsWith('//') ||
         /(^|\/)\.{1,2}(\/|$)/.test(decodedPath) ||
         parsed.pathname === '/login' ||
-        parsed.pathname === '/auth/callback'
+        parsed.pathname === '/auth/callback' ||
+        parsed.pathname === '/password/change'
     ) {
         return FALLBACK_OWNER_PATH
     }
     return `${parsed.pathname}${parsed.search}${parsed.hash}`
-}
-
-export function rememberPostLoginPath(value: unknown): void {
-    postLoginPathInvalid = true
-    removePostLoginPath()
-    try {
-        sessionStorage.setItem(POST_LOGIN_PATH_KEY, safePostLoginPath(value))
-        postLoginPathInvalid = false
-    } catch {
-        removePostLoginPath()
-    }
-}
-
-export function clearPostLoginPath(): void {
-    postLoginPathInvalid = !removePostLoginPath()
-}
-
-export function consumePostLoginPath(fallback?: unknown): string {
-    if (postLoginPathInvalid) {
-        postLoginPathInvalid = !removePostLoginPath()
-        return FALLBACK_OWNER_PATH
-    }
-    try {
-        if (sessionStorage.length === 0) return safePostLoginPath(fallback)
-        const stored = sessionStorage.getItem(POST_LOGIN_PATH_KEY)
-        sessionStorage.removeItem(POST_LOGIN_PATH_KEY)
-        return safePostLoginPath(stored ?? fallback)
-    } catch {
-        postLoginPathInvalid = !removePostLoginPath()
-        return FALLBACK_OWNER_PATH
-    }
-}
-
-function removePostLoginPath(): boolean {
-    try {
-        sessionStorage.removeItem(POST_LOGIN_PATH_KEY)
-        return true
-    } catch {
-        return false
-    }
 }
 
 export function createAppRouter(
@@ -148,9 +107,10 @@ export function createAppRouter(
             { path: '/health', name: 'health', component: HealthPage },
             { path: '/login', name: 'login', component: LoginPage },
             {
-                path: '/auth/callback',
-                name: 'auth-callback',
-                component: AuthCallbackPage,
+                path: '/password/change',
+                name: 'password-change',
+                component: PasswordChangePage,
+                meta: { requiresAuth: true },
             },
             { path: '/forbidden', name: 'forbidden', component: ForbiddenPage },
             {
@@ -193,23 +153,29 @@ export function createAppRouter(
     })
 
     router.beforeEach(async (to) => {
-        if (
-            to.name === 'auth-callback' ||
-            to.name === 'health' ||
-            to.name === 'forbidden'
-        ) {
-            return true
-        }
+        if (to.name === 'health') return true
         const auth = useAuthStore()
         await auth.bootstrap()
-        if (to.name === 'login') {
-            if (!auth.isAuthenticated) return true
+        if (!auth.isAuthenticated) {
+            if (to.name === 'login') return true
+            return { name: 'login', query: { redirect: to.fullPath } }
+        }
+        if (auth.user?.must_change_password) {
+            if (to.name === 'password-change') return true
+            return {
+                name: 'password-change',
+                query: {
+                    redirect:
+                        to.name === 'login'
+                            ? safePostLoginPath(to.query.redirect)
+                            : safePostLoginPath(to.fullPath),
+                },
+            }
+        }
+        if (to.name === 'login' || to.name === 'password-change') {
             return auth.user?.role === 'OWNER'
                 ? FALLBACK_OWNER_PATH
                 : '/forbidden'
-        }
-        if (to.meta.requiresAuth && !auth.isAuthenticated) {
-            return { name: 'login', query: { redirect: to.fullPath } }
         }
         if (
             to.meta.roles &&
@@ -256,6 +222,16 @@ export function createAppRouter(
                     query: { redirect: current.fullPath },
                 })
             }
+            return
+        }
+        if (
+            auth.user.must_change_password &&
+            current.name !== 'password-change'
+        ) {
+            await router.replace({
+                name: 'password-change',
+                query: { redirect: safePostLoginPath(current.fullPath) },
+            })
             return
         }
         if (

@@ -13,11 +13,12 @@ function response(
     config: InternalAxiosRequestConfig,
     status: number,
     data: unknown,
+    headers: Record<string, string> = {},
 ): AxiosResponse {
     return {
         config,
         data,
-        headers: {},
+        headers,
         status,
         statusText: String(status),
     } as AxiosResponse
@@ -49,7 +50,12 @@ function unauthorized(config: InternalAxiosRequestConfig): never {
         'ERR_BAD_REQUEST',
         config,
         undefined,
-        response(config, 401, { detail: 'sentinel' }),
+        response(
+            config,
+            401,
+            { detail: 'sentinel' },
+            { 'X-SuperBoss-Refreshable': '1' },
+        ),
     )
 }
 

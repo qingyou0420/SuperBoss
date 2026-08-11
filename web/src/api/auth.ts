@@ -1,23 +1,25 @@
 import { ApiContractError, apiClient, type BrowserHttpClient } from './http'
 
-const OAUTH_VALUE = /^[A-Za-z0-9._~-]{1,2048}$/
+const USERNAME = /^[a-z][a-z0-9._-]{2,31}$/
+const MAX_PASSWORD_UTF8_BYTES = 512
 
 export type UserRole = 'OWNER' | 'STAFF'
 
 export interface AuthUser {
-    userid: string
+    username: string
+    display_name: string
     role: UserRole
+    must_change_password: boolean
 }
 
-export interface AuthStart {
-    state: string
-    authorization_url: string
+export interface LoginCredentials {
+    username: string
+    password: string
 }
 
-export interface OAuthCallback {
-    code: string
-    state: string
-    redirect?: string
+export interface PasswordChangeCommand {
+    current_password: string
+    new_password: string
 }
 
 export class AuthContractError extends ApiContractError {
@@ -36,9 +38,10 @@ function hasExactKeys(
     expected: string[],
 ): boolean {
     const actual = Object.keys(value).sort()
+    const sortedExpected = [...expected].sort()
     return (
-        actual.length === expected.length &&
-        actual.every((key, index) => key === expected[index])
+        actual.length === sortedExpected.length &&
+        actual.every((key, index) => key === sortedExpected[index])
     )
 }
 
@@ -57,133 +60,85 @@ function hasUnsafeText(value: string): boolean {
     return false
 }
 
-function safeUserid(value: unknown): value is string {
+function validPassword(value: unknown): value is string {
+    if (typeof value !== 'string' || hasUnsafeText(value)) return false
+    const codepoints = [...value].length
     return (
-        typeof value === 'string' &&
-        !hasUnsafeText(value) &&
-        [...value].length >= 1 &&
-        [...value].length <= 255 &&
-        value.trim() === value
+        codepoints >= 12 &&
+        codepoints <= 128 &&
+        new TextEncoder().encode(value).byteLength <= MAX_PASSWORD_UTF8_BYTES
     )
 }
 
-function validateProviderUrl(value: unknown, state?: string): string {
+function validateCredentials(value: LoginCredentials): void {
+    if (!USERNAME.test(value.username) || !validPassword(value.password)) {
+        throw new AuthContractError()
+    }
+}
+
+function validatePasswordChange(value: PasswordChangeCommand): void {
     if (
-        typeof value !== 'string' ||
-        value.length > 8192 ||
-        hasUnsafeText(value)
+        !validPassword(value.current_password) ||
+        !validPassword(value.new_password)
     ) {
         throw new AuthContractError()
     }
-    let parsed: URL
-    try {
-        parsed = new URL(value)
-    } catch {
-        throw new AuthContractError()
-    }
-    if (parsed.protocol !== 'https:' || parsed.username || parsed.password) {
-        throw new AuthContractError()
-    }
-    if (state !== undefined) {
-        const states = parsed.searchParams.getAll('state')
-        if (states.length !== 1 || states[0] !== state)
-            throw new AuthContractError()
-    } else {
-        const states = parsed.searchParams.getAll('state')
-        if (states.length !== 1 || !OAUTH_VALUE.test(states[0])) {
-            throw new AuthContractError()
-        }
-    }
-    return parsed.href
 }
 
 function parseUser(data: unknown): AuthUser {
-    if (!isRecord(data) || !hasExactKeys(data, ['role', 'userid'])) {
-        throw new AuthContractError()
-    }
     if (
-        !safeUserid(data.userid) ||
+        !isRecord(data) ||
+        !hasExactKeys(data, [
+            'display_name',
+            'must_change_password',
+            'role',
+            'username',
+        ]) ||
+        typeof data.username !== 'string' ||
+        !USERNAME.test(data.username) ||
+        typeof data.display_name !== 'string' ||
+        data.display_name !== data.display_name.trim() ||
+        [...data.display_name].length > 255 ||
+        hasUnsafeText(data.display_name) ||
+        typeof data.must_change_password !== 'boolean' ||
         (data.role !== 'OWNER' && data.role !== 'STAFF')
     ) {
         throw new AuthContractError()
     }
-    return { userid: data.userid, role: data.role }
-}
-
-function parseStart(data: unknown): AuthStart {
-    if (
-        !isRecord(data) ||
-        !hasExactKeys(data, ['authorization_url', 'state'])
-    ) {
-        throw new AuthContractError()
-    }
-    if (typeof data.state !== 'string' || !OAUTH_VALUE.test(data.state)) {
-        throw new AuthContractError()
-    }
     return {
-        state: data.state,
-        authorization_url: validateProviderUrl(
-            data.authorization_url,
-            data.state,
-        ),
+        username: data.username,
+        display_name: data.display_name,
+        role: data.role,
+        must_change_password: data.must_change_password,
     }
-}
-
-export function parseOAuthCallback(search: string): OAuthCallback {
-    const query = new URLSearchParams(
-        search.startsWith('?') ? search.slice(1) : search,
-    )
-    const allowed = new Set(['code', 'state', 'redirect'])
-    if ([...query.keys()].some((key) => !allowed.has(key)))
-        throw new AuthContractError()
-    const codes = query.getAll('code')
-    const states = query.getAll('state')
-    const redirects = query.getAll('redirect')
-    if (
-        codes.length !== 1 ||
-        states.length !== 1 ||
-        redirects.length > 1 ||
-        !OAUTH_VALUE.test(codes[0]) ||
-        !OAUTH_VALUE.test(states[0])
-    ) {
-        throw new AuthContractError()
-    }
-    const result: OAuthCallback = { code: codes[0], state: states[0] }
-    if (redirects.length === 1) {
-        const redirect = redirects[0]
-        if (!redirect || redirect.length > 2048 || hasUnsafeText(redirect)) {
-            throw new AuthContractError()
-        }
-        result.redirect = redirect
-    }
-    return result
-}
-
-export function navigateToAuthorization(
-    url: string,
-    navigate: (target: string) => void,
-): void {
-    navigate(validateProviderUrl(url))
 }
 
 export function createAuthApi(client: BrowserHttpClient) {
+    const prepareCsrf = async (): Promise<void> => {
+        const response = await client.get('/auth/csrf')
+        if (response.status !== 204 || response.data !== null) {
+            throw new AuthContractError()
+        }
+    }
+
     return {
-        async startWeCom(): Promise<AuthStart> {
-            const response = await client.get('/auth/wecom/start')
-            if (response.status !== 200) throw new AuthContractError()
-            return parseStart(response.data)
-        },
-        async completeWeCom(
-            callback: Pick<OAuthCallback, 'code' | 'state'>,
-        ): Promise<void> {
-            if (
-                !OAUTH_VALUE.test(callback.code) ||
-                !OAUTH_VALUE.test(callback.state)
-            ) {
+        prepareCsrf,
+        async login(credentials: LoginCredentials): Promise<void> {
+            validateCredentials(credentials)
+            await prepareCsrf()
+            const response = await client.post('/auth/login', {
+                username: credentials.username,
+                password: credentials.password,
+            })
+            if (response.status !== 204 || response.data !== null) {
                 throw new AuthContractError()
             }
-            const response = await client.get('/auth/wecom/callback', {
-                params: { code: callback.code, state: callback.state },
+        },
+        async changePassword(command: PasswordChangeCommand): Promise<void> {
+            validatePasswordChange(command)
+            const response = await client.post('/auth/password/change', {
+                current_password: command.current_password,
+                new_password: command.new_password,
             })
             if (response.status !== 204 || response.data !== null) {
                 throw new AuthContractError()

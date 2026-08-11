@@ -13,12 +13,12 @@ import { useAuthStore } from '../src/stores/auth'
 
 vi.mock('../src/api/auth', () => ({
     authApi: {
-        completeWeCom: vi.fn(),
+        changePassword: vi.fn(),
+        login: vi.fn(),
         logout: vi.fn(),
         me: vi.fn(),
-        startWeCom: vi.fn(),
+        prepareCsrf: vi.fn(),
     },
-    parseOAuthCallback: vi.fn(),
 }))
 
 vi.mock('../src/api/projects', () => ({
@@ -78,8 +78,18 @@ beforeEach(() => {
 describe('server-authoritative role refresh routing', () => {
     test('OWNER to STAFF refresh removes owner UI and redirects the mounted protected route', async () => {
         mockedAuth.me
-            .mockResolvedValueOnce({ userid: 'person-1', role: 'OWNER' })
-            .mockResolvedValueOnce({ userid: 'person-1', role: 'STAFF' })
+            .mockResolvedValueOnce({
+                username: 'person-1',
+                display_name: 'Person',
+                role: 'OWNER',
+                must_change_password: false,
+            })
+            .mockResolvedValueOnce({
+                username: 'person-1',
+                display_name: 'Person',
+                role: 'STAFF',
+                must_change_password: false,
+            })
         const router = await renderAt('/owner/projects')
         expect(
             await screen.findByRole('button', { name: '创建项目' }),
@@ -88,8 +98,10 @@ describe('server-authoritative role refresh routing', () => {
         await sessionRefreshedHandler()()
 
         expect(useAuthStore().user).toEqual({
-            userid: 'person-1',
+            username: 'person-1',
+            display_name: 'Person',
             role: 'STAFF',
+            must_change_password: false,
         })
         await waitFor(() =>
             expect(router.currentRoute.value.name).toBe('forbidden'),
@@ -101,20 +113,56 @@ describe('server-authoritative role refresh routing', () => {
 
     test('STAFF to OWNER refresh updates the store and leaves forbidden for owner UI', async () => {
         mockedAuth.me
-            .mockResolvedValueOnce({ userid: 'person-1', role: 'STAFF' })
-            .mockResolvedValueOnce({ userid: 'person-1', role: 'OWNER' })
+            .mockResolvedValueOnce({
+                username: 'person-1',
+                display_name: 'Person',
+                role: 'STAFF',
+                must_change_password: false,
+            })
+            .mockResolvedValueOnce({
+                username: 'person-1',
+                display_name: 'Person',
+                role: 'OWNER',
+                must_change_password: false,
+            })
         const router = await renderAt('/owner/projects')
         expect(router.currentRoute.value.name).toBe('forbidden')
 
         await sessionRefreshedHandler()()
 
         expect(useAuthStore().user).toEqual({
-            userid: 'person-1',
+            username: 'person-1',
+            display_name: 'Person',
             role: 'OWNER',
+            must_change_password: false,
         })
         await waitFor(() =>
             expect(router.currentRoute.value.name).toBe('owner-home'),
         )
-        expect(screen.getByText('person-1')).toBeInTheDocument()
+        expect(screen.getByText('Person')).toBeInTheDocument()
+    })
+
+    test('a refreshed forced-change flag removes mounted owner UI immediately', async () => {
+        mockedAuth.me
+            .mockResolvedValueOnce({
+                username: 'owner',
+                display_name: 'Owner',
+                role: 'OWNER',
+                must_change_password: false,
+            })
+            .mockResolvedValueOnce({
+                username: 'owner',
+                display_name: 'Owner',
+                role: 'OWNER',
+                must_change_password: true,
+            })
+        const router = await renderAt('/owner/projects')
+        await sessionRefreshedHandler()()
+        await waitFor(() =>
+            expect(router.currentRoute.value.name).toBe('password-change'),
+        )
+        expect(
+            screen.queryByRole('button', { name: '创建项目' }),
+        ).not.toBeInTheDocument()
     })
 })
