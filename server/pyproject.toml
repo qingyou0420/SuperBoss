@@ -5,6 +5,7 @@ description = "SuperBoss backend service"
 requires-python = ">=3.13,<3.14"
 dependencies = [
     "alembic",
+    "argon2-cffi",
     "asyncpg",
     "boto3",
     "celery[redis]",
