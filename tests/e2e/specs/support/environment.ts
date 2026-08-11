@@ -6,6 +6,10 @@ const E2E_ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)))
 const REPOSITORY_ROOT = resolve(E2E_ROOT, '../..')
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1'])
 
+function canonicalHostname(hostname: string): string {
+    return hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname
+}
+
 export interface E2eEnvironment {
     readonly baseUrl: string
     readonly connectorCommand: readonly string[]
@@ -113,7 +117,8 @@ export function loadE2eEnvironment(source: EnvironmentSource): E2eEnvironment {
     ) {
         throw new Error('E2E_BASE_URL must be an exact HTTP(S) origin without credentials.')
     }
-    if (base.protocol === 'http:' && !LOOPBACK_HOSTS.has(base.hostname)) {
+    const hostname = canonicalHostname(base.hostname)
+    if (base.protocol === 'http:' && !LOOPBACK_HOSTS.has(hostname)) {
         throw new Error('Plain HTTP is allowed only for a loopback E2E_BASE_URL.')
     }
 
@@ -129,7 +134,7 @@ export function loadE2eEnvironment(source: EnvironmentSource): E2eEnvironment {
         selfSigned === 'true' &&
         !production &&
         base.protocol === 'https:' &&
-        LOOPBACK_HOSTS.has(base.hostname)
+        LOOPBACK_HOSTS.has(hostname)
     if (selfSigned === 'true' && !ignoreHTTPSErrors) {
         throw new Error(
             'Self-signed certificate opt-in is restricted to a non-production HTTPS loopback origin.',

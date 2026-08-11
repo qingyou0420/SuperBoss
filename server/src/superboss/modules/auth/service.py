@@ -1,5 +1,6 @@
 """Authentication policy and rotating session lifecycle."""
 
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Protocol
 from uuid import UUID
@@ -35,6 +36,12 @@ class ForbiddenIdentity(Exception):
     """WeCom identity is not permitted to log in."""
 
 
+@dataclass(frozen=True)
+class CompletedLogin:
+    pair: SessionPair
+    user: User
+
+
 class AuthService:
     def __init__(
         self,
@@ -50,7 +57,7 @@ class AuthService:
         self.provider = provider
         self.settings = settings
 
-    async def complete_wecom_login(self, code: str, state: str) -> SessionPair:
+    async def complete_wecom_login(self, code: str, state: str) -> CompletedLogin:
         del state  # State is verified at the HTTP boundary before identity exchange.
         if self.provider is None:
             raise InvalidSession("Identity provider is unavailable")
@@ -68,7 +75,7 @@ class AuthService:
             raise ForbiddenIdentity("Identity is not authorized")
         user.last_login_at = utcnow()
         await self.session.flush()
-        return await self.issue_session(user)
+        return CompletedLogin(await self.issue_session(user), user)
 
     async def issue_session(self, user: User) -> SessionPair:
         raw_refresh = new_opaque_token()

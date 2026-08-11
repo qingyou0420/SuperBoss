@@ -9,9 +9,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from superboss.core.actors import Actor
 from superboss.core.config import Settings
 from superboss.core.security import hash_token, new_csrf_token, utcnow
 from superboss.infrastructure.wecom import WeComError
+from superboss.modules.audit.schemas import AuditEventInput
+from superboss.modules.audit.service import AuditService
 from superboss.modules.auth.models import OAuthState
 from superboss.modules.auth.repository import AuthRepository
 from superboss.modules.auth.schemas import SessionPair
@@ -117,7 +120,11 @@ async def wecom_callback(
     response.delete_cookie(_OAUTH_STATE_COOKIE, path="/api/v1/auth/wecom")
     try:
         _verify_state(request.app.state.settings, request.cookies.get(_OAUTH_STATE_COOKIE), state)
-        if code is None or state is None or not await service.auth_repository.consume_oauth_state(hash_token(state), utcnow()):
+        if (
+            code is None
+            or state is None
+            or not await service.auth_repository.consume_oauth_state(hash_token(state), utcnow())
+        ):
             raise HTTPException(400, "Invalid OAuth state")
         await service.session.commit()
     except HTTPException as error:
@@ -125,12 +132,31 @@ async def wecom_callback(
         result.delete_cookie(_OAUTH_STATE_COOKIE, path="/api/v1/auth/wecom")
         return result  # type: ignore[return-value]
     try:
-        pair = await service.complete_wecom_login(code, state)
+        completed = await service.complete_wecom_login(code, state)
     except (ForbiddenIdentity, WeComError):
         result = JSONResponse({"detail": "Identity is not authorized"}, status_code=403)
         result.delete_cookie(_OAUTH_STATE_COOKIE, path="/api/v1/auth/wecom")
         return result  # type: ignore[return-value]
-    _set_session_cookies(response, pair)
+    await service.session.commit()
+    await AuditService(request.app.state.session_factory).record(
+        AuditEventInput(
+            actor=Actor(
+                "user",
+                completed.user.id,
+                completed.user.role,
+                frozenset(),
+                frozenset(),
+            ),
+            action="auth.login",
+            object_type="user",
+            object_id=completed.user.id,
+            project_id=None,
+            outcome="SUCCESS",
+            request_id=request.state.request_id,
+            metadata={},
+        )
+    )
+    _set_session_cookies(response, completed.pair)
     response.delete_cookie(_OAUTH_STATE_COOKIE, path="/api/v1/auth/wecom")
 
 

@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator
+from uuid import uuid4
 
 import httpx
 import jwt
@@ -14,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from superboss.core.config import Settings
 from superboss.core.security import hash_token, utcnow
 from superboss.main import create_app
+from superboss.modules.audit.models import AuditLog
 from superboss.modules.auth.models import AuthSession, OAuthState
 from superboss.modules.users.models import Role, User, UserStatus
 
@@ -26,6 +28,7 @@ async def api_client(
     with TestClient(app, base_url="https://testserver") as client:
         yield client
     await db_session.rollback()
+    await db_session.execute(delete(AuditLog))
     await db_session.execute(delete(OAuthState))
     await db_session.execute(delete(AuthSession))
     await db_session.execute(delete(User))
@@ -40,6 +43,103 @@ def _callback(client: TestClient, code: str, state: str | None) -> object:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "userid", "role"),
+    [
+        ("owner-code", "owner-1", Role.OWNER),
+        ("staff-code", "staff-1", Role.STAFF),
+    ],
+)
+async def test_successful_callback_records_bounded_secret_free_login_audit(
+    api_client: TestClient,
+    db_session: AsyncSession,
+    code: str,
+    userid: str,
+    role: Role,
+) -> None:
+    if role == Role.STAFF:
+        db_session.add(
+            User(
+                wecom_userid=userid,
+                role=role,
+                status=UserStatus.ACTIVE,
+                display_name="Acceptance staff",
+            )
+        )
+        await db_session.commit()
+    started = api_client.get("/api/v1/auth/wecom/start")
+    request_id = uuid4()
+    response = api_client.get(
+        "/api/v1/auth/wecom/callback",
+        params={"code": code, "state": started.json()["state"]},
+        headers={"X-Request-ID": str(request_id)},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 204
+    user = await db_session.scalar(select(User).where(User.wecom_userid == userid))
+    assert user is not None
+    event = await db_session.scalar(
+        select(AuditLog).where(AuditLog.action == "auth.login", AuditLog.request_id == request_id)
+    )
+    assert event is not None
+    assert (
+        event.actor_kind,
+        event.actor_id,
+        event.object_type,
+        event.object_id,
+        event.project_id,
+        event.outcome,
+        event.metadata_json,
+    ) == ("user", user.id, "user", user.id, None, "SUCCESS", {"actor_role": role.value})
+    evidence = repr(event.metadata_json)
+    for forbidden in (code, userid, "access_token", "refresh_token", "authorization", "cookie"):
+        assert forbidden not in evidence
+
+
+@pytest.mark.asyncio
+async def test_login_audit_failure_is_fail_safe_and_sets_no_session_cookie(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    test_settings: Settings,
+) -> None:
+    import superboss.modules.auth.router as auth_router
+
+    class FailingAuditService:
+        def __init__(self, _session_factory: object) -> None:
+            pass
+
+        async def record(self, _event: object) -> None:
+            raise RuntimeError("AUDIT-SECRET-SYNTHETIC-MARKER")
+
+    monkeypatch.setattr(auth_router, "AuditService", FailingAuditService, raising=False)
+    app = create_app(test_settings)
+    with TestClient(app, base_url="https://testserver", raise_server_exceptions=False) as client:
+        started = client.get("/api/v1/auth/wecom/start")
+        response = client.get(
+            "/api/v1/auth/wecom/callback",
+            params={"code": "owner-code", "state": started.json()["state"]},
+            headers={"X-Request-ID": str(uuid4())},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 500
+    assert "access_token=" not in response.headers.get("set-cookie", "")
+    assert "refresh_token=" not in response.headers.get("set-cookie", "")
+    assert "XSRF-TOKEN=" not in response.headers.get("set-cookie", "")
+    assert "AUDIT-SECRET-SYNTHETIC-MARKER" not in response.text
+    assert await db_session.scalar(select(User).where(User.wecom_userid == "owner-1")) is not None
+    assert await db_session.scalar(select(AuthSession)) is not None
+    assert await db_session.scalar(select(AuditLog).where(AuditLog.action == "auth.login")) is None
+    await db_session.rollback()
+    await db_session.execute(delete(AuditLog))
+    await db_session.execute(delete(OAuthState))
+    await db_session.execute(delete(AuthSession))
+    await db_session.execute(delete(User))
+    await db_session.commit()
+
+
+@pytest.mark.asyncio
 async def test_configured_owner_bootstraps_the_only_owner(
     api_client: TestClient, db_session: AsyncSession
 ) -> None:
@@ -48,7 +148,7 @@ async def test_configured_owner_bootstraps_the_only_owner(
     response = _callback(api_client, "owner-code", started.json()["state"])
 
     assert response.status_code == 204
-    assert "wecom_oauth_state=\"\"" in response.headers["set-cookie"]
+    assert 'wecom_oauth_state=""' in response.headers["set-cookie"]
     assert api_client.cookies.get("wecom_oauth_state") is None
     users = (await db_session.scalars(select(User))).all()
     assert [(user.wecom_userid, user.role, user.status) for user in users] == [
@@ -92,7 +192,12 @@ def test_callback_rejects_missing_or_mismatched_state(api_client: TestClient) ->
 
     missing = _callback(api_client, "owner-code", None)
     assert missing.status_code == 400 and "Max-Age=0" in missing.headers["set-cookie"]
-    api_client.cookies.set("wecom_oauth_state", started.cookies.get("wecom_oauth_state"), domain="testserver.local", path="/api/v1/auth/wecom")
+    api_client.cookies.set(
+        "wecom_oauth_state",
+        started.cookies.get("wecom_oauth_state"),
+        domain="testserver.local",
+        path="/api/v1/auth/wecom",
+    )
     mismatch = _callback(api_client, "owner-code", f"wrong-{started.json()['state']}")
     assert mismatch.status_code == 400 and "Max-Age=0" in mismatch.headers["set-cookie"]
 
@@ -122,13 +227,13 @@ def test_oauth_state_failure_is_committed_and_cookie_is_cleared(api_client: Test
     state_cookie = api_client.cookies.get("wecom_oauth_state")
     failed = _callback(api_client, "unknown-code", state)
     assert failed.status_code == 403
-    assert "wecom_oauth_state=\"\"" in failed.headers["set-cookie"]
+    assert 'wecom_oauth_state=""' in failed.headers["set-cookie"]
     api_client.cookies.set(
         "wecom_oauth_state", state_cookie, domain="testserver.local", path="/api/v1/auth/wecom"
     )
     replay = _callback(api_client, "owner-code", state)
     assert replay.status_code == 400
-    assert "wecom_oauth_state=\"\"" in replay.headers["set-cookie"]
+    assert 'wecom_oauth_state=""' in replay.headers["set-cookie"]
 
 
 @pytest.mark.parametrize("code", ["unknown-code", "not-a-provider-code"])
@@ -140,14 +245,18 @@ def test_all_identity_failures_consume_state_once(api_client: TestClient, code: 
     failed = _callback(api_client, code, state)
     assert failed.status_code == 403
     assert "Max-Age=0" in failed.headers["set-cookie"]
-    api_client.cookies.set("wecom_oauth_state", signed, domain="testserver.local", path="/api/v1/auth/wecom")
+    api_client.cookies.set(
+        "wecom_oauth_state", signed, domain="testserver.local", path="/api/v1/auth/wecom"
+    )
     assert _callback(api_client, "owner-code", state).status_code == 400
 
 
 def test_callback_missing_code_clears_state_cookie(api_client: TestClient) -> None:
     """Optional callback parameters keep malformed callbacks inside the cookie-clearing handler."""
     started = api_client.get("/api/v1/auth/wecom/start")
-    response = api_client.get("/api/v1/auth/wecom/callback", params={"state": started.json()["state"]})
+    response = api_client.get(
+        "/api/v1/auth/wecom/callback", params={"state": started.json()["state"]}
+    )
     assert response.status_code == 400
     assert "Max-Age=0" in response.headers["set-cookie"]
 
@@ -157,13 +266,17 @@ async def test_disabled_identity_consumes_state_and_cannot_retry(
     api_client: TestClient, db_session: AsyncSession
 ) -> None:
     """A disabled whitelist identity must not reactivate or reuse its consumed OAuth state."""
-    db_session.add(User(wecom_userid="staff-1", role=Role.STAFF, status=UserStatus.DISABLED, display_name=""))
+    db_session.add(
+        User(wecom_userid="staff-1", role=Role.STAFF, status=UserStatus.DISABLED, display_name="")
+    )
     await db_session.commit()
     started = api_client.get("/api/v1/auth/wecom/start")
     state, signed = started.json()["state"], api_client.cookies.get("wecom_oauth_state")
     denied = _callback(api_client, "staff-code", state)
     assert denied.status_code == 403 and "Max-Age=0" in denied.headers["set-cookie"]
-    api_client.cookies.set("wecom_oauth_state", signed, domain="testserver.local", path="/api/v1/auth/wecom")
+    api_client.cookies.set(
+        "wecom_oauth_state", signed, domain="testserver.local", path="/api/v1/auth/wecom"
+    )
     assert _callback(api_client, "owner-code", state).status_code == 400
     disabled = await db_session.scalar(select(User).where(User.wecom_userid == "staff-1"))
     assert disabled is not None and disabled.status == UserStatus.DISABLED
@@ -177,20 +290,32 @@ async def test_database_expired_state_is_rejected_and_cookie_cleared(
     """Ignoring persisted expiry would let an otherwise valid signed state be replayed."""
     started = api_client.get("/api/v1/auth/wecom/start")
     state, signed = started.json()["state"], api_client.cookies.get("wecom_oauth_state")
-    await db_session.execute(update(OAuthState).where(OAuthState.nonce_hash == hash_token(state)).values(expires_at=utcnow()))
+    await db_session.execute(
+        update(OAuthState)
+        .where(OAuthState.nonce_hash == hash_token(state))
+        .values(expires_at=utcnow())
+    )
     await db_session.commit()
     expired = _callback(api_client, "owner-code", state)
     assert expired.status_code == 400 and "Max-Age=0" in expired.headers["set-cookie"]
-    api_client.cookies.set("wecom_oauth_state", signed, domain="testserver.local", path="/api/v1/auth/wecom")
+    api_client.cookies.set(
+        "wecom_oauth_state", signed, domain="testserver.local", path="/api/v1/auth/wecom"
+    )
     assert _callback(api_client, "owner-code", state).status_code == 400
 
 
-def test_signed_expired_state_is_rejected_and_cookie_cleared(api_client: TestClient, test_settings: Settings) -> None:
+def test_signed_expired_state_is_rejected_and_cookie_cleared(
+    api_client: TestClient, test_settings: Settings
+) -> None:
     """JWT expiry is independently enforced even while its database nonce is still live."""
     started = api_client.get("/api/v1/auth/wecom/start")
     state = started.json()["state"]
-    expired = jwt.encode({"state": state, "iat": 0, "exp": 1}, test_settings.jwt_secret, algorithm="HS256")
-    api_client.cookies.set("wecom_oauth_state", expired, domain="testserver.local", path="/api/v1/auth/wecom")
+    expired = jwt.encode(
+        {"state": state, "iat": 0, "exp": 1}, test_settings.jwt_secret, algorithm="HS256"
+    )
+    api_client.cookies.set(
+        "wecom_oauth_state", expired, domain="testserver.local", path="/api/v1/auth/wecom"
+    )
     response = _callback(api_client, "owner-code", state)
     assert response.status_code == 400 and "Max-Age=0" in response.headers["set-cookie"]
 
@@ -210,19 +335,31 @@ async def test_concurrent_callbacks_consume_one_state_once(
 
     async def callback() -> int:
         async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
-            client.cookies.set("wecom_oauth_state", signed, domain="testserver.local", path="/api/v1/auth/wecom")
+            client.cookies.set(
+                "wecom_oauth_state", signed, domain="testserver.local", path="/api/v1/auth/wecom"
+            )
             await barrier.wait()
-            response = await client.get("/api/v1/auth/wecom/callback", params={"code": "owner-code", "state": state})
+            response = await client.get(
+                "/api/v1/auth/wecom/callback", params={"code": "owner-code", "state": state}
+            )
             return response.status_code
 
     assert sorted(await asyncio.gather(callback(), callback())) == [204, 400]
     replay_client = httpx.AsyncClient(transport=transport, base_url="https://testserver")
     try:
-        replay_client.cookies.set("wecom_oauth_state", signed, domain="testserver.local", path="/api/v1/auth/wecom")
-        assert (await replay_client.get("/api/v1/auth/wecom/callback", params={"code": "owner-code", "state": state})).status_code == 400
+        replay_client.cookies.set(
+            "wecom_oauth_state", signed, domain="testserver.local", path="/api/v1/auth/wecom"
+        )
+        assert (
+            await replay_client.get(
+                "/api/v1/auth/wecom/callback", params={"code": "owner-code", "state": state}
+            )
+        ).status_code == 400
     finally:
         await replay_client.aclose()
-    record = await db_session.scalar(select(OAuthState).where(OAuthState.nonce_hash == hash_token(state)))
+    record = await db_session.scalar(
+        select(OAuthState).where(OAuthState.nonce_hash == hash_token(state))
+    )
     assert record is not None and record.consumed_at is not None
 
 
@@ -251,7 +388,9 @@ def test_logout_revokes_browser_access_and_refresh_tokens(api_client: TestClient
     assert api_client.get("/api/v1/auth/me").status_code == 401
 
 
-@pytest.mark.parametrize("authorization", [None, "junk", "Bearer nope", "Bearer invalid.token.value"])
+@pytest.mark.parametrize(
+    "authorization", [None, "junk", "Bearer nope", "Bearer invalid.token.value"]
+)
 def test_access_cookie_never_allows_bearer_to_bypass_csrf(
     api_client: TestClient, authorization: str | None
 ) -> None:
@@ -264,7 +403,9 @@ def test_access_cookie_never_allows_bearer_to_bypass_csrf(
     assert api_client.post("/api/v1/auth/logout", headers=headers).status_code == 204
 
 
-@pytest.mark.parametrize("authorization", [None, "junk", "Bearer nope", "Bearer invalid.token.value"])
+@pytest.mark.parametrize(
+    "authorization", [None, "junk", "Bearer nope", "Bearer invalid.token.value"]
+)
 def test_refresh_cookie_never_allows_bearer_to_bypass_csrf(
     api_client: TestClient, authorization: str | None
 ) -> None:
@@ -278,7 +419,9 @@ def test_refresh_cookie_never_allows_bearer_to_bypass_csrf(
     assert api_client.post("/api/v1/auth/refresh", headers=headers).status_code == 204
 
 
-def test_valid_bearer_cannot_bypass_csrf_when_both_browser_cookies_exist(api_client: TestClient) -> None:
+def test_valid_bearer_cannot_bypass_csrf_when_both_browser_cookies_exist(
+    api_client: TestClient,
+) -> None:
     """A live device token must not change an already-cookie-authenticated request's source."""
     started = api_client.get("/api/v1/auth/wecom/start")
     assert _callback(api_client, "owner-code", started.json()["state"]).status_code == 204
@@ -300,7 +443,9 @@ def _login_tokens(client: TestClient) -> tuple[str, str, str]:
 
 
 @pytest.mark.parametrize("cookie_shape", ["access", "refresh", "both"])
-@pytest.mark.parametrize("auth_variant", ["absent", "arbitrary", "malformed", "wrong_signature", "live", "revoked"])
+@pytest.mark.parametrize(
+    "auth_variant", ["absent", "arbitrary", "malformed", "wrong_signature", "live", "revoked"]
+)
 def test_every_browser_cookie_shape_requires_csrf_despite_authorization_headers(
     api_client: TestClient, cookie_shape: str, auth_variant: str
 ) -> None:
@@ -313,7 +458,9 @@ def test_every_browser_cookie_shape_requires_csrf_despite_authorization_headers(
     if cookie_shape in {"access", "both"}:
         api_client.cookies.set("access_token", live_access, domain="testserver.local", path="/")
     if cookie_shape in {"refresh", "both"}:
-        api_client.cookies.set("refresh_token", live_refresh, domain="testserver.local", path="/api/v1/auth")
+        api_client.cookies.set(
+            "refresh_token", live_refresh, domain="testserver.local", path="/api/v1/auth"
+        )
     headers = {
         "arbitrary": "junk",
         "malformed": "Bearer nope",
@@ -325,7 +472,9 @@ def test_every_browser_cookie_shape_requires_csrf_despite_authorization_headers(
     assert api_client.post("/api/v1/auth/logout", headers=request_headers).status_code == 403
 
 
-@pytest.mark.parametrize("auth_variant", ["absent", "arbitrary", "malformed", "wrong_signature", "live", "revoked"])
+@pytest.mark.parametrize(
+    "auth_variant", ["absent", "arbitrary", "malformed", "wrong_signature", "live", "revoked"]
+)
 def test_header_only_bearer_matrix_uses_authoritative_server_state(
     api_client: TestClient, auth_variant: str
 ) -> None:
@@ -345,4 +494,6 @@ def test_header_only_bearer_matrix_uses_authoritative_server_state(
         "/api/v1/auth/logout",
         headers={} if auth_variant == "absent" else {"Authorization": headers[auth_variant]},
     )
-    assert response.status_code == (204 if auth_variant == "live" else (403 if auth_variant == "absent" else 401))
+    assert response.status_code == (
+        204 if auth_variant == "live" else (403 if auth_variant == "absent" else 401)
+    )

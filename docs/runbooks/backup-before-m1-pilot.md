@@ -12,9 +12,7 @@ $BackupFile='<ABSOLUTE_POSTGRES_BACKUP_FILE>'
 $ObjectBackupDir='<ABSOLUTE_OBJECT_BACKUP_DIRECTORY>'
 docker compose --env-file .env -f docker-compose.yml stop nginx web api worker scheduler
 docker compose --env-file .env -f docker-compose.yml exec -T postgres `
-  pg_dump --username "$env:SUPERBOSS_POSTGRES_USER" `
-  --dbname "$env:SUPERBOSS_POSTGRES_DB" `
-  --format custom --file /tmp/superboss-m1.backup
+  sh -ceu 'pg_dump --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --format custom --file /tmp/superboss-m1.backup'
 docker compose --env-file .env -f docker-compose.yml cp `
   postgres:/tmp/superboss-m1.backup "$BackupFile"
 docker compose --env-file .env -f docker-compose.yml exec -T postgres `
@@ -42,9 +40,7 @@ docker compose --env-file .env -f docker-compose.yml stop nginx web api worker s
 docker compose --env-file .env -f docker-compose.yml cp `
   "$BackupFile" postgres:/tmp/superboss-m1.backup
 docker compose --env-file .env -f docker-compose.yml exec -T postgres `
-  pg_restore --username "$env:SUPERBOSS_POSTGRES_USER" `
-  --dbname "$env:SUPERBOSS_POSTGRES_DB" `
-  --clean --if-exists --exit-on-error /tmp/superboss-m1.backup
+  sh -ceu 'pg_restore --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --clean --if-exists --exit-on-error /tmp/superboss-m1.backup'
 docker compose --env-file .env -f docker-compose.yml exec -T postgres `
   rm -f /tmp/superboss-m1.backup
 docker compose --env-file .env -f docker-compose.yml run --rm --no-deps `

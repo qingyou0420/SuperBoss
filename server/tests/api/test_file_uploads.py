@@ -286,7 +286,7 @@ async def test_complete_dispatches_after_quarantine_commit(file_client, db_sessi
     response = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json={"parts": [{"part_number": 2, "etag": "b"}, {"part_number": 1, "etag": "a"}]}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "X-Request-ID": request_id})
     file = await db_session.get(File, upload.file_id)
     assert response.status_code == 200 and response.json() == {"file_id": str(upload.file_id), "state": "QUARANTINED"} and file is not None and file.state.value == "QUARANTINED" and storage.completed[upload.multipart_id][0].part_number == 1 and upload.multipart_id not in storage.active and observed == [(upload.file_id, "QUARANTINED")]
-    events = list((await db_session.scalars(select(AuditLog))).all())
+    events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
     assert len(events) == 1 and events[0].action == "file.upload.complete" and events[0].outcome == "SUCCESS" and events[0].object_type == "file" and events[0].object_id == upload.file_id and events[0].project_id == project.id and str(events[0].request_id) == request_id and events[0].actor_kind == "user" and events[0].metadata_json["state"] == "QUARANTINED" and events[0].metadata_json["size_bytes"] == 2 and events[0].metadata_json["actor_role"] == "OWNER"
 
 
@@ -304,7 +304,7 @@ async def test_complete_size_mismatch_persists_failed_without_dispatch(file_clie
     headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "mismatch"}
     started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 2, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers); upload = await db_session.get(Upload, started.json()["upload_id"]); assert upload is not None
     response = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json={"parts": [{"part_number": 1, "etag": "secret-etag"}]}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); file = await db_session.get(File, upload.file_id)
-    events = list((await db_session.scalars(select(AuditLog))).all())
+    events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
     assert response.status_code == 409 and response.json()["error"]["code"] == "FILE_UPLOAD_SIZE_MISMATCH" and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and file is not None and file.state.value == "FAILED" and dispatched == [] and upload.multipart_id in storage.aborted and upload.multipart_id not in storage.active and "secret-etag" not in response.text and file.object_key not in response.text and not [event for event in events if event.action == "file.upload.complete" and event.outcome == "SUCCESS"]
 
 
@@ -320,7 +320,7 @@ async def test_complete_storage_error_persists_safe_pending_state(file_client, d
     dispatched: list[UUID] = []; app.state.enqueue_file_scan = lambda file_id, _delivery_key: dispatched.append(file_id); storage.complete_error = RuntimeError("S3 secret")
     headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "storage-error"}
     started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers); upload = await db_session.get(Upload, started.json()["upload_id"]); assert upload is not None
-    response = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json={"parts": [{"part_number": 1, "etag": "secret-etag"}]}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); file = await db_session.get(File, upload.file_id); lifecycle = await db_session.get(FileUploadLifecycle, upload.id); events = list((await db_session.scalars(select(AuditLog))).all())
+    response = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json={"parts": [{"part_number": 1, "etag": "secret-etag"}]}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); file = await db_session.get(File, upload.file_id); lifecycle = await db_session.get(FileUploadLifecycle, upload.id); events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
     assert response.status_code == 503 and response.json()["error"]["code"] == "FILE_COMPLETION_PENDING" and file is not None and file.state.value == "UPLOADING" and lifecycle is not None and lifecycle.completion_state == "PREPARED" and lifecycle.completion_last_error_code == "COMPLETION_AMBIGUOUS" and dispatched == [] and upload.multipart_id in storage.active and not list(await db_session.scalars(select(FileStorageCleanup))) and "S3 secret" not in response.text and "secret-etag" not in response.text and file.object_key not in response.text and not [event for event in events if event.action == "file.upload.complete" and event.outcome == "SUCCESS"]
 
 
@@ -334,7 +334,7 @@ async def test_complete_rejects_invalid_parts_before_side_effects(file_client, d
     client, storage = file_client; app = client.app; project = Project(name="Complete validation"); db_session.add(project); await db_session.commit(); _login(client)
     dispatched: list[object] = []; app.state.enqueue_file_scan = lambda file_id, _delivery_key: dispatched.append(file_id)
     headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "complete-validation"}; started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers); upload = await db_session.get(Upload, started.json()["upload_id"]); assert upload is not None
-    response = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json={"parts": parts}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); file = await db_session.get(File, upload.file_id); events = list((await db_session.scalars(select(AuditLog))).all())
+    response = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json={"parts": parts}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); file = await db_session.get(File, upload.file_id); events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
     assert response.status_code == 422 and response.json()["error"]["code"] == "VALIDATION_ERROR" and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and file is not None and file.state.value == "UPLOADING" and upload.multipart_id in storage.active and storage.completed == {} and dispatched == [] and events == []
 
 
@@ -350,7 +350,7 @@ async def test_repeat_complete_is_rejected_without_redelivery(file_client, db_se
     dispatched: list[UUID] = []; app.state.enqueue_file_scan = lambda file_id, _delivery_key: dispatched.append(file_id)
     headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "repeat-complete"}; started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers); upload = await db_session.get(Upload, started.json()["upload_id"]); assert upload is not None
     body = {"parts": [{"part_number": 1, "etag": "e"}]}; first = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json=body, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); second = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json=body, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); file = await db_session.get(File, upload.file_id)
-    events = list((await db_session.scalars(select(AuditLog))).all())
+    events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
     assert first.status_code == 200 and second.status_code == 200 and file is not None and file.state.value == "QUARANTINED" and len(storage.completed) == 1 and len(dispatched) == 1 and len([event for event in events if event.action == "file.upload.complete" and event.outcome == "SUCCESS"]) == 1
 
 
@@ -583,7 +583,7 @@ async def test_foreign_staff_cannot_complete_upload(file_client, db_session: Asy
     )
 
     file = await db_session.get(File, upload.file_id)
-    events = list((await db_session.scalars(select(AuditLog))).all())
+    events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
     assert response.status_code == 403 and response.json()["error"]["code"] == "PROJECT_FORBIDDEN"
     assert file is not None and file.state.value == "UPLOADING"
     assert upload.multipart_id in storage.active and storage.completed == {} and dispatched == []
@@ -607,7 +607,7 @@ async def test_anonymous_complete_uses_authentication_error_before_csrf(file_cli
         json={"parts": [{"part_number": 1, "etag": "etag"}]},
     )
 
-    events = list((await db_session.scalars(select(AuditLog))).all())
+    events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
     assert response.status_code == 401 and response.json()["error"]["code"] == "AUTHENTICATION_REQUIRED"
     assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"]
     assert storage.completed == {} and storage.expiries == [] and dispatched == [] and events == []
@@ -633,7 +633,7 @@ async def test_owner_complete_requires_valid_csrf(file_client, db_session: Async
         headers=headers,
     )
 
-    events = list((await db_session.scalars(select(AuditLog))).all())
+    events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
     assert response.status_code == 403 and response.json()["error"]["code"] == "CSRF_VALIDATION_FAILED"
     assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"]
     assert storage.completed == {} and storage.expiries == [] and dispatched == [] and events == []
@@ -677,7 +677,7 @@ async def test_owner_downloads_clean_file_with_audited_short_presign(file_client
         headers={"X-Request-ID": request_id},
     )
 
-    events = list((await db_session.scalars(select(AuditLog))).all())
+    events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
     assert response.status_code == 200 and response.json() == {"url": f"memory://get/{file.object_key}"}
     assert storage.expiries[-1] == 60 and file.state == FileState.CLEAN
     assert len(events) == 1
@@ -731,7 +731,7 @@ async def test_download_rejects_non_clean_file_with_denied_audit(
         headers={"X-Request-ID": request_id},
     )
 
-    events = list((await db_session.scalars(select(AuditLog))).all())
+    events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
     assert response.status_code == 409 and response.json()["error"]["code"] == "FILE_NOT_READY"
     assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"] == request_id
     assert storage.expiries == [] and len(events) == 1
@@ -784,7 +784,7 @@ async def test_foreign_staff_download_is_denied_and_audited(file_client, db_sess
         headers={"X-Request-ID": request_id},
     )
 
-    events = list((await db_session.scalars(select(AuditLog))).all())
+    events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
     assert response.status_code == 403 and response.json()["error"]["code"] == "PROJECT_FORBIDDEN"
     assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"] == request_id
     assert storage.expiries == [] and len(events) == 1
@@ -818,7 +818,7 @@ async def test_missing_file_download_is_denied_with_file_not_found_code(
         headers={"X-Request-ID": request_id},
     )
 
-    events = list((await db_session.scalars(select(AuditLog))).all())
+    events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
     assert response.status_code == 404 and response.json()["error"]["code"] == "FILE_NOT_FOUND"
     assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"] == request_id
     assert storage.expiries == [] and len(events) == 1
@@ -870,7 +870,7 @@ async def test_assigned_staff_downloads_clean_file(file_client, db_session: Asyn
         headers={"X-Request-ID": request_id},
     )
 
-    events = list((await db_session.scalars(select(AuditLog))).all())
+    events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
     assert response.status_code == 200 and response.json() == {"url": f"memory://get/{file.object_key}"}
     assert storage.expiries[-1] == 60 and len(events) == 1
     event = events[0]
@@ -899,7 +899,7 @@ async def test_anonymous_download_is_unauthenticated_without_audit(
         headers={"X-Request-ID": request_id},
     )
 
-    events = list((await db_session.scalars(select(AuditLog))).all())
+    events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
     assert response.status_code == 401 and response.json()["error"]["code"] == "AUTHENTICATION_REQUIRED"
     assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"] == request_id
     assert storage.expiries == [] and events == []
@@ -982,7 +982,7 @@ async def test_complete_missing_upload_returns_file_upload_not_found(file_client
         headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "X-Request-ID": request_id},
     )
 
-    events = list((await db_session.scalars(select(AuditLog))).all())
+    events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
     assert response.status_code == 404 and response.json()["error"]["code"] == "FILE_UPLOAD_NOT_FOUND"
     assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"] == request_id
     assert storage.active == {} and storage.completed == {} and dispatched == []
@@ -1102,7 +1102,7 @@ async def test_upload_pre_authentication_and_authorized_paths_do_not_audit_denie
     client.cookies.clear(); login = client.get("/api/v1/auth/wecom/start")
     assert client.get("/api/v1/auth/wecom/callback", params={"code": "staff-code", "state": login.json()["state"]}).status_code == 204
     allowed_staff = client.post("/api/v1/files/uploads", json=_i3_body(staff_project.id), headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "i3-staff"})
-    events = list((await db_session.scalars(select(AuditLog))).all())
+    events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
     assert [anonymous.status_code, csrf.status_code, owner.status_code, allowed_staff.status_code] == [401, 403, 201, 201]
     assert storage.active and not [event for event in events if event.outcome == "DENIED"]
 

@@ -1,5 +1,6 @@
 import { defineConfig, devices } from '@playwright/test'
 
+import { SAFE_LIVE_ARTIFACT_OPTIONS } from './specs/support/artifacts'
 import { e2e } from './specs/support/runtime'
 
 export default defineConfig({
@@ -16,8 +17,6 @@ export default defineConfig({
         ...devices['Desktop Chrome'],
         baseURL: e2e.baseUrl,
         ignoreHTTPSErrors: e2e.ignoreHTTPSErrors,
-        screenshot: 'only-on-failure',
-        trace: 'retain-on-failure',
-        video: 'retain-on-failure',
+        ...SAFE_LIVE_ARTIFACT_OPTIONS,
     },
 })

@@ -18,14 +18,20 @@ $env:E2E_CONNECTOR_COMMAND_JSON='["<ABSOLUTE_CONNECTOR_EXE>"]'
 $env:E2E_TARGET='production'
 
 Push-Location tests/e2e
-npm ci
-npx playwright install chromium
-npx playwright codegen --save-storage "$env:E2E_OWNER_STORAGE_STATE_PATH" "$env:E2E_BASE_URL/login"
-# Complete OWNER WeCom login in the opened profile, then close it.
-npx playwright codegen --save-storage "$env:E2E_STAFF_STORAGE_STATE_PATH" "$env:E2E_BASE_URL/login"
-# Complete the distinct STAFF WeCom login in the opened profile, then close it.
-npm test
-Pop-Location
+try {
+    npm ci
+    npx playwright install chromium
+    npx playwright codegen --save-storage "$env:E2E_OWNER_STORAGE_STATE_PATH" "$env:E2E_BASE_URL/login"
+    # Complete OWNER WeCom login in the opened profile, then close it.
+    npx playwright codegen --save-storage "$env:E2E_STAFF_STORAGE_STATE_PATH" "$env:E2E_BASE_URL/login"
+    # Complete the distinct STAFF WeCom login in the opened profile, then close it.
+    npm test
+} finally {
+    Remove-Item -LiteralPath "$env:E2E_OWNER_STORAGE_STATE_PATH" -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "$env:E2E_STAFF_STORAGE_STATE_PATH" -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path (Get-Location) 'output') -Recurse -Force -ErrorAction SilentlyContinue
+    Pop-Location
+}
 ```
 
 For the documented local HTTPS loopback deployment only, set
@@ -76,17 +82,40 @@ Run the Playwright STAFF spec with the distinct account. It sends real direct re
 creation, pairing-code creation, OWNER import listing, and a foreign-project file download; each must
 return 403. UI hiding alone is not evidence.
 
-After the operations, inspect bounded audit rows by the recorded IDs:
+Record the safe foreign-file ID attached/annotated by the STAFF spec before clearing its ignored
+output. After the operations, set the two actor record IDs and the exact UTC start/end of the live
+acceptance window, then inspect only the required bounded audit rows. The three OWNER-only STAFF
+denials intentionally have a null `object_id`; the foreign-file denial must carry the recorded file
+ID.
 
 ```powershell
-docker compose --env-file .env -f docker-compose.yml exec -T postgres psql `
-  --username "$env:SUPERBOSS_POSTGRES_USER" `
-  --dbname "$env:SUPERBOSS_POSTGRES_DB" `
-  --command "SELECT created_at,action,outcome,object_type,object_id FROM audit_logs WHERE object_id IN ('<PROJECT_ID>','<FILE_ID>','<DEVICE_ID>','<IMPORT_JOB_ID>') ORDER BY created_at;"
+$OwnerActorId='<OWNER_USER_RECORD_ID>'
+$StaffActorId='<STAFF_USER_RECORD_ID>'
+$AuditStart='<UTC_START_ISO8601>'
+$AuditEnd='<UTC_END_ISO8601>'
+$AuditSql=@"
+\set ON_ERROR_STOP on
+SELECT created_at, actor_id, action, outcome, object_type, object_id, project_id, request_id
+FROM audit_logs
+WHERE actor_id IN ('$OwnerActorId'::uuid, '$StaffActorId'::uuid)
+  AND created_at >= '$AuditStart'::timestamptz
+  AND created_at <= '$AuditEnd'::timestamptz
+  AND action IN (
+    'auth.login', 'project.create', 'file.upload.complete', 'file.download',
+    'device.pairing_code.create', 'device.revoke', 'import.list', 'import.submit'
+  )
+  AND outcome IN ('SUCCESS', 'DENIED')
+ORDER BY created_at, id;
+"@
+$AuditSql | docker compose --env-file .env -f docker-compose.yml exec -T postgres `
+  sh -ceu 'psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB"'
 ```
 
-Confirm evidence for login, denied access, upload, denied and successful download, pairing,
-revocation, and import submission. A missing row is FAIL, not a documentation exception.
+Confirm OWNER/STAFF `auth.login` success, upload, pre-CLEAN denied and CLEAN successful download,
+pairing, revocation, import submission, and all four STAFF denials. The expected STAFF denial rows
+are `project.create`, `device.pairing_code.create`, and `import.list` with `object_id IS NULL`, plus
+`file.download` with the recorded foreign-file ID. A missing row is FAIL, not a documentation
+exception.
 
 ## Blank sign-off checklist
 
@@ -99,6 +128,7 @@ revocation, and import submission. A missing row is FAIL, not a documentation ex
 - `验收测试` project ID: _______________________________
 - Clean file ID: _______________________________________
 - EICAR file ID: _______________________________________
+- STAFF foreign file denial ID: ________________________
 - Device ID: ___________________________________________
 - Import job ID: _______________________________________
 - OWNER login callback: PASS / FAIL / NOT RUN __________
@@ -114,5 +144,6 @@ revocation, and import submission. A missing row is FAIL, not a documentation ex
 - Reviewer name/signature: ______________________________
 - Notes/incident IDs (no secrets): ______________________
 
-Delete the external storage-state files after recording results. Do not mark M1 accepted while any
-required line is FAIL or NOT RUN.
+The command's `finally` block deletes both external storage-state files and every file under the
+ignored `tests/e2e/output/` tree whether the run succeeds or fails. Confirm that cleanup completed.
+Do not mark M1 accepted while any required line is FAIL or NOT RUN.

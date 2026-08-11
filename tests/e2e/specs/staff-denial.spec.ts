@@ -11,7 +11,7 @@ test.use({ storageState: e2e.staffStorageStatePath })
 test('独立 STAFF 直接请求项目、设备、导入列表与外项目文件均返回 403', async ({
     browser,
     page,
-}) => {
+}, testInfo) => {
     const ownerContext = await browser.newContext({
         baseURL: e2e.baseUrl,
         ignoreHTTPSErrors: e2e.ignoreHTTPSErrors,
@@ -53,6 +53,14 @@ test('独立 STAFF 直接请求项目、设备、导入列表与外项目文件�
     } finally {
         await ownerContext.close()
     }
+    testInfo.annotations.push({
+        type: 'acceptance.foreign_file_id',
+        description: foreignFileId,
+    })
+    await testInfo.attach('acceptance-foreign-file-id', {
+        body: Buffer.from(foreignFileId),
+        contentType: 'text/plain',
+    })
 
     await loginThroughWeCom(page, 'STAFF')
     const headers = await csrfHeaders(page.context())
