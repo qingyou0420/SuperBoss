@@ -388,3 +388,26 @@ def test_object_preflight_reaches_allowlist_access_phase_before_local_response()
     assert "proxy_set_header Authorization" not in preflight
     assert "proxy_set_header Cookie" not in preflight
     assert "proxy_pass http://superboss_minio;" in proxy
+
+
+def test_nginx_reresolves_recreated_compose_upstreams() -> None:
+    nginx = (ROOT / "ops" / "nginx" / "nginx.conf").read_text(encoding="utf-8")
+    virtual_hosts = (ROOT / "ops" / "nginx" / "conf.d" / "superboss.conf").read_text(
+        encoding="utf-8"
+    )
+
+    assert "resolver 127.0.0.11 valid=10s ipv6=off;" in nginx
+    for upstream, target in (
+        ("superboss_api", "api:8000"),
+        ("superboss_web", "web:8080"),
+        ("superboss_minio", "minio:9000"),
+    ):
+        match = re.search(
+            rf"upstream\s+{upstream}\s*\{{(?P<body>.*?)\}}",
+            virtual_hosts,
+            re.DOTALL,
+        )
+        assert match is not None
+        body = match.group("body")
+        assert f"zone {upstream} 64k;" in body
+        assert f"server {target} resolve;" in body
