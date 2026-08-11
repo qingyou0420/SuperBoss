@@ -3,8 +3,11 @@
 import asyncio
 import inspect
 import socket
+import subprocess
+import sys
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -13,6 +16,51 @@ from botocore.exceptions import ClientError
 
 from superboss.infrastructure.s3 import Boto3ObjectStorage
 from superboss.modules.files.storage import CompletedPart, ObjectMetadata
+
+
+def test_s3_adapter_imports_without_type_stub_packages_or_network() -> None:
+    """Production imports must not depend on development-only boto3 type stubs."""
+    source_root = Path(__file__).resolve().parents[3] / "src"
+    script = """
+import importlib.abc
+import socket
+import sys
+
+class BlockTypeStubs(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "mypy_boto3_s3" or fullname.startswith("mypy_boto3_s3."):
+            raise ModuleNotFoundError(f"blocked production-only import: {fullname}", name=fullname)
+        return None
+
+def deny_network(*_args, **_kwargs):
+    raise AssertionError("network access attempted during S3 adapter import")
+
+sys.meta_path.insert(0, BlockTypeStubs())
+sys.path.insert(0, sys.argv[1])
+socket.socket.connect = deny_network
+socket.socket.connect_ex = deny_network
+socket.create_connection = deny_network
+
+from superboss.infrastructure.s3 import Boto3ObjectStorage
+
+storage = Boto3ObjectStorage(bucket="files-bucket", client=object())
+assert storage is not None
+assert not any(
+    name == "mypy_boto3_s3" or name.startswith("mypy_boto3_s3.")
+    for name in sys.modules
+)
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", script, str(source_root)],
+        cwd=source_root.parent,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.asyncio

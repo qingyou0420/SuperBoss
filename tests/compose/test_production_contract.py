@@ -1,6 +1,7 @@
 """Static executable contract for the production-only Compose boundary."""
 
 import re
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -216,6 +217,30 @@ def test_health_and_dependency_ordering_preserve_task8_worker_requirements() -> 
     assert "clamav" not in services["api"]["depends_on"]
     assert services["nginx"]["depends_on"]["api"]["condition"] == "service_healthy"
     assert services["nginx"]["depends_on"]["web"]["condition"] == "service_healthy"
+
+
+def test_clamav_configuration_matches_pinned_image_startup_and_tcp_contract() -> None:
+    config = (ROOT / "server" / "config" / "clamd.conf").read_text(encoding="utf-8")
+    directives = dict(
+        line.split(maxsplit=1)
+        for raw_line in config.splitlines()
+        if (line := raw_line.strip()) and not line.startswith("#")
+    )
+
+    assert directives["LocalSocket"] == "/run/clamav/clamd.sock"
+    assert directives["TCPSocket"] == "3310"
+    assert directives["TCPAddr"] == "0.0.0.0"
+
+
+def test_clamav_153_healthcheck_uses_only_the_supported_single_ping_probe() -> None:
+    healthcheck = _compose()["services"]["clamav"]["healthcheck"]["test"]
+
+    assert healthcheck[0] == "CMD-SHELL"
+    shell_tokens = shlex.split(healthcheck[1])
+
+    assert shell_tokens == ["clamdscan", "--ping=1", ">/dev/null", "2>&1"]
+    assert "--wait" not in shell_tokens
+    assert not any(argument.startswith("--wait=") for argument in shell_tokens)
 
 
 def test_frontend_build_receives_the_exact_public_object_storage_origin() -> None:
