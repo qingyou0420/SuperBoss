@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import httpx
@@ -154,6 +155,40 @@ async def test_configured_owner_bootstraps_the_only_owner(
     assert [(user.wecom_userid, user.role, user.status) for user in users] == [
         ("owner-1", Role.OWNER, UserStatus.ACTIVE)
     ]
+
+
+@pytest.mark.asyncio
+async def test_callback_persists_exact_browser_credential_expirations(
+    api_client: TestClient,
+    db_session: AsyncSession,
+    test_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A callback must persist the exact expiry encoded in its 2h/14d credentials."""
+    from superboss.core import security
+    from superboss.modules.auth import service as auth_service_module
+
+    issued_at = datetime.now(UTC).replace(microsecond=654321)
+    monkeypatch.setattr(security, "utcnow", lambda: issued_at)
+    monkeypatch.setattr(auth_service_module, "utcnow", lambda: issued_at)
+    started = api_client.get("/api/v1/auth/wecom/start")
+
+    response = _callback(api_client, "owner-code", started.json()["state"])
+
+    assert response.status_code == 204
+    access_token = api_client.cookies.get("access_token")
+    assert access_token is not None
+    claims = jwt.decode(
+        access_token,
+        test_settings.jwt_secret,
+        algorithms=["HS256"],
+        options={"verify_exp": False, "verify_iat": False},
+    )
+    auth_session = await db_session.scalar(select(AuthSession))
+    assert auth_session is not None
+    assert claims["exp"] - claims["iat"] == 7200
+    assert auth_session.access_expires_at == datetime.fromtimestamp(claims["exp"], UTC)
+    assert auth_session.refresh_expires_at == issued_at + timedelta(days=14)
 
 
 @pytest.mark.asyncio

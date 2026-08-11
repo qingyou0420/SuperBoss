@@ -52,8 +52,8 @@ def issue_access_token(
 ) -> tuple[str, datetime]:
     if not settings.jwt_secret:
         raise TokenError("JWT signing is not configured")
-    issued_at = utcnow()
-    expires_at = issued_at + timedelta(minutes=15)
+    issued_at = utcnow().replace(microsecond=0)
+    expires_at = issued_at + timedelta(hours=2)
     payload = {
         "sub": str(user_id),
         "role": role,

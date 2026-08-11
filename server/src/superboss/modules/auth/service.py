@@ -80,7 +80,7 @@ class AuthService:
     async def issue_session(self, user: User) -> SessionPair:
         raw_refresh = new_opaque_token()
         now = utcnow()
-        refresh_expires_at = now + timedelta(days=30)
+        refresh_expires_at = now + timedelta(days=14)
         auth_session = AuthSession(
             user_id=user.id,
             access_jti="pending",
