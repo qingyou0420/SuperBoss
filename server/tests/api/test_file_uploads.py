@@ -8,12 +8,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from superboss.core.config import Settings
 from superboss.main import create_app
 from superboss.modules.projects.models import Project, ProjectMember
-from superboss.modules.users.models import Role, User, UserStatus
+from superboss.modules.users.models import User
 from tests.files.storage import InMemoryObjectStorage
+from tests.identity import LOCAL_TEST_PASSWORD, local_user
 
 
 @pytest_asyncio.fixture
-async def file_client(db_session: AsyncSession, test_settings: Settings):
+async def file_client(
+    db_session: AsyncSession, test_settings: Settings, active_owner: User
+):
+    del active_owner
+    await db_session.commit()
     storage = InMemoryObjectStorage()
     app = create_app(
         test_settings,
@@ -24,9 +29,13 @@ async def file_client(db_session: AsyncSession, test_settings: Settings):
         yield client, app.state.object_storage
 
 
-def _login(client: TestClient) -> None:
-    started = client.get("/api/v1/auth/wecom/start")
-    assert client.get("/api/v1/auth/wecom/callback", params={"code": "owner-code", "state": started.json()["state"]}).status_code == 204
+def _login(client: TestClient, username: str = "owner") -> None:
+    assert client.get("/api/v1/auth/csrf").status_code == 204
+    assert client.post(
+        "/api/v1/auth/login",
+        json={"username": username, "password": LOCAL_TEST_PASSWORD},
+        headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))},
+    ).status_code == 204
 
 
 @pytest.mark.asyncio
@@ -45,11 +54,10 @@ async def test_owner_starts_upload_with_injected_storage(file_client, db_session
 async def test_assigned_staff_starts_upload(file_client, db_session: AsyncSession) -> None:
     from superboss.modules.files.models import File
     client, _storage = file_client
-    staff = User(wecom_userid="staff-1", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
+    staff = local_user("staff-1", display_name="Staff")
     project = Project(name="Staff HTTP")
     db_session.add_all([staff, project]); await db_session.flush(); db_session.add(ProjectMember(project_id=project.id, user_id=staff.id)); await db_session.commit()
-    started = client.get("/api/v1/auth/wecom/start")
-    assert client.get("/api/v1/auth/wecom/callback", params={"code": "staff-code", "state": started.json()["state"]}).status_code == 204
+    _login(client, "staff-1")
     response = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "staff-upload"})
     assert response.status_code == 201
     file = await db_session.get(File, response.json()["file_id"])
@@ -59,10 +67,10 @@ async def test_assigned_staff_starts_upload(file_client, db_session: AsyncSessio
 @pytest.mark.asyncio
 async def test_foreign_staff_cannot_start_upload(file_client, db_session: AsyncSession) -> None:
     client, storage = file_client
-    staff = User(wecom_userid="staff-1", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
+    staff = local_user("staff-1", display_name="Staff")
     target, assigned = Project(name="Foreign target"), Project(name="Foreign assigned")
     db_session.add_all([staff, target, assigned]); await db_session.flush(); db_session.add(ProjectMember(project_id=assigned.id, user_id=staff.id)); await db_session.commit()
-    started = client.get("/api/v1/auth/wecom/start"); client.get("/api/v1/auth/wecom/callback", params={"code": "staff-code", "state": started.json()["state"]})
+    _login(client, "staff-1")
     response = client.post("/api/v1/files/uploads", json={"project_id": str(target.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "foreign-start"})
     assert response.status_code == 403 and response.json()["error"]["code"] == "PROJECT_FORBIDDEN" and storage.active == {}
 
@@ -243,11 +251,11 @@ async def test_part_rejects_quarantined_file(file_client, db_session: AsyncSessi
 @pytest.mark.asyncio
 async def test_foreign_staff_cannot_presign_upload_part(file_client, db_session: AsyncSession) -> None:
     from superboss.modules.files.models import File, Upload
-    client, storage = file_client; target, assigned = Project(name="Part target"), Project(name="Part assigned"); staff = User(wecom_userid="staff-1", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
+    client, storage = file_client; target, assigned = Project(name="Part target"), Project(name="Part assigned"); staff = local_user("staff-1", display_name="Staff")
     db_session.add_all([target, assigned, staff]); await db_session.flush(); db_session.add(ProjectMember(project_id=assigned.id, user_id=staff.id)); await db_session.commit(); _login(client)
     headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "foreign-part"}
     started = client.post("/api/v1/files/uploads", json={"project_id": str(target.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers); upload = await db_session.get(Upload, started.json()["upload_id"]); assert upload is not None
-    client.cookies.clear(); begin = client.get("/api/v1/auth/wecom/start"); client.get("/api/v1/auth/wecom/callback", params={"code": "staff-code", "state": begin.json()["state"]})
+    client.cookies.clear(); _login(client, "staff-1")
     before = list(storage.expiries); response = client.post(f"/api/v1/files/uploads/{upload.id}/parts/1", headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); file = await db_session.get(File, upload.file_id)
     assert response.status_code == 403 and response.json()["error"]["code"] == "PROJECT_FORBIDDEN" and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and storage.expiries == before and file is not None and file.state.value == "UPLOADING"
 
@@ -555,7 +563,7 @@ async def test_foreign_staff_cannot_complete_upload(file_client, db_session: Asy
     app = client.app
     target = Project(name="Complete foreign target")
     assigned = Project(name="Complete foreign assigned")
-    staff = User(wecom_userid="staff-1", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
+    staff = local_user("staff-1", display_name="Staff")
     db_session.add_all([target, assigned, staff])
     await db_session.flush()
     db_session.add(ProjectMember(project_id=assigned.id, user_id=staff.id))
@@ -574,8 +582,7 @@ async def test_foreign_staff_cannot_complete_upload(file_client, db_session: Asy
     dispatched: list[object] = []
     app.state.enqueue_file_scan = lambda file_id, _delivery_key: dispatched.append(file_id)
     client.cookies.clear()
-    login = client.get("/api/v1/auth/wecom/start")
-    assert client.get("/api/v1/auth/wecom/callback", params={"code": "staff-code", "state": login.json()["state"]}).status_code == 204
+    _login(client, "staff-1")
     response = client.post(
         f"/api/v1/files/uploads/{upload.id}/complete",
         json={"parts": [{"part_number": 1, "etag": "etag"}]},
@@ -653,7 +660,7 @@ async def test_owner_downloads_clean_file_with_audited_short_presign(file_client
     db_session.add(project)
     await db_session.commit()
     _login(client)
-    owner = await db_session.scalar(select(User).where(User.wecom_userid == "owner-1"))
+    owner = await db_session.scalar(select(User).where(User.username == "owner"))
     assert owner is not None
     file = File(
         project_id=project.id,
@@ -707,7 +714,7 @@ async def test_download_rejects_non_clean_file_with_denied_audit(
     db_session.add(project)
     await db_session.commit()
     _login(client)
-    owner = await db_session.scalar(select(User).where(User.wecom_userid == "owner-1"))
+    owner = await db_session.scalar(select(User).where(User.username == "owner"))
     assert owner is not None
     file = File(
         project_id=project.id,
@@ -756,7 +763,7 @@ async def test_foreign_staff_download_is_denied_and_audited(file_client, db_sess
     client, storage = file_client
     target = Project(name="Download foreign target")
     assigned = Project(name="Download foreign assigned")
-    staff = User(wecom_userid="staff-1", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
+    staff = local_user("staff-1", display_name="Staff")
     db_session.add_all([target, assigned, staff])
     await db_session.flush()
     db_session.add(ProjectMember(project_id=assigned.id, user_id=staff.id))
@@ -775,8 +782,7 @@ async def test_foreign_staff_download_is_denied_and_audited(file_client, db_sess
     )
     db_session.add(file)
     await db_session.commit()
-    login = client.get("/api/v1/auth/wecom/start")
-    assert client.get("/api/v1/auth/wecom/callback", params={"code": "staff-code", "state": login.json()["state"]}).status_code == 204
+    _login(client, "staff-1")
 
     request_id = "bba39a39-47ba-4ac5-9250-ccdba1d7f25e"
     response = client.get(
@@ -809,7 +815,7 @@ async def test_missing_file_download_is_denied_with_file_not_found_code(
 
     client, storage = file_client
     _login(client)
-    owner = await db_session.scalar(select(User).where(User.wecom_userid == "owner-1"))
+    owner = await db_session.scalar(select(User).where(User.username == "owner"))
     assert owner is not None
     file_id = uuid4()
     request_id = "bba39a39-47ba-4ac5-9250-ccdba1d7f25e"
@@ -842,7 +848,7 @@ async def test_assigned_staff_downloads_clean_file(file_client, db_session: Asyn
 
     client, storage = file_client
     project = Project(name="Download assigned staff")
-    staff = User(wecom_userid="staff-1", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
+    staff = local_user("staff-1", display_name="Staff")
     db_session.add_all([project, staff])
     await db_session.flush()
     db_session.add(ProjectMember(project_id=project.id, user_id=staff.id))
@@ -861,8 +867,7 @@ async def test_assigned_staff_downloads_clean_file(file_client, db_session: Asyn
     )
     db_session.add(file)
     await db_session.commit()
-    login = client.get("/api/v1/auth/wecom/start")
-    assert client.get("/api/v1/auth/wecom/callback", params={"code": "staff-code", "state": login.json()["state"]}).status_code == 204
+    _login(client, "staff-1")
 
     request_id = "bba39a39-47ba-4ac5-9250-ccdba1d7f25e"
     response = client.get(
@@ -927,7 +932,7 @@ async def test_download_success_returns_safe_failure_when_audit_write_fails(
     db_session.add(project)
     await db_session.commit()
     _login(client)
-    owner = await db_session.scalar(select(User).where(User.wecom_userid == "owner-1"))
+    owner = await db_session.scalar(select(User).where(User.username == "owner"))
     assert owner is not None
     file = File(
         project_id=project.id,
@@ -1047,7 +1052,7 @@ async def test_authenticated_upload_denials_are_safely_audited(file_client, db_s
 
     client, storage = file_client
     target, assigned = Project(name="I3 target"), Project(name="I3 assigned")
-    staff = User(wecom_userid="staff-1", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
+    staff = local_user("staff-1", display_name="Staff")
     db_session.add_all([target, assigned, staff]); await db_session.flush()
     db_session.add(ProjectMember(project_id=assigned.id, user_id=staff.id)); await db_session.commit()
     _login(client); csrf = str(client.cookies.get("XSRF-TOKEN"))
@@ -1061,8 +1066,7 @@ async def test_authenticated_upload_denials_are_safely_audited(file_client, db_s
     missing_complete = client.post(f"/api/v1/files/uploads/{missing_id}/complete", json={"parts": [{"part_number": 1, "etag": "unsafe-etag"}]}, headers={"X-CSRF-Token": csrf, "X-Request-ID": "00000000-0000-4000-8000-000000000004"})
     assert [r.status_code for r in (inactive_part, inactive_complete, missing_part, missing_complete)] == [409, 409, 404, 404]
     file.state = FileState.UPLOADING; await db_session.commit(); client.cookies.clear()
-    login = client.get("/api/v1/auth/wecom/start")
-    assert client.get("/api/v1/auth/wecom/callback", params={"code": "staff-code", "state": login.json()["state"]}).status_code == 204
+    _login(client, "staff-1")
     staff_csrf = str(client.cookies.get("XSRF-TOKEN"))
     foreign_start = client.post("/api/v1/files/uploads", json=_i3_body(target.id), headers={"X-CSRF-Token": staff_csrf, "Idempotency-Key": "i3-foreign", "X-Request-ID": "00000000-0000-4000-8000-000000000005"})
     foreign_part = client.post(f"/api/v1/files/uploads/{upload.id}/parts/1", headers={"X-CSRF-Token": staff_csrf, "X-Request-ID": "00000000-0000-4000-8000-000000000006"})
@@ -1092,15 +1096,14 @@ async def test_upload_pre_authentication_and_authorized_paths_do_not_audit_denie
 
     client, storage = file_client
     owner_project, staff_project = Project(name="I3 owner allowed"), Project(name="I3 staff allowed")
-    staff = User(wecom_userid="staff-1", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
+    staff = local_user("staff-1", display_name="Staff")
     db_session.add_all([owner_project, staff_project, staff]); await db_session.flush()
     db_session.add(ProjectMember(project_id=staff_project.id, user_id=staff.id)); await db_session.commit()
     anonymous = client.post("/api/v1/files/uploads", json=_i3_body(owner_project.id), headers={"Idempotency-Key": "i3-anonymous"})
     _login(client)
     csrf = client.post("/api/v1/files/uploads", json=_i3_body(owner_project.id), headers={"Idempotency-Key": "i3-csrf"})
     owner = client.post("/api/v1/files/uploads", json=_i3_body(owner_project.id), headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "i3-owner"})
-    client.cookies.clear(); login = client.get("/api/v1/auth/wecom/start")
-    assert client.get("/api/v1/auth/wecom/callback", params={"code": "staff-code", "state": login.json()["state"]}).status_code == 204
+    client.cookies.clear(); _login(client, "staff-1")
     allowed_staff = client.post("/api/v1/files/uploads", json=_i3_body(staff_project.id), headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "i3-staff"})
     events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
     assert [anonymous.status_code, csrf.status_code, owner.status_code, allowed_staff.status_code] == [401, 403, 201, 201]
@@ -1121,13 +1124,12 @@ async def test_upload_denied_audit_failure_preserves_domain_responses(file_clien
     csrf = str(client.cookies.get("XSRF-TOKEN")); started = client.post("/api/v1/files/uploads", json=_i3_body(project.id), headers={"X-CSRF-Token": csrf, "Idempotency-Key": "i3-audit"})
     upload = await db_session.get(Upload, started.json()["upload_id"]); assert started.status_code == 201 and upload is not None
     file = await db_session.get(File, upload.file_id); assert file is not None; file.state = FileState.QUARANTINED
-    assigned = Project(name="I3 audit assigned"); staff = User(wecom_userid="staff-1", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
+    assigned = Project(name="I3 audit assigned"); staff = local_user("staff-1", display_name="Staff")
     db_session.add_all([assigned, staff]); await db_session.flush(); db_session.add(ProjectMember(project_id=assigned.id, user_id=staff.id)); await db_session.commit()
     monkeypatch.setattr("superboss.modules.files.router.AuditService", FailingAuditService)
     missing = client.post(f"/api/v1/files/uploads/{uuid4()}/parts/1", headers={"X-CSRF-Token": csrf})
     inactive = client.post(f"/api/v1/files/uploads/{upload.id}/parts/1", headers={"X-CSRF-Token": csrf})
-    file.state = FileState.UPLOADING; await db_session.commit(); client.cookies.clear(); login = client.get("/api/v1/auth/wecom/start")
-    assert client.get("/api/v1/auth/wecom/callback", params={"code": "staff-code", "state": login.json()["state"]}).status_code == 204
+    file.state = FileState.UPLOADING; await db_session.commit(); client.cookies.clear(); _login(client, "staff-1")
     foreign = client.post(f"/api/v1/files/uploads/{upload.id}/parts/1", headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))})
     assert [response.status_code for response in (missing, inactive, foreign)] == [404, 409, 403]
     assert storage.expiries == [] and all("audit secret" not in response.text for response in (missing, inactive, foreign))

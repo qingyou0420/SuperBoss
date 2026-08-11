@@ -14,20 +14,31 @@ from superboss.core.config import Settings
 from superboss.main import create_app
 from superboss.modules.audit.models import AuditLog
 from superboss.modules.auth.models import AuthSession
+from superboss.modules.auth.passwords import verify_password
 from superboss.modules.projects.models import Project, ProjectMember
-from superboss.modules.users.models import Role, User, UserStatus
+from superboss.modules.users.models import Role, User
+from tests.identity import LOCAL_TEST_PASSWORD, local_user
 
 
 @pytest_asyncio.fixture
-async def owner_users_client(db_session: AsyncSession, test_settings: Settings):
+async def owner_users_client(
+    db_session: AsyncSession, test_settings: Settings, active_owner: User
+):
+    del active_owner
+    await db_session.commit()
     app = create_app(test_settings)
     with TestClient(app, base_url="https://testserver") as client:
         yield client
 
 
-def login(client: TestClient, code: str) -> None:
-    started = client.get("/api/v1/auth/wecom/start")
-    assert client.get("/api/v1/auth/wecom/callback", params={"code": code, "state": started.json()["state"]}).status_code == 204
+def login(client: TestClient, username: str = "owner") -> None:
+    assert client.get("/api/v1/auth/csrf").status_code == 204
+    response = client.post(
+        "/api/v1/auth/login",
+        json={"username": username, "password": LOCAL_TEST_PASSWORD},
+        headers=csrf(client),
+    )
+    assert response.status_code == 204
 
 
 def csrf(client: TestClient) -> dict[str, str]:
@@ -45,30 +56,35 @@ async def test_owner_creates_lists_and_assigns_staff_with_strict_contracts(owner
     projects = [Project(name="Alpha"), Project(name="Beta")]
     db_session.add_all(projects)
     await db_session.commit()
-    login(owner_users_client, "owner-code")
-    created = owner_users_client.post("/api/v1/owner/users", json={"wecom_userid": "staff-acceptance", "display_name": "Acceptance", "project_ids": [str(item.id) for item in projects]}, headers=csrf(owner_users_client))
+    login(owner_users_client)
+    created = owner_users_client.post("/api/v1/owner/users", json={"username": "staff-acceptance", "display_name": "Acceptance", "project_ids": [str(item.id) for item in projects]}, headers=csrf(owner_users_client))
     assert created.status_code == 201
     body = created.json()
-    assert body["wecom_userid"] == "staff-acceptance" and body["role"] == "STAFF" and body["status"] == "ACTIVE"
-    assert {item["id"] for item in body["projects"]} == {str(item.id) for item in projects}
+    assert set(body) == {"temporary_password", "user"}
+    assert body["user"]["username"] == "staff-acceptance" and body["user"]["role"] == "STAFF" and body["user"]["status"] == "ACTIVE"
+    assert {item["id"] for item in body["user"]["projects"]} == {str(item.id) for item in projects}
+    persisted = await db_session.scalar(select(User).where(User.username == "staff-acceptance"))
+    assert persisted is not None
+    assert verify_password(persisted.password_hash, body["temporary_password"]).valid
+    assert "password" not in str(body["user"]).lower()
     assert owner_users_client.get("/api/v1/owner/users").status_code == 200
-    reassigned = owner_users_client.put(f"/api/v1/owner/users/{body['id']}/projects", json={"project_ids": [str(projects[0].id)]}, headers=csrf(owner_users_client))
+    reassigned = owner_users_client.put(f"/api/v1/owner/users/{body['user']['id']}/projects", json={"project_ids": [str(projects[0].id)]}, headers=csrf(owner_users_client))
     assert reassigned.status_code == 200 and [item["id"] for item in reassigned.json()["projects"]] == [str(projects[0].id)]
 
 
 @pytest.mark.asyncio
 async def test_user_routes_reject_staff_duplicate_role_and_owner_mutation(owner_users_client: TestClient, db_session: AsyncSession) -> None:
-    staff = User(wecom_userid="staff-1", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
+    staff = local_user("staff-1", display_name="Staff")
     db_session.add(staff)
     await db_session.commit()
-    login(owner_users_client, "staff-code")
+    login(owner_users_client, "staff-1")
     error(owner_users_client.get("/api/v1/owner/users"), 403, "OWNER_REQUIRED")
     owner_users_client.cookies.clear()
-    login(owner_users_client, "owner-code")
-    error(owner_users_client.post("/api/v1/owner/users", json={"wecom_userid": "staff-1", "display_name": "Again", "project_ids": []}, headers=csrf(owner_users_client)), 409, "USERID_CONFLICT")
-    invalid = owner_users_client.post("/api/v1/owner/users", json={"wecom_userid": "staff-2", "display_name": "Bad", "project_ids": [], "role": "OWNER"}, headers=csrf(owner_users_client))
+    login(owner_users_client)
+    error(owner_users_client.post("/api/v1/owner/users", json={"username": "staff-1", "display_name": "Again", "project_ids": []}, headers=csrf(owner_users_client)), 409, "USERNAME_CONFLICT")
+    invalid = owner_users_client.post("/api/v1/owner/users", json={"username": "staff-2", "display_name": "Bad", "project_ids": [], "role": "OWNER"}, headers=csrf(owner_users_client))
     error(invalid, 422, "VALIDATION_ERROR")
-    owner = await db_session.scalar(select(User).where(User.wecom_userid == "owner-1"))
+    owner = await db_session.scalar(select(User).where(User.username == "owner"))
     assert owner is not None
     error(owner_users_client.patch(f"/api/v1/owner/users/{owner.id}", json={"status": "DISABLED"}, headers=csrf(owner_users_client)), 409, "OWNER_PROTECTED")
 
@@ -77,16 +93,16 @@ async def test_user_routes_reject_staff_duplicate_role_and_owner_mutation(owner_
 async def test_staff_is_denied_from_every_owner_user_route_with_bounded_audit(
     owner_users_client: TestClient, db_session: AsyncSession
 ) -> None:
-    staff = User(wecom_userid="staff-1", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
-    target = User(wecom_userid="staff-target", display_name="Target", role=Role.STAFF, status=UserStatus.ACTIVE)
+    staff = local_user("staff-1", display_name="Staff")
+    target = local_user("staff-target", display_name="Target")
     project = Project(name="Staff denial project")
     db_session.add_all([staff, target, project])
     await db_session.commit()
-    login(owner_users_client, "staff-code")
+    login(owner_users_client, "staff-1")
 
     routes = [
         ("get", "/api/v1/owner/users", None, "user.list", None),
-        ("post", "/api/v1/owner/users", {"wecom_userid": "blocked-create", "display_name": "Blocked", "project_ids": []}, "user.create", None),
+        ("post", "/api/v1/owner/users", {"username": "blocked-create", "display_name": "Blocked", "project_ids": []}, "user.create", None),
         ("patch", f"/api/v1/owner/users/{target.id}", {"display_name": "Blocked update"}, "user.update", target.id),
         ("put", f"/api/v1/owner/users/{target.id}/projects", {"project_ids": [str(project.id)]}, "user.projects.replace", target.id),
     ]
@@ -111,17 +127,17 @@ async def test_project_id_collections_are_bounded_before_repository_or_audit(
     from superboss.modules.users.schemas import ProjectAssignments, StaffCreate
 
     accepted = [uuid4() for _ in range(1000)]
-    assert len(StaffCreate(wecom_userid="bounded", display_name="Bounded", project_ids=accepted).project_ids) == 1000
+    assert len(StaffCreate(username="bounded", display_name="Bounded", project_ids=accepted).project_ids) == 1000
     assert len(ProjectAssignments(project_ids=accepted).project_ids) == 1000
-    target = User(wecom_userid="bounded-target", display_name="Bounded target", role=Role.STAFF, status=UserStatus.ACTIVE)
+    target = local_user("bounded-target", display_name="Bounded target")
     db_session.add(target)
     await db_session.commit()
-    login(owner_users_client, "owner-code")
+    login(owner_users_client)
     too_many = [str(uuid4()) for _ in range(1001)]
     create_request_id = uuid4()
     create_response = owner_users_client.post(
         "/api/v1/owner/users",
-        json={"wecom_userid": "too-many", "display_name": "Too many", "project_ids": too_many},
+        json={"username": "too-many", "display_name": "Too many", "project_ids": too_many},
         headers={**csrf(owner_users_client), "X-Request-ID": str(create_request_id)},
     )
     error(create_response, 422, "VALIDATION_ERROR")
@@ -146,7 +162,7 @@ async def test_concurrent_project_replaces_are_serialized_to_one_complete_member
     from superboss.modules.users.schemas import ProjectAssignments
     from superboss.modules.users.service import OwnerUserService
 
-    staff = User(wecom_userid="concurrent-staff", display_name="Concurrent", role=Role.STAFF, status=UserStatus.ACTIVE)
+    staff = local_user("concurrent-staff", display_name="Concurrent")
     projects = [Project(name=f"Concurrent {index}") for index in range(3)]
     db_session.add_all([staff, *projects])
     await db_session.commit()
@@ -180,14 +196,14 @@ async def test_concurrent_project_replaces_are_serialized_to_one_complete_member
 
 @pytest.mark.asyncio
 async def test_disable_revokes_sessions_and_unknown_project_does_not_partially_replace(owner_users_client: TestClient, db_session: AsyncSession) -> None:
-    staff = User(wecom_userid="staff-1", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
+    staff = local_user("staff-1", display_name="Staff")
     old = Project(name="Old")
     valid = Project(name="Valid")
     db_session.add_all([staff, old, valid])
     await db_session.flush()
     db_session.add(ProjectMember(user_id=staff.id, project_id=old.id))
     await db_session.commit()
-    login(owner_users_client, "owner-code")
+    login(owner_users_client)
     unknown = owner_users_client.put(f"/api/v1/owner/users/{staff.id}/projects", json={"project_ids": [str(valid.id), str(uuid4())]}, headers=csrf(owner_users_client))
     error(unknown, 404, "PROJECT_NOT_FOUND")
     assert (await db_session.scalars(select(ProjectMember.project_id).where(ProjectMember.user_id == staff.id))).all() == [old.id]
@@ -197,6 +213,38 @@ async def test_disable_revokes_sessions_and_unknown_project_does_not_partially_r
 
 
 def test_owner_user_writes_retain_browser_csrf_and_anonymous_401(owner_users_client: TestClient) -> None:
-    error(owner_users_client.post("/api/v1/owner/users", json={"wecom_userid": "new", "display_name": "New", "project_ids": []}), 401, "AUTHENTICATION_REQUIRED")
-    login(owner_users_client, "owner-code")
-    error(owner_users_client.post("/api/v1/owner/users", json={"wecom_userid": "new", "display_name": "New", "project_ids": []}), 403, "CSRF_VALIDATION_FAILED")
+    error(owner_users_client.post("/api/v1/owner/users", json={"username": "new", "display_name": "New", "project_ids": []}), 401, "AUTHENTICATION_REQUIRED")
+    login(owner_users_client)
+    error(owner_users_client.post("/api/v1/owner/users", json={"username": "new", "display_name": "New", "project_ids": []}), 403, "CSRF_VALIDATION_FAILED")
+
+
+@pytest.mark.asyncio
+async def test_owner_resets_staff_password_once_but_cannot_reset_owner(
+    owner_users_client: TestClient, db_session: AsyncSession
+) -> None:
+    staff = local_user("staff-reset", display_name="Reset")
+    db_session.add(staff)
+    await db_session.commit()
+    original_hash = staff.password_hash
+    login(owner_users_client)
+
+    response = owner_users_client.post(
+        f"/api/v1/owner/users/{staff.id}/password-reset",
+        headers=csrf(owner_users_client),
+    )
+
+    assert response.status_code == 200
+    assert set(response.json()) == {"temporary_password"}
+    await db_session.refresh(staff)
+    assert staff.password_hash != original_hash
+    assert verify_password(staff.password_hash, response.json()["temporary_password"]).valid
+    owner = await db_session.scalar(select(User).where(User.role == Role.OWNER))
+    assert owner is not None
+    error(
+        owner_users_client.post(
+            f"/api/v1/owner/users/{owner.id}/password-reset",
+            headers=csrf(owner_users_client),
+        ),
+        409,
+        "OWNER_PROTECTED",
+    )

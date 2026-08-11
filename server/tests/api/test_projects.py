@@ -14,34 +14,39 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core.config import Settings
 from superboss.main import create_app
-from superboss.modules.auth.models import AuthSession, OAuthState
+from superboss.modules.auth.models import AuthSession
 from superboss.modules.auth.repository import AuthRepository
 from superboss.modules.auth.service import AuthService
 from superboss.modules.projects.models import Project, ProjectMember
 from superboss.modules.users.models import Role, User, UserStatus
 from superboss.modules.users.repository import UserRepository
+from tests.identity import LOCAL_TEST_PASSWORD, local_user
 
 
 @pytest_asyncio.fixture
 async def api_client(
-    db_session: AsyncSession, test_settings: Settings
+    db_session: AsyncSession, test_settings: Settings, active_owner: User
 ) -> AsyncIterator[TestClient]:
+    del active_owner
+    await db_session.commit()
     app = create_app(test_settings)
     with TestClient(app, base_url="https://testserver") as client:
         yield client
     await db_session.rollback()
     await db_session.execute(delete(ProjectMember))
     await db_session.execute(delete(Project))
-    await db_session.execute(delete(OAuthState))
     await db_session.execute(delete(AuthSession))
     await db_session.execute(delete(User))
     await db_session.commit()
 
 
 def _login(client: TestClient, code: str) -> None:
-    started = client.get("/api/v1/auth/wecom/start")
-    response = client.get(
-        "/api/v1/auth/wecom/callback", params={"code": code, "state": started.json()["state"]}
+    username = {"owner-code": "owner", "staff-code": "staff-1"}.get(code, code)
+    assert client.get("/api/v1/auth/csrf").status_code == 204
+    response = client.post(
+        "/api/v1/auth/login",
+        json={"username": username, "password": LOCAL_TEST_PASSWORD},
+        headers=_csrf_headers(client),
     )
     assert response.status_code == 204
 
@@ -88,7 +93,7 @@ async def test_staff_sees_only_memberships_and_cannot_create(
     api_client: TestClient, db_session: AsyncSession
 ) -> None:
     """Removing the membership join would reveal Hidden to an unrelated STAFF account."""
-    staff = User(wecom_userid="staff-1", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
+    staff = local_user("staff-1", display_name="Staff")
     assigned = Project(name="Assigned")
     hidden = Project(name="Hidden")
     db_session.add_all([staff, assigned, hidden])
@@ -114,7 +119,7 @@ async def test_cookie_actor_precedes_bearer_without_fallback(
     api_client: TestClient, db_session: AsyncSession
 ) -> None:
     """Header precedence or fallback would let a second credential change the browser actor."""
-    staff = User(wecom_userid="staff-1", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE)
+    staff = local_user("staff-1", display_name="Staff")
     assigned = Project(name="Source Assigned")
     hidden = Project(name="Source Hidden")
     db_session.add_all([staff, assigned, hidden])
@@ -273,7 +278,7 @@ async def test_concurrent_canonical_name_creates_have_one_winner(
     db_session: AsyncSession, test_settings: Settings
 ) -> None:
     """Without the PostgreSQL functional unique index equivalent names can both commit."""
-    owner = User(wecom_userid="owner-1", display_name="Owner", role=Role.OWNER, status=UserStatus.ACTIVE)
+    owner = local_user("owner-revoked", display_name="Owner", role=Role.OWNER)
     db_session.add(owner)
     await db_session.flush()
     token = (
@@ -281,7 +286,6 @@ async def test_concurrent_canonical_name_creates_have_one_winner(
             db_session,
             AuthRepository(db_session),
             UserRepository(db_session),
-            None,
             test_settings,
         ).issue_session(owner)
     ).access_token
@@ -337,7 +341,7 @@ async def test_disabled_browser_session_is_rejected_immediately(
 ) -> None:
     """Trusting JWT role/status claims would leave changed accounts authorized."""
     _login(api_client, "owner-code")
-    owner = await db_session.scalar(select(User).where(User.wecom_userid == "owner-1"))
+    owner = await db_session.scalar(select(User).where(User.username == "owner"))
     assert owner is not None
     owner.status = UserStatus.DISABLED
     await db_session.commit()
@@ -352,7 +356,7 @@ async def test_role_changed_browser_session_uses_current_role_immediately(
 ) -> None:
     """Trusting the role claim would allow a demoted OWNER to create a project."""
     _login(api_client, "owner-code")
-    owner = await db_session.scalar(select(User).where(User.wecom_userid == "owner-1"))
+    owner = await db_session.scalar(select(User).where(User.username == "owner"))
     assert owner is not None
     owner.role = Role.STAFF
     await db_session.commit()

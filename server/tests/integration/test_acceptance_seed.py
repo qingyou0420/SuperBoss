@@ -1,22 +1,35 @@
-"""Real-PostgreSQL acceptance seed contracts."""
+"""Real-PostgreSQL acceptance seed contracts for local identities."""
 
 from __future__ import annotations
 
 import asyncio
-import json
-import os
-import subprocess
+import importlib.util
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
 from typing import Any
-from uuid import UUID
 
 import asyncpg
+import pytest
+
+from superboss.modules.auth.passwords import verify_password
 
 SERVER_ROOT = Path(__file__).resolve().parents[2]
 SEED_SCRIPT = SERVER_ROOT / "scripts" / "seed_acceptance.py"
 NORMAL_PROJECT_NAME = "M1 正常项目"
 TEST_PROJECT_NAME = "验收测试"
+OWNER_PASSWORD = "acceptance owner local password"
+STAFF_PASSWORD = "acceptance staff local password"
+
+
+def _module() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("seed_acceptance", SEED_SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def _asyncpg_url(database_url: str) -> str:
@@ -43,40 +56,7 @@ async def _fetch(database_url: str, statement: str, *arguments: object) -> list[
         await connection.close()
 
 
-def _environment(database_url: str, owner_userid: str, staff_userid: str) -> dict[str, str]:
-    environment = os.environ.copy()
-    environment.update(
-        {
-            "SUPERBOSS_DATABASE_URL": database_url,
-            "SUPERBOSS_ENVIRONMENT": "test",
-            "SUPERBOSS_OWNER_WECOM_USERID": owner_userid,
-            "SUPERBOSS_ACCEPTANCE_STAFF_WECOM_USERID": staff_userid,
-        }
-    )
-    return environment
-
-
-def _seed(environment: dict[str, str], *arguments: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, str(SEED_SCRIPT), *arguments],
-        cwd=SERVER_ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=False,
-    )
-
-
-def _assert_safe_failure(result: subprocess.CompletedProcess[str], secrets: list[str]) -> None:
-    assert result.returncode != 0
-    assert result.stdout == ""
-    combined = result.stderr
-    for secret in secrets:
-        assert secret not in combined
-
-
-def _cleanup(database_url: str, userids: list[str]) -> None:
+def _cleanup(database_url: str, usernames: list[str]) -> None:
     async def cleanup() -> None:
         connection = await asyncpg.connect(_asyncpg_url(database_url))
         try:
@@ -87,7 +67,7 @@ def _cleanup(database_url: str, userids: list[str]) -> None:
                     TEST_PROJECT_NAME,
                 )
                 await connection.execute(
-                    "DELETE FROM users WHERE wecom_userid = ANY($1::text[])", userids
+                    "DELETE FROM users WHERE username = ANY($1::text[])", usernames
                 )
         finally:
             await connection.close()
@@ -95,186 +75,212 @@ def _cleanup(database_url: str, userids: list[str]) -> None:
     _run(cleanup())
 
 
+def _reader(*values: str) -> Callable[[str], str]:
+    remaining = iter(values)
+    return lambda _prompt: next(remaining)
+
+
 def test_seed_empty_database_and_repeat_are_idempotent(postgres_database: str) -> None:
-    """Changing find-or-create to unconditional inserts would break the second run."""
-    owner = "acceptance-test-owner-empty"
-    staff = "acceptance-test-staff-empty"
-    environment = _environment(postgres_database, owner, staff)
+    module = _module()
+    owner, staff = "acceptance-owner", "acceptance-staff"
     _cleanup(postgres_database, [owner, staff])
     try:
-        first = _seed(environment)
-        second = _seed(environment)
+        first = _run(
+            module.seed(
+                postgres_database, owner, OWNER_PASSWORD, staff, STAFF_PASSWORD
+            )
+        )
+        second = _run(
+            module.seed(
+                postgres_database, owner, OWNER_PASSWORD, staff, STAFF_PASSWORD
+            )
+        )
 
-        assert first.returncode == second.returncode == 0
-        first_ids = json.loads(first.stdout)
-        second_ids = json.loads(second.stdout)
-        assert first_ids == second_ids
-        assert set(first_ids) == {
+        assert first == second
+        assert set(first.__dict__) == {
             "normal_project_id",
             "owner_id",
             "staff_id",
             "test_project_id",
         }
-        assert all(str(UUID(value)) == value for value in first_ids.values())
-        assert first.stderr == second.stderr == ""
-
         rows = _run(
             _fetch(
                 postgres_database,
-                """
-                SELECT 'user' AS kind, wecom_userid AS name, role AS marker
-                FROM users WHERE wecom_userid = ANY($1::text[])
-                UNION ALL
-                SELECT 'project', name, CASE WHEN is_test THEN 'test' ELSE 'normal' END
-                FROM projects WHERE name IN ($2, $3)
-                ORDER BY kind, name
-                """,
+                "SELECT username, role, password_hash, must_change_password "
+                "FROM users WHERE username = ANY($1::text[]) ORDER BY username",
                 [owner, staff],
-                NORMAL_PROJECT_NAME,
-                TEST_PROJECT_NAME,
             )
         )
-        assert [(row["kind"], row["name"], row["marker"]) for row in rows] == [
-            ("project", NORMAL_PROJECT_NAME, "normal"),
-            ("project", TEST_PROJECT_NAME, "test"),
-            ("user", owner, "OWNER"),
-            ("user", staff, "STAFF"),
+        assert [(row["username"], row["role"]) for row in rows] == [
+            (owner, "OWNER"),
+            (staff, "STAFF"),
         ]
+        assert verify_password(rows[0]["password_hash"], OWNER_PASSWORD).valid
+        assert verify_password(rows[1]["password_hash"], STAFF_PASSWORD).valid
+        assert all(row["must_change_password"] is False for row in rows)
+        assert OWNER_PASSWORD not in repr(first) and STAFF_PASSWORD not in repr(first)
     finally:
         _cleanup(postgres_database, [owner, staff])
 
 
-def test_seed_rolls_back_all_records_on_case_insensitive_project_conflict(
-    postgres_database: str,
-) -> None:
-    """Removing the single transaction would leave users behind after a project conflict."""
-    owner = "acceptance-test-owner-rollback"
-    staff = "acceptance-test-staff-rollback"
-    environment = _environment(postgres_database, owner, staff)
+def test_seed_rolls_back_users_on_project_conflict(postgres_database: str) -> None:
+    module = _module()
+    owner, staff = "rollback-owner", "rollback-staff"
     _cleanup(postgres_database, [owner, staff])
     _run(
         _execute(
             postgres_database,
-            "INSERT INTO projects (id, name, is_test, status) VALUES (gen_random_uuid(), $1, false, 'ACTIVE')",
+            "INSERT INTO projects (id,name,is_test,status) "
+            "VALUES (gen_random_uuid(),$1,false,'ACTIVE')",
             NORMAL_PROJECT_NAME.lower(),
         )
     )
     try:
-        result = _seed(environment)
-        _assert_safe_failure(result, [owner, staff, postgres_database])
-        rows = _run(
+        with pytest.raises(module.SeedRefusedError):
+            _run(
+                module.seed(
+                    postgres_database, owner, OWNER_PASSWORD, staff, STAFF_PASSWORD
+                )
+            )
+        assert _run(
             _fetch(
                 postgres_database,
-                "SELECT wecom_userid FROM users WHERE wecom_userid = ANY($1::text[])",
+                "SELECT username FROM users WHERE username = ANY($1::text[])",
                 [owner, staff],
             )
-        )
-        assert rows == []
+        ) == []
     finally:
         _run(
             _execute(
                 postgres_database,
-                "DELETE FROM projects WHERE lower(name) = lower($1)",
+                "DELETE FROM projects WHERE lower(name)=lower($1)",
                 NORMAL_PROJECT_NAME,
             )
         )
         _cleanup(postgres_database, [owner, staff])
 
 
-def test_seed_refuses_production_without_confirmation(postgres_database: str) -> None:
-    """Removing the production guard would create acceptance identities in production."""
-    owner = "acceptance-test-owner-production"
-    staff = "acceptance-test-staff-production"
-    environment = _environment(postgres_database, owner, staff)
-    environment["SUPERBOSS_ENVIRONMENT"] = "production"
-    _cleanup(postgres_database, [owner, staff])
-    try:
-        result = _seed(environment)
-        _assert_safe_failure(result, [owner, staff, postgres_database])
-        rows = _run(
-            _fetch(
-                postgres_database,
-                "SELECT wecom_userid FROM users WHERE wecom_userid = ANY($1::text[])",
-                [owner, staff],
-            )
-        )
-        assert rows == []
-    finally:
-        _cleanup(postgres_database, [owner, staff])
+def test_seed_refuses_production_before_reading_passwords(
+    postgres_database: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module()
+    monkeypatch.setenv("SUPERBOSS_DATABASE_URL", postgres_database)
+    monkeypatch.setenv("SUPERBOSS_ENVIRONMENT", "production")
+    monkeypatch.setenv("SUPERBOSS_OWNER_USERNAME", "production-owner")
+    monkeypatch.setenv("SUPERBOSS_ACCEPTANCE_STAFF_USERNAME", "production-staff")
+    calls = 0
+
+    def forbidden_reader(_prompt: str) -> str:
+        nonlocal calls
+        calls += 1
+        return OWNER_PASSWORD
+
+    with pytest.raises(module.SeedRefusedError):
+        _run(module.run_from_environment(False, forbidden_reader))
+    assert calls == 0
 
 
-def test_seed_never_changes_existing_owner_and_fails_closed_on_userid_mismatch(
+def test_seed_preserves_existing_owner_and_rejects_username_mismatch(
     postgres_database: str,
 ) -> None:
-    """Changing the OWNER lookup to update-or-create would mutate the protected account."""
-    existing_owner = "acceptance-test-owner-existing"
-    requested_owner = "acceptance-test-owner-requested"
-    staff = "acceptance-test-staff-owner-guard"
-    environment = _environment(postgres_database, requested_owner, staff)
-    _cleanup(postgres_database, [existing_owner, requested_owner, staff])
+    module = _module()
+    existing, requested, staff = "existing-owner", "requested-owner", "guard-staff"
+    _cleanup(postgres_database, [existing, requested, staff])
+    password_hash = module.hash_password(OWNER_PASSWORD)
     _run(
         _execute(
             postgres_database,
-            """
-            INSERT INTO users (id, wecom_userid, display_name, role, status)
-            VALUES (gen_random_uuid(), $1, 'Protected display', 'OWNER', 'DISABLED')
-            """,
-            existing_owner,
+            "INSERT INTO users (id,username,display_name,password_hash,must_change_password,"
+            "password_changed_at,role,status) VALUES "
+            "(gen_random_uuid(),$1,'Keep exactly',$2,false,clock_timestamp(),'OWNER','DISABLED')",
+            existing,
+            password_hash,
         )
     )
     try:
-        result = _seed(environment)
-        _assert_safe_failure(
-            result, [existing_owner, requested_owner, staff, postgres_database]
-        )
+        with pytest.raises(module.SeedRefusedError):
+            _run(
+                module.seed(
+                    postgres_database,
+                    requested,
+                    OWNER_PASSWORD,
+                    staff,
+                    STAFF_PASSWORD,
+                )
+            )
         rows = _run(
             _fetch(
                 postgres_database,
-                "SELECT wecom_userid, display_name, role, status FROM users WHERE role = 'OWNER'",
+                "SELECT username,display_name,password_hash,status FROM users WHERE role='OWNER'",
             )
         )
         assert [dict(row) for row in rows] == [
             {
-                "wecom_userid": existing_owner,
-                "display_name": "Protected display",
-                "role": "OWNER",
+                "username": existing,
+                "display_name": "Keep exactly",
+                "password_hash": password_hash,
                 "status": "DISABLED",
             }
         ]
     finally:
-        _cleanup(postgres_database, [existing_owner, requested_owner, staff])
+        _cleanup(postgres_database, [existing, requested, staff])
 
 
-def test_seed_reuses_matching_owner_without_modifying_it(postgres_database: str) -> None:
-    """Changing idempotency to normalize OWNER fields would violate OWNER immutability."""
-    owner = "acceptance-test-owner-preserve"
-    staff = "acceptance-test-staff-preserve"
-    environment = _environment(postgres_database, owner, staff)
+def test_seed_reuses_matching_owner_without_modifying_credentials(
+    postgres_database: str,
+) -> None:
+    module = _module()
+    owner, staff = "preserved-owner", "preserved-staff"
     _cleanup(postgres_database, [owner, staff])
+    original_hash = module.hash_password("different preserved owner password")
     _run(
         _execute(
             postgres_database,
-            """
-            INSERT INTO users (id, wecom_userid, display_name, role, status)
-            VALUES (gen_random_uuid(), $1, 'Keep exactly', 'OWNER', 'DISABLED')
-            """,
+            "INSERT INTO users (id,username,display_name,password_hash,must_change_password,"
+            "password_changed_at,role,status) VALUES "
+            "(gen_random_uuid(),$1,'Keep exactly',$2,true,clock_timestamp(),'OWNER','DISABLED')",
             owner,
+            original_hash,
         )
     )
     try:
-        result = _seed(environment)
-        assert result.returncode == 0
+        _run(
+            module.seed(
+                postgres_database, owner, OWNER_PASSWORD, staff, STAFF_PASSWORD
+            )
+        )
         row = _run(
             _fetch(
                 postgres_database,
-                "SELECT display_name, role, status FROM users WHERE wecom_userid = $1",
+                "SELECT display_name,password_hash,must_change_password,status "
+                "FROM users WHERE username=$1",
                 owner,
             )
         )[0]
         assert dict(row) == {
             "display_name": "Keep exactly",
-            "role": "OWNER",
+            "password_hash": original_hash,
+            "must_change_password": True,
             "status": "DISABLED",
         }
     finally:
         _cleanup(postgres_database, [owner, staff])
+
+
+def test_cli_has_no_password_arguments_or_password_environment_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    parser = module.build_parser()
+    options = {
+        option for action in parser._actions for option in action.option_strings
+    }
+    assert "--password" not in options and "--password-file" not in options
+    monkeypatch.setenv("SUPERBOSS_OWNER_PASSWORD", "forbidden environment secret")
+    monkeypatch.setenv("SUPERBOSS_ACCEPTANCE_STAFF_PASSWORD", "forbidden staff secret")
+    result = _run(
+        module._read_passwords(
+            _reader(OWNER_PASSWORD, OWNER_PASSWORD, STAFF_PASSWORD, STAFF_PASSWORD)
+        )
+    )
+    assert result == (OWNER_PASSWORD, STAFF_PASSWORD)

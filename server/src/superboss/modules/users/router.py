@@ -11,8 +11,10 @@ from superboss.modules.audit.service import AuditService
 from superboss.modules.users.repository import UserRepository
 from superboss.modules.users.schemas import (
     OwnerUserRead,
+    PasswordResetRead,
     ProjectAssignments,
     StaffCreate,
+    StaffCreateRead,
     StaffUpdate,
 )
 from superboss.modules.users.service import OwnerUserService
@@ -49,12 +51,12 @@ async def list_users(request: Request, actor: Actor = Depends(get_actor), servic
     return [OwnerUserRead.model_validate(user) for user in users]
 
 
-@router.post("", response_model=OwnerUserRead, status_code=status.HTTP_201_CREATED)
-async def create_staff(request: Request, command: StaffCreate, actor: Actor = Depends(get_actor), service: OwnerUserService = Depends(get_service)) -> OwnerUserRead:
+@router.post("", response_model=StaffCreateRead, status_code=status.HTTP_201_CREATED)
+async def create_staff(request: Request, command: StaffCreate, actor: Actor = Depends(get_actor), service: OwnerUserService = Depends(get_service)) -> StaffCreateRead:
     current_request_id = request_id(request)
-    user = await service.create_staff(actor, command, current_request_id)
-    await service.commit_and_record_success(actor, "user.create", current_request_id, user.id)
-    return OwnerUserRead.model_validate(user)
+    created = await service.create_staff(actor, command, current_request_id)
+    await service.commit_and_record_success(actor, "user.create", current_request_id, created.user.id)
+    return StaffCreateRead.model_validate(created)
 
 
 @router.patch("/{user_id}", response_model=OwnerUserRead)
@@ -71,3 +73,18 @@ async def replace_projects(request: Request, user_id: UUID, command: ProjectAssi
     user = await service.replace_projects(actor, user_id, command, current_request_id)
     await service.commit_and_record_success(actor, "user.projects.replace", current_request_id, user.id)
     return OwnerUserRead.model_validate(user)
+
+
+@router.post("/{user_id}/password-reset", response_model=PasswordResetRead)
+async def reset_staff_password(
+    request: Request,
+    user_id: UUID,
+    actor: Actor = Depends(get_actor),
+    service: OwnerUserService = Depends(get_service),
+) -> PasswordResetRead:
+    current_request_id = request_id(request)
+    result = await service.reset_staff_password(actor, user_id, current_request_id)
+    await service.commit_and_record_success(
+        actor, "user.password.reset", current_request_id, user_id
+    )
+    return PasswordResetRead.model_validate(result)

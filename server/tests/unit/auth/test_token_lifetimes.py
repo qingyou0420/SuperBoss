@@ -12,7 +12,8 @@ from superboss.core.security import hash_token, issue_access_token, issue_device
 from superboss.modules.auth import service as auth_service_module
 from superboss.modules.auth.models import AuthSession
 from superboss.modules.auth.service import AuthService
-from superboss.modules.users.models import Role, User, UserStatus
+from superboss.modules.users.models import Role, User
+from tests.identity import local_user
 
 
 class RecordingAuthRepository:
@@ -45,13 +46,9 @@ def _settings() -> Settings:
 
 
 def _user() -> User:
-    return User(
-        id=uuid4(),
-        wecom_userid="owner-1",
-        display_name="Owner",
-        role=Role.OWNER,
-        status=UserStatus.ACTIVE,
-    )
+    user = local_user("owner", display_name="Owner", role=Role.OWNER)
+    user.id = uuid4()
+    return user
 
 
 def _claims(token: str, settings: Settings) -> dict[str, object]:
@@ -66,7 +63,7 @@ def _claims(token: str, settings: Settings) -> dict[str, object]:
 def _service(
     user: User, repository: RecordingAuthRepository, settings: Settings
 ) -> AuthService:
-    return AuthService(MemorySession(user), repository, object(), None, settings)  # type: ignore[arg-type]
+    return AuthService(MemorySession(user), repository, object(), settings)  # type: ignore[arg-type]
 
 
 def test_browser_access_token_expires_exactly_two_hours_after_issuance(

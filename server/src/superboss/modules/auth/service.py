@@ -1,13 +1,13 @@
-"""Authentication policy and rotating session lifecycle."""
+"""Local password policy and rotating browser-session lifecycle."""
 
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Protocol
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core.config import Settings
+from superboss.core.errors import PasswordReuseForbiddenError
 from superboss.core.security import (
     TokenError,
     decode_access_token,
@@ -16,24 +16,28 @@ from superboss.core.security import (
     new_opaque_token,
     utcnow,
 )
-from superboss.infrastructure.wecom import WeComIdentity
 from superboss.modules.auth.models import AuthSession
+from superboss.modules.auth.passwords import hash_password, verify_dummy_password, verify_password
 from superboss.modules.auth.repository import AuthRepository
 from superboss.modules.auth.schemas import SessionPair
-from superboss.modules.users.models import Role, User, UserStatus
+from superboss.modules.users.models import User, UserStatus
 from superboss.modules.users.repository import UserRepository
 
-
-class IdentityProvider(Protocol):
-    async def exchange_code(self, code: str) -> WeComIdentity: ...
+MAX_LOGIN_FAILURES = 5
+LOGIN_LOCK_DURATION = timedelta(minutes=15)
 
 
 class InvalidSession(Exception):
     """Session cannot be used."""
 
 
-class ForbiddenIdentity(Exception):
-    """WeCom identity is not permitted to log in."""
+class LoginFailure(Exception):
+    """Local credentials cannot issue a session."""
+
+    def __init__(self, user: User | None, reason: str = "INVALID_CREDENTIALS") -> None:
+        self.user = user
+        self.reason = reason
+        super().__init__("Local authentication failed")
 
 
 @dataclass(frozen=True)
@@ -48,32 +52,37 @@ class AuthService:
         session: AsyncSession,
         auth_repository: AuthRepository,
         user_repository: UserRepository,
-        provider: IdentityProvider | None,
         settings: Settings,
     ) -> None:
         self.session = session
         self.auth_repository = auth_repository
         self.user_repository = user_repository
-        self.provider = provider
         self.settings = settings
 
-    async def complete_wecom_login(self, code: str, state: str) -> CompletedLogin:
-        del state  # State is verified at the HTTP boundary before identity exchange.
-        if self.provider is None:
-            raise InvalidSession("Identity provider is unavailable")
-        identity = await self.provider.exchange_code(code)
-        user = await self.user_repository.by_wecom_userid(identity.userid)
-        if user is None and identity.userid == self.settings.owner_wecom_userid:
-            user = User(
-                wecom_userid=identity.userid,
-                display_name="",
-                role=Role.OWNER,
-                status=UserStatus.ACTIVE,
-            )
-            await self.user_repository.add(user)
-        if user is None or user.status != UserStatus.ACTIVE:
-            raise ForbiddenIdentity("Identity is not authorized")
-        user.last_login_at = utcnow()
+    async def login(self, username: str, password: str) -> CompletedLogin:
+        user = await self.user_repository.by_username_for_update(username)
+        if user is None:
+            verify_dummy_password(password)
+            raise LoginFailure(None)
+        now = utcnow()
+        if user.locked_until is not None and user.locked_until > now:
+            verify_dummy_password(password)
+            raise LoginFailure(user, "LOCKED")
+        if user.locked_until is not None:
+            user.locked_until = None
+            user.failed_login_count = 0
+        verification = verify_password(user.password_hash, password)
+        if not verification.valid or user.status != UserStatus.ACTIVE:
+            user.failed_login_count = min(user.failed_login_count + 1, MAX_LOGIN_FAILURES)
+            if user.failed_login_count >= MAX_LOGIN_FAILURES:
+                user.locked_until = now + LOGIN_LOCK_DURATION
+            await self.session.flush()
+            raise LoginFailure(user)
+        if verification.needs_rehash:
+            user.password_hash = hash_password(password)
+        user.failed_login_count = 0
+        user.locked_until = None
+        user.last_login_at = now
         await self.session.flush()
         return CompletedLogin(await self.issue_session(user), user)
 
@@ -98,6 +107,27 @@ class AuthService:
         await self.session.flush()
         return SessionPair(access_token, raw_refresh, access_expires_at, refresh_expires_at)
 
+    async def change_password(
+        self, user_id: UUID, current_password: str, new_password: str
+    ) -> CompletedLogin:
+        user = await self.user_repository.by_id_for_update(user_id)
+        if user is None or user.status != UserStatus.ACTIVE:
+            raise LoginFailure(None)
+        current = verify_password(user.password_hash, current_password)
+        if not current.valid:
+            raise LoginFailure(user)
+        if verify_password(user.password_hash, new_password).valid:
+            raise PasswordReuseForbiddenError()
+        now = utcnow()
+        user.password_hash = hash_password(new_password)
+        user.password_changed_at = now
+        user.must_change_password = False
+        user.failed_login_count = 0
+        user.locked_until = None
+        await self.auth_repository.revoke_all_for_user(user.id, now)
+        await self.session.flush()
+        return CompletedLogin(await self.issue_session(user), user)
+
     async def rotate_refresh_token(self, raw_token: str) -> SessionPair:
         current = await self.auth_repository.by_refresh_hash(hash_token(raw_token))
         now = utcnow()
@@ -121,7 +151,7 @@ class AuthService:
             claims = decode_access_token(self.settings, raw_token)
             session_id = UUID(str(claims["session_id"]))
             user_id = UUID(str(claims["sub"]))
-            token_role = Role(str(claims["role"]))
+            token_role = str(claims["role"])
         except (TokenError, ValueError) as error:
             raise InvalidSession("Access token is invalid") from error
         auth_session = await self.auth_repository.by_id(session_id)
@@ -134,7 +164,11 @@ class AuthService:
         ):
             raise InvalidSession("Access token is invalid")
         user = await self.session.get(User, user_id)
-        if user is None or user.status != UserStatus.ACTIVE or user.role != token_role:
+        if (
+            user is None
+            or user.status != UserStatus.ACTIVE
+            or user.role.value != token_role
+        ):
             raise InvalidSession("Access token is invalid")
         return user
 

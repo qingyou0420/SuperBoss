@@ -21,7 +21,7 @@ async def test_refresh_token_is_single_use(
 ) -> None:
     """Removing refresh-token consumption would permit replay and fail this test."""
     service = AuthService(
-        db_session, AuthRepository(db_session), UserRepository(db_session), None, test_settings
+        db_session, AuthRepository(db_session), UserRepository(db_session), test_settings
     )
     pair = await service.issue_session(active_owner)
 
@@ -38,7 +38,7 @@ async def test_logout_revokes_both_access_and_refresh_tokens(
 ) -> None:
     """Omitting either revocation lets a logged-out credential remain valid."""
     service = AuthService(
-        db_session, AuthRepository(db_session), UserRepository(db_session), None, test_settings
+        db_session, AuthRepository(db_session), UserRepository(db_session), test_settings
     )
     pair = await service.issue_session(active_owner)
 
@@ -63,7 +63,7 @@ async def test_access_claim_anomalies_are_rejected(
     db_session: AsyncSession, active_owner: User, test_settings: Settings, field: str, value: object
 ) -> None:
     """Invalid exact-six-claim tokens must not authenticate a live session."""
-    service = AuthService(db_session, AuthRepository(db_session), UserRepository(db_session), None, test_settings)
+    service = AuthService(db_session, AuthRepository(db_session), UserRepository(db_session), test_settings)
     pair = await service.issue_session(active_owner)
     claims = jwt.decode(pair.access_token, test_settings.jwt_secret, algorithms=["HS256"], options={"verify_exp": False})
     claims[field] = value
@@ -77,7 +77,7 @@ async def test_concurrent_refresh_rotation_has_exactly_one_winner(
     db_session: AsyncSession, active_owner: User, test_settings: Settings, postgres_database: str
 ) -> None:
     """Removing the row lock permits both concurrent refreshes to rotate one credential."""
-    issuer = AuthService(db_session, AuthRepository(db_session), UserRepository(db_session), None, test_settings)
+    issuer = AuthService(db_session, AuthRepository(db_session), UserRepository(db_session), test_settings)
     pair = await issuer.issue_session(active_owner)
     await db_session.commit()
     engine = create_async_engine(postgres_database)
@@ -86,7 +86,7 @@ async def test_concurrent_refresh_rotation_has_exactly_one_winner(
 
     async def rotate() -> bool:
         async with sessions() as session:
-            service = AuthService(session, AuthRepository(session), UserRepository(session), None, test_settings)
+            service = AuthService(session, AuthRepository(session), UserRepository(session), test_settings)
             await barrier.wait()
             try:
                 await service.rotate_refresh_token(pair.refresh_token)
@@ -109,7 +109,7 @@ async def test_old_token_is_rejected_after_authoritative_role_change(
     db_session: AsyncSession, active_owner: User, test_settings: Settings
 ) -> None:
     """Removing the DB-role comparison would accept this stale OWNER token as current."""
-    service = AuthService(db_session, AuthRepository(db_session), UserRepository(db_session), None, test_settings)
+    service = AuthService(db_session, AuthRepository(db_session), UserRepository(db_session), test_settings)
     pair = await service.issue_session(active_owner)
     active_owner.role = Role.STAFF
     await db_session.commit()

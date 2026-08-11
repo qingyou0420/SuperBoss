@@ -7,8 +7,9 @@ import pytest
 
 from superboss.core.actors import Actor
 from superboss.modules.projects.models import Project, ProjectMember
-from superboss.modules.users.models import Role, User, UserStatus
+from superboss.modules.users.models import Role
 from tests.files.storage import InMemoryObjectStorage
+from tests.identity import local_user
 
 
 @pytest.mark.parametrize(
@@ -355,9 +356,7 @@ async def test_same_key_is_scoped_to_project_and_actor(db_session, active_owner)
     from superboss.modules.files.service import FileService
 
     first_project, second_project = Project(name="Idem one"), Project(name="Idem two")
-    staff = User(
-        wecom_userid="file-staff", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE
-    )
+    staff = local_user("file-staff", display_name="Staff")
     db_session.add_all([first_project, second_project, staff])
     await db_session.flush()
     db_session.add(ProjectMember(project_id=second_project.id, user_id=staff.id))
@@ -537,9 +536,7 @@ async def test_foreign_staff_cannot_presign_part(db_session, active_owner) -> No
     from superboss.modules.files.service import FileService
 
     target, assigned = Project(name="Target part"), Project(name="Assigned part")
-    staff = User(
-        wecom_userid="part-staff", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE
-    )
+    staff = local_user("part-staff", display_name="Staff")
     db_session.add_all([target, assigned, staff])
     await db_session.flush()
     db_session.add(ProjectMember(project_id=assigned.id, user_id=staff.id))
@@ -735,12 +732,7 @@ async def test_clean_download_assigned_staff_and_foreign_denial(db_session, acti
     from superboss.modules.files.service import FileService
 
     project, other = Project(name="Staff download"), Project(name="Other download")
-    staff = User(
-        wecom_userid="download-staff",
-        display_name="Staff",
-        role=Role.STAFF,
-        status=UserStatus.ACTIVE,
-    )
+    staff = local_user("download-staff", display_name="Staff")
     db_session.add_all([project, other, staff])
     await db_session.flush()
     db_session.add(ProjectMember(project_id=project.id, user_id=staff.id))
@@ -1072,12 +1064,7 @@ async def test_corrupt_cross_project_upload_fails_before_part_or_completion_stor
 
     project_a = Project(name="Legacy file project A")
     project_b = Project(name="Legacy file project B")
-    staff = User(
-        wecom_userid="legacy-project-staff",
-        display_name="Staff",
-        role=Role.STAFF,
-        status=UserStatus.ACTIVE,
-    )
+    staff = local_user("legacy-project-staff", display_name="Staff")
     db_session.add_all([project_a, project_b, staff])
     await db_session.flush()
     db_session.add(ProjectMember(project_id=project_b.id, user_id=staff.id))

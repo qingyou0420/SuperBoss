@@ -20,6 +20,21 @@ class UnauthenticatedError(DomainError):
         super().__init__("AUTHENTICATION_REQUIRED", "Authentication required", 401)
 
 
+class AuthenticationFailedError(DomainError):
+    def __init__(self) -> None:
+        super().__init__("AUTHENTICATION_FAILED", "Username or password is invalid", 401)
+
+
+class PasswordChangeRequiredError(DomainError):
+    def __init__(self) -> None:
+        super().__init__("PASSWORD_CHANGE_REQUIRED", "Password change required", 403)
+
+
+class PasswordReuseForbiddenError(DomainError):
+    def __init__(self) -> None:
+        super().__init__("PASSWORD_REUSE_FORBIDDEN", "New password must be different", 422)
+
+
 class ForbiddenError(DomainError):
     def __init__(self, code: str = "PROJECT_FORBIDDEN", message: str = "You cannot access this project") -> None:
         super().__init__(code, message, 403)

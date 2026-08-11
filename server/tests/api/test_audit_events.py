@@ -25,7 +25,7 @@ from superboss.main import create_app
 from superboss.modules.audit.models import AuditLog
 from superboss.modules.audit.schemas import AuditEventInput
 from superboss.modules.audit.service import AuditService
-from superboss.modules.auth.models import AuthSession, OAuthState
+from superboss.modules.auth.models import AuthSession
 from superboss.modules.auth.repository import AuthRepository
 from superboss.modules.auth.service import AuthService
 from superboss.modules.files.models import File, FileState
@@ -34,12 +34,17 @@ from superboss.modules.projects.repository import ProjectRepository
 from superboss.modules.projects.router import get_service, get_session
 from superboss.modules.projects.schemas import ProjectCreate
 from superboss.modules.projects.service import ProjectService
-from superboss.modules.users.models import Role, User, UserStatus
+from superboss.modules.users.models import Role, User
 from superboss.modules.users.repository import UserRepository
+from tests.identity import LOCAL_TEST_PASSWORD, local_user
 
 
 @pytest_asyncio.fixture
-async def client(db_session: AsyncSession, test_settings: Settings) -> AsyncIterator[TestClient]:
+async def client(
+    db_session: AsyncSession, test_settings: Settings, active_owner: User
+) -> AsyncIterator[TestClient]:
+    del active_owner
+    await db_session.commit()
     app = create_app(test_settings)
     with TestClient(app, base_url="https://testserver") as test_client:
         yield test_client
@@ -47,16 +52,18 @@ async def client(db_session: AsyncSession, test_settings: Settings) -> AsyncIter
     await db_session.execute(delete(AuditLog))
     await db_session.execute(delete(ProjectMember))
     await db_session.execute(delete(Project))
-    await db_session.execute(delete(OAuthState))
     await db_session.execute(delete(AuthSession))
     await db_session.execute(delete(User))
     await db_session.commit()
 
 
 def _login(client: TestClient, code: str) -> None:
-    started = client.get("/api/v1/auth/wecom/start")
-    response = client.get(
-        "/api/v1/auth/wecom/callback", params={"code": code, "state": started.json()["state"]}
+    username = {"owner-code": "owner", "staff-code": "staff-1"}.get(code, code)
+    assert client.get("/api/v1/auth/csrf").status_code == 204
+    response = client.post(
+        "/api/v1/auth/login",
+        json={"username": username, "password": LOCAL_TEST_PASSWORD},
+        headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))},
     )
     assert response.status_code == 204
 
@@ -152,12 +159,7 @@ async def test_documented_audit_sql_returns_complete_owner_staff_device_evidence
 async def test_acceptance_query_boundary_returns_all_four_staff_denials(
     client: TestClient, db_session: AsyncSession
 ) -> None:
-    staff = User(
-        wecom_userid="staff-1",
-        display_name="Acceptance staff",
-        role=Role.STAFF,
-        status=UserStatus.ACTIVE,
-    )
+    staff = local_user("staff-1", display_name="Acceptance staff")
     foreign_project = Project(name="Acceptance foreign project")
     db_session.add_all([staff, foreign_project])
     await db_session.flush()
@@ -238,9 +240,7 @@ async def test_records_denied_foreign_project_read_with_response_request_id(
     client: TestClient, db_session: AsyncSession
 ) -> None:
     """Dropping denied evidence would hide staff attempts to access other projects."""
-    staff = User(
-        wecom_userid="staff-1", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE
-    )
+    staff = local_user("staff-1", display_name="Staff")
     foreign_project = Project(name="Foreign")
     db_session.add_all([staff, foreign_project])
     await db_session.commit()
@@ -273,9 +273,7 @@ async def test_staff_create_denial_is_durable_once_with_complete_context(
     client: TestClient, db_session: AsyncSession
 ) -> None:
     """A rolled-back staff create attempt must still leave exactly one accountable denial event."""
-    staff = User(
-        wecom_userid="staff-1", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE
-    )
+    staff = local_user("staff-1", display_name="Staff")
     db_session.add(staff)
     await db_session.commit()
     _login(client, "staff-code")
@@ -494,6 +492,8 @@ async def test_audit_write_failure_is_not_returned_as_project_success(
         del request
         return ProjectService(ProjectRepository(session), _FailingAuditService())  # type: ignore[arg-type]
 
+    db_session.add(local_user("owner", display_name="Owner", role=Role.OWNER))
+    await db_session.commit()
     app = create_app(test_settings)
     app.dependency_overrides[get_service] = failing_service
     try:
@@ -535,19 +535,15 @@ async def test_concurrent_request_ids_keep_audit_actors_isolated(
     db_session: AsyncSession, test_settings: Settings
 ) -> None:
     """Concurrent clients must never exchange request IDs or actor identities in durable audit rows."""
-    owner = User(
-        wecom_userid="owner-1", display_name="Owner", role=Role.OWNER, status=UserStatus.ACTIVE
-    )
-    staff = User(
-        wecom_userid="staff-1", display_name="Staff", role=Role.STAFF, status=UserStatus.ACTIVE
-    )
+    owner = local_user("owner", display_name="Owner", role=Role.OWNER)
+    staff = local_user("staff-1", display_name="Staff")
     db_session.add_all([owner, staff, Project(name="Assigned")])
     await db_session.flush()
     assigned = await db_session.scalar(select(Project).where(Project.name == "Assigned"))
     assert assigned is not None
     db_session.add(ProjectMember(project_id=assigned.id, user_id=staff.id))
     service = AuthService(
-        db_session, AuthRepository(db_session), UserRepository(db_session), None, test_settings
+        db_session, AuthRepository(db_session), UserRepository(db_session), test_settings
     )
     tokens: list[tuple[UUID, str, UUID, str]] = []
     for index in range(10):
@@ -622,6 +618,13 @@ async def test_concurrent_request_ids_keep_audit_actors_isolated(
 
 
 _UNSAFE_ALLOWLIST = {
+    ("POST", "/api/v1/auth/login", "superboss.modules.auth.router", "login"),
+    (
+        "POST",
+        "/api/v1/auth/password/change",
+        "superboss.modules.auth.router",
+        "change_password",
+    ),
     ("POST", "/api/v1/auth/refresh", "superboss.modules.auth.router", "refresh"),
     ("POST", "/api/v1/auth/logout", "superboss.modules.auth.router", "logout"),
     (
@@ -672,6 +675,12 @@ _UNSAFE_ALLOWLIST = {
         "/api/v1/owner/users/{user_id}/projects",
         "superboss.modules.users.router",
         "replace_projects",
+    ),
+    (
+        "POST",
+        "/api/v1/owner/users/{user_id}/password-reset",
+        "superboss.modules.users.router",
+        "reset_staff_password",
     ),
     (
         "POST",
@@ -765,6 +774,7 @@ async def test_audit_is_append_only_at_route_and_source_boundaries(
         request_id=UUID("99e3d94e-9c94-44df-86b1-2399aa63bbd0"),
     )
     db_session.add(seed)
+    db_session.add(local_user("owner", display_name="Owner", role=Role.OWNER))
     await db_session.commit()
     seed_id = seed.id
     expected = (

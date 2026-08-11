@@ -4,10 +4,10 @@ from datetime import datetime
 from typing import cast
 from uuid import UUID
 
-from sqlalchemy import CursorResult, select, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from superboss.modules.auth.models import AuthSession, OAuthState
+from superboss.modules.auth.models import AuthSession
 
 
 class AuthRepository:
@@ -35,18 +35,10 @@ class AuthRepository:
         auth_session.revoked_at = at
         await self.session.flush()
 
-    async def add_oauth_state(self, state: OAuthState) -> None:
-        self.session.add(state)
-        await self.session.flush()
-
-    async def consume_oauth_state(self, nonce_hash: str, now: datetime) -> bool:
-        result = await self.session.execute(
-            update(OAuthState)
-            .where(
-                OAuthState.nonce_hash == nonce_hash,
-                OAuthState.consumed_at.is_(None),
-                OAuthState.expires_at > now,
-            )
-            .values(consumed_at=now)
+    async def revoke_all_for_user(self, user_id: UUID, at: datetime) -> None:
+        await self.session.execute(
+            update(AuthSession)
+            .where(AuthSession.user_id == user_id, AuthSession.revoked_at.is_(None))
+            .values(revoked_at=at)
         )
-        return cast(CursorResult[object], result).rowcount == 1
+        await self.session.flush()

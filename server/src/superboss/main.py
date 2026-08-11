@@ -17,7 +17,6 @@ from superboss.core.actors import get_actor
 from superboss.core.config import Settings, get_settings
 from superboss.core.errors import DomainError, UnauthenticatedError
 from superboss.infrastructure.s3 import Boto3ObjectStorage
-from superboss.infrastructure.wecom import build_wecom_provider
 from superboss.modules.files.service import FileLifecycleService
 from superboss.modules.files.storage import ObjectStorage
 from superboss.modules.files.tasks import enqueue_file_scan as celery_enqueue_file_scan
@@ -66,7 +65,6 @@ def create_app(
     app.state.engine = engine
     app.state.readiness_checker = None
     app.state.session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    app.state.wecom_provider = build_wecom_provider(active_settings)
     app.state.object_storage = object_storage or Boto3ObjectStorage(
         active_settings.s3_bucket,
         active_settings.s3_endpoint_url,
@@ -84,12 +82,20 @@ def create_app(
             pass
         return str(uuid4())
 
-    def error_response(request: Request, code: str, message: str, status_code: int) -> JSONResponse:
+    def error_response(
+        request: Request,
+        code: str,
+        message: str,
+        status_code: int,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> JSONResponse:
         request_id = request.state.request_id
+        response_headers = {"X-Request-ID": request_id, **(headers or {})}
         return JSONResponse(
             {"error": {"code": code, "message": message, "request_id": request_id}},
             status_code=status_code,
-            headers={"X-Request-ID": request_id},
+            headers=response_headers,
         )
 
     def finalize_response(request: Request, response: Response) -> Response:
@@ -113,7 +119,16 @@ def create_app(
 
     @app.exception_handler(DomainError)
     async def handle_domain_error(request: Request, error: DomainError) -> JSONResponse:
-        return error_response(request, error.code, error.message, error.status_code)
+        headers = None
+        if (
+            isinstance(error, UnauthenticatedError)
+            and request.url.path == "/api/v1/auth/me"
+            and request.cookies.get("refresh_token")
+        ):
+            headers = {"X-SuperBoss-Refreshable": "1"}
+        return error_response(
+            request, error.code, error.message, error.status_code, headers=headers
+        )
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(

@@ -1,6 +1,6 @@
 """OWNER-managed STAFF whitelist policy and transactional mutations."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import UUID
 
@@ -9,8 +9,10 @@ from sqlalchemy.exc import IntegrityError
 from superboss.core.actors import Actor
 from superboss.core.errors import DomainError, NotFoundError, OwnerRequiredError
 from superboss.core.security import utcnow
+from superboss.modules.audit.models import AuditLog
 from superboss.modules.audit.schemas import AuditEventInput
 from superboss.modules.audit.service import AuditService
+from superboss.modules.auth.passwords import hash_password, new_temporary_password
 from superboss.modules.projects.models import Project
 from superboss.modules.users.models import Role, User, UserStatus
 from superboss.modules.users.repository import UserRepository
@@ -24,7 +26,7 @@ class OwnerProtectedError(DomainError):
 
 class DuplicateUserError(DomainError):
     def __init__(self) -> None:
-        super().__init__("USERID_CONFLICT", "WeCom userid already exists", 409)
+        super().__init__("USERNAME_CONFLICT", "Username already exists", 409)
 
 
 class UserNotFoundError(DomainError):
@@ -39,12 +41,23 @@ class UnknownProjectError(NotFoundError):
 @dataclass(frozen=True)
 class OwnerUserView:
     id: UUID
-    wecom_userid: str
+    username: str
     display_name: str
     role: Role
     status: UserStatus
     last_login_at: datetime | None
     projects: tuple[Project, ...]
+
+
+@dataclass(frozen=True)
+class StaffCredentialResult:
+    user: OwnerUserView
+    temporary_password: str = field(repr=False)
+
+
+@dataclass(frozen=True)
+class PasswordResetResult:
+    temporary_password: str = field(repr=False)
 
 
 class OwnerUserService:
@@ -84,7 +97,7 @@ class OwnerUserService:
 
     async def _view(self, user: User) -> OwnerUserView:
         return OwnerUserView(
-            id=user.id, wecom_userid=user.wecom_userid, display_name=user.display_name,
+            id=user.id, username=user.username, display_name=user.display_name,
             role=user.role, status=user.status, last_login_at=user.last_login_at,
             projects=tuple(await self.repository.projects_for_user(user.id)),
         )
@@ -93,22 +106,44 @@ class OwnerUserService:
         await self._require_owner(actor, "user.list", request_id)
         return [await self._view(user) for user in await self.repository.list_all()]
 
-    async def create_staff(self, actor: Actor, command: StaffCreate, request_id: UUID) -> OwnerUserView:
+    async def create_staff(
+        self, actor: Actor, command: StaffCreate, request_id: UUID
+    ) -> StaffCredentialResult:
         await self._require_owner(actor, "user.create", request_id)
         project_ids = sorted(command.project_ids)
         projects = await self.repository.projects_for_update(project_ids)
         if len(projects) != len(project_ids):
             await self._record(actor, "user.create", "DENIED", request_id, reason="PROJECT_NOT_FOUND")
             raise UnknownProjectError()
-        user = User(wecom_userid=command.wecom_userid, display_name=command.display_name, role=Role.STAFF, status=UserStatus.ACTIVE)
+        temporary_password = new_temporary_password()
+        user = User(
+            username=command.username,
+            display_name=command.display_name,
+            password_hash=hash_password(temporary_password),
+            must_change_password=True,
+            password_changed_at=utcnow(),
+            role=Role.STAFF,
+            status=UserStatus.ACTIVE,
+        )
         try:
             await self.repository.add(user)
             await self.repository.replace_project_memberships(user.id, project_ids)
         except IntegrityError as error:
             await self.repository.session.rollback()
-            await self._record(actor, "user.create", "DENIED", request_id, reason="USERID_CONFLICT")
+            await self._record(actor, "user.create", "DENIED", request_id, reason="USERNAME_CONFLICT")
             raise DuplicateUserError() from error
-        return OwnerUserView(user.id, user.wecom_userid, user.display_name, user.role, user.status, user.last_login_at, tuple(projects))
+        return StaffCredentialResult(
+            OwnerUserView(
+                user.id,
+                user.username,
+                user.display_name,
+                user.role,
+                user.status,
+                user.last_login_at,
+                tuple(projects),
+            ),
+            temporary_password,
+        )
 
     async def update_staff(self, actor: Actor, user_id: UUID, command: StaffUpdate, request_id: UUID) -> OwnerUserView:
         user = await self._staff_for_update(actor, "user.update", user_id, request_id)
@@ -134,9 +169,37 @@ class OwnerUserService:
             await self._record(actor, "user.projects.replace", "DENIED", request_id, user_id, reason="PROJECT_NOT_FOUND")
             raise UnknownProjectError()
         await self.repository.replace_project_memberships(user.id, project_ids)
-        return OwnerUserView(user.id, user.wecom_userid, user.display_name, user.role, user.status, user.last_login_at, tuple(projects))
+        return OwnerUserView(user.id, user.username, user.display_name, user.role, user.status, user.last_login_at, tuple(projects))
+
+    async def reset_staff_password(
+        self, actor: Actor, user_id: UUID, request_id: UUID
+    ) -> PasswordResetResult:
+        user = await self._staff_for_update(actor, "user.password.reset", user_id, request_id)
+        temporary_password = new_temporary_password()
+        now = utcnow()
+        user.password_hash = hash_password(temporary_password)
+        user.password_changed_at = now
+        user.must_change_password = True
+        user.failed_login_count = 0
+        user.locked_until = None
+        await self.repository.revoke_browser_sessions(user.id, now)
+        await self.repository.session.flush()
+        return PasswordResetResult(temporary_password)
 
     async def commit_and_record_success(self, actor: Actor, action: str, request_id: UUID, user_id: UUID | None = None) -> None:
-        """Business commit intentionally precedes the independent audit short transaction."""
+        """Commit the business mutation and SUCCESS evidence atomically."""
+        self.repository.session.add(
+            AuditLog(
+                actor_kind=actor.kind,
+                actor_id=actor.subject_id,
+                action=action,
+                object_type="user",
+                object_id=user_id,
+                outcome="SUCCESS",
+                metadata_json={
+                    "actor_role": actor.role.value if actor.role is not None else None
+                },
+                request_id=request_id,
+            )
+        )
         await self.repository.session.commit()
-        await self._record(actor, action, "SUCCESS", request_id, user_id)

@@ -264,7 +264,7 @@ def test_pristine_file_migration_round_trip_restores_0003_catalog(postgres_datab
         asyncio.run(insert_legacy_upload())
 
         subprocess.run(
-            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            [sys.executable, "-m", "alembic", "upgrade", "0017_import_jobs"],
             cwd=SERVER_ROOT,
             env=environment,
             check=True,
@@ -535,7 +535,7 @@ def test_downgrade_blocks_live_file_lifecycle_without_data_loss(
     environment["SUPERBOSS_DATABASE_URL"] = temporary_url
     try:
         subprocess.run(
-            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            [sys.executable, "-m", "alembic", "upgrade", "0017_import_jobs"],
             cwd=SERVER_ROOT,
             env=environment,
             check=True,
@@ -776,7 +776,7 @@ def test_downgrade_guard_covers_each_live_lifecycle_shape(
     )
     try:
         subprocess.run(
-            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            [sys.executable, "-m", "alembic", "upgrade", "0017_import_jobs"],
             cwd=SERVER_ROOT,
             env=environment,
             check=True,

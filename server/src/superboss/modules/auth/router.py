@@ -1,28 +1,28 @@
-"""WeCom browser OAuth routes."""
+"""Local browser authentication routes."""
 
-import secrets
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
-import jwt
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core.actors import Actor
-from superboss.core.config import Settings
-from superboss.core.security import hash_token, new_csrf_token, utcnow
-from superboss.infrastructure.wecom import WeComError
+from superboss.core.errors import AuthenticationFailedError, UnauthenticatedError
+from superboss.core.security import new_csrf_token
+from superboss.modules.audit.models import AuditLog
 from superboss.modules.audit.schemas import AuditEventInput
-from superboss.modules.audit.service import AuditService
-from superboss.modules.auth.models import OAuthState
 from superboss.modules.auth.repository import AuthRepository
-from superboss.modules.auth.schemas import SessionPair
-from superboss.modules.auth.service import AuthService, ForbiddenIdentity, InvalidSession
+from superboss.modules.auth.schemas import (
+    AuthUserRead,
+    LoginCommand,
+    PasswordChangeCommand,
+    SessionPair,
+)
+from superboss.modules.auth.service import AuthService, CompletedLogin, InvalidSession, LoginFailure
 from superboss.modules.users.repository import UserRepository
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-_OAUTH_STATE_COOKIE = "wecom_oauth_state"
+_SYSTEM_ACTOR_ID = UUID(int=0)
 
 
 async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
@@ -43,31 +43,14 @@ def get_service(request: Request, session: AsyncSession = Depends(get_session)) 
         session,
         AuthRepository(session),
         UserRepository(session),
-        request.app.state.wecom_provider,
         request.app.state.settings,
     )
 
 
-def _state_cookie(settings: Settings, state: str) -> str:
-    if not settings.jwt_secret:
-        raise HTTPException(500, "Authentication is not configured")
-    now = datetime.now(UTC)
-    return jwt.encode(
-        {"state": state, "iat": now, "exp": now + timedelta(minutes=10)},
-        settings.jwt_secret,
-        algorithm="HS256",
+def _set_csrf_cookie(response: Response) -> None:
+    response.set_cookie(
+        "XSRF-TOKEN", new_csrf_token(), secure=True, httponly=False, samesite="lax", path="/"
     )
-
-
-def _verify_state(settings: Settings, signed_state: str | None, state: str | None) -> None:
-    if not signed_state or not state or not settings.jwt_secret:
-        raise HTTPException(400, "Invalid OAuth state")
-    try:
-        payload = jwt.decode(signed_state, settings.jwt_secret, algorithms=["HS256"])
-    except jwt.PyJWTError as error:
-        raise HTTPException(400, "Invalid OAuth state") from error
-    if payload.get("state") != state:
-        raise HTTPException(400, "Invalid OAuth state")
 
 
 def _set_session_cookies(response: Response, pair: SessionPair) -> None:
@@ -82,82 +65,105 @@ def _set_session_cookies(response: Response, pair: SessionPair) -> None:
         samesite="lax",
         path="/api/v1/auth",
     )
-    response.set_cookie(
-        "XSRF-TOKEN", new_csrf_token(), secure=True, httponly=False, samesite="lax", path="/"
-    )
+    _set_csrf_cookie(response)
 
 
-@router.get("/wecom/start")
-async def wecom_start(
-    request: Request, response: Response, session: AsyncSession = Depends(get_session)
-) -> dict[str, str]:
-    state = secrets.token_urlsafe(32)
-    await AuthRepository(session).add_oauth_state(
-        OAuthState(nonce_hash=hash_token(state), expires_at=utcnow() + timedelta(minutes=10))
-    )
-    response.set_cookie(
-        _OAUTH_STATE_COOKIE,
-        _state_cookie(request.app.state.settings, state),
-        secure=True,
-        httponly=True,
-        samesite="lax",
-        path="/api/v1/auth/wecom",
-    )
-    return {
-        "state": state,
-        "authorization_url": request.app.state.wecom_provider.authorization_url(state),
-    }
+def _actor(completed: CompletedLogin) -> Actor:
+    return Actor("user", completed.user.id, completed.user.role, frozenset(), frozenset())
 
 
-@router.get("/wecom/callback", status_code=204)
-async def wecom_callback(
-    request: Request,
-    response: Response,
-    code: str | None = None,
-    state: str | None = None,
-    service: AuthService = Depends(get_service),
-) -> None:
-    response.delete_cookie(_OAUTH_STATE_COOKIE, path="/api/v1/auth/wecom")
-    try:
-        _verify_state(request.app.state.settings, request.cookies.get(_OAUTH_STATE_COOKIE), state)
-        if (
-            code is None
-            or state is None
-            or not await service.auth_repository.consume_oauth_state(hash_token(state), utcnow())
-        ):
-            raise HTTPException(400, "Invalid OAuth state")
-        await service.session.commit()
-    except HTTPException as error:
-        result = JSONResponse({"detail": error.detail}, status_code=error.status_code)
-        result.delete_cookie(_OAUTH_STATE_COOKIE, path="/api/v1/auth/wecom")
-        return result  # type: ignore[return-value]
-    try:
-        completed = await service.complete_wecom_login(code, state)
-    except (ForbiddenIdentity, WeComError):
-        result = JSONResponse({"detail": "Identity is not authorized"}, status_code=403)
-        result.delete_cookie(_OAUTH_STATE_COOKIE, path="/api/v1/auth/wecom")
-        return result  # type: ignore[return-value]
-    await service.session.commit()
-    await AuditService(request.app.state.session_factory).record(
-        AuditEventInput(
-            actor=Actor(
-                "user",
-                completed.user.id,
-                completed.user.role,
-                frozenset(),
-                frozenset(),
-            ),
-            action="auth.login",
-            object_type="user",
-            object_id=completed.user.id,
-            project_id=None,
-            outcome="SUCCESS",
-            request_id=request.state.request_id,
-            metadata={},
+async def _stage_auth_audit(session: AsyncSession, event: AuditEventInput) -> None:
+    session.add(
+        AuditLog(
+            actor_kind=event.actor.kind,
+            actor_id=event.actor.subject_id,
+            action=event.action,
+            object_type=event.object_type,
+            object_id=event.object_id,
+            project_id=event.project_id,
+            outcome=event.outcome,
+            metadata_json={
+                **event.metadata,
+                "actor_role": (
+                    event.actor.role.value if event.actor.role is not None else None
+                ),
+            },
+            request_id=event.request_id,
+            event_key=event.event_key,
         )
     )
+    await session.flush()
+
+
+def _failure_actor(failure: LoginFailure) -> tuple[Actor, UUID | None]:
+    user = failure.user
+    return (
+        Actor(
+            "user" if user is not None else "system",
+            user.id if user is not None else _SYSTEM_ACTOR_ID,
+            user.role if user is not None else None,
+            frozenset(),
+            frozenset(),
+        ),
+        user.id if user is not None else None,
+    )
+
+
+async def _record_login(
+    request: Request,
+    session: AsyncSession,
+    *,
+    completed: CompletedLogin | None,
+    failure: LoginFailure | None,
+) -> None:
+    if completed is not None:
+        actor = _actor(completed)
+        object_id: UUID | None = completed.user.id
+        outcome = "SUCCESS"
+        metadata: dict[str, object] = {}
+    else:
+        assert failure is not None
+        actor, object_id = _failure_actor(failure)
+        outcome = "DENIED"
+        metadata = {"reason": failure.reason}
+    await _stage_auth_audit(
+        session,
+        AuditEventInput(
+            actor=actor,
+            action="auth.login",
+            object_type="user",
+            object_id=object_id,
+            project_id=None,
+            outcome=outcome,
+            request_id=UUID(request.state.request_id),
+            metadata=metadata,
+        )
+    )
+
+
+@router.get("/csrf", status_code=204)
+async def csrf(response: Response) -> None:
+    _set_csrf_cookie(response)
+
+
+@router.post("/login", status_code=204)
+async def login(
+    request: Request,
+    response: Response,
+    command: LoginCommand,
+    service: AuthService = Depends(get_service),
+) -> None:
+    try:
+        completed = await service.login(command.username, command.password)
+    except LoginFailure as failure:
+        await _record_login(
+            request, service.session, completed=None, failure=failure
+        )
+        await service.session.commit()
+        raise AuthenticationFailedError() from failure
+    await _record_login(request, service.session, completed=completed, failure=None)
+    await service.session.commit()
     _set_session_cookies(response, completed.pair)
-    response.delete_cookie(_OAUTH_STATE_COOKIE, path="/api/v1/auth/wecom")
 
 
 @router.post("/refresh", status_code=204)
@@ -167,8 +173,57 @@ async def refresh(
     try:
         pair = await service.rotate_refresh_token(request.cookies.get("refresh_token", ""))
     except InvalidSession as error:
-        raise HTTPException(401, "Invalid refresh token") from error
+        raise UnauthenticatedError() from error
     _set_session_cookies(response, pair)
+
+
+@router.post("/password/change", status_code=204)
+async def change_password(
+    request: Request,
+    response: Response,
+    command: PasswordChangeCommand,
+    service: AuthService = Depends(get_service),
+) -> None:
+    token = request.cookies.get("access_token")
+    if token is None:
+        raise UnauthenticatedError()
+    try:
+        current = await service.authenticate_access_token(token)
+        completed = await service.change_password(
+            current.id, command.current_password, command.new_password
+        )
+    except InvalidSession as error:
+        raise UnauthenticatedError() from error
+    except LoginFailure as failure:
+        actor, object_id = _failure_actor(failure)
+        await _stage_auth_audit(
+            service.session,
+            AuditEventInput(
+                actor=actor,
+                action="auth.password.change",
+                object_type="user",
+                object_id=object_id,
+                outcome="DENIED",
+                request_id=UUID(request.state.request_id),
+                metadata={"reason": failure.reason},
+            ),
+        )
+        await service.session.commit()
+        raise AuthenticationFailedError() from failure
+    await _stage_auth_audit(
+        service.session,
+        AuditEventInput(
+            actor=_actor(completed),
+            action="auth.password.change",
+            object_type="user",
+            object_id=completed.user.id,
+            outcome="SUCCESS",
+            request_id=UUID(request.state.request_id),
+            metadata={},
+        )
+    )
+    await service.session.commit()
+    _set_session_cookies(response, completed.pair)
 
 
 @router.post("/logout", status_code=204)
@@ -187,8 +242,8 @@ async def logout(
     response.delete_cookie("XSRF-TOKEN", path="/")
 
 
-@router.get("/me")
-async def me(request: Request, service: AuthService = Depends(get_service)) -> dict[str, str]:
+@router.get("/me", response_model=AuthUserRead)
+async def me(request: Request, service: AuthService = Depends(get_service)) -> AuthUserRead:
     authorization = request.headers.get("Authorization", "")
     token = (
         authorization.removeprefix("Bearer ")
@@ -196,9 +251,9 @@ async def me(request: Request, service: AuthService = Depends(get_service)) -> d
         else request.cookies.get("access_token")
     )
     if token is None:
-        raise HTTPException(401, "Authentication required")
+        raise UnauthenticatedError()
     try:
         user = await service.authenticate_access_token(token)
     except InvalidSession as error:
-        raise HTTPException(401, "Authentication required") from error
-    return {"userid": user.wecom_userid, "role": str(user.role)}
+        raise UnauthenticatedError() from error
+    return AuthUserRead.model_validate(user)

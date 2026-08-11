@@ -20,9 +20,17 @@ class UserRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def by_wecom_userid(self, userid: str) -> User | None:
+    async def by_username(self, username: str) -> User | None:
         return cast(
-            User | None, await self.session.scalar(select(User).where(User.wecom_userid == userid))
+            User | None, await self.session.scalar(select(User).where(User.username == username))
+        )
+
+    async def by_username_for_update(self, username: str) -> User | None:
+        return cast(
+            User | None,
+            await self.session.scalar(
+                select(User).where(User.username == username).with_for_update()
+            ),
         )
 
     async def by_id_for_update(self, user_id: UUID) -> User | None:
@@ -32,7 +40,7 @@ class UserRepository:
         )
 
     async def list_all(self) -> list[User]:
-        return list((await self.session.scalars(select(User).order_by(User.wecom_userid))).all())
+        return list((await self.session.scalars(select(User).order_by(User.username))).all())
 
     async def projects_for_user(self, user_id: UUID) -> list[Project]:
         statement = (

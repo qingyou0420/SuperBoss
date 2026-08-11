@@ -14,7 +14,7 @@ from testcontainers.community.postgres import PostgresContainer
 
 from superboss.core.config import Settings
 from superboss.modules.audit.models import AuditLog
-from superboss.modules.auth.models import AuthSession, OAuthState
+from superboss.modules.auth.models import AuthSession
 from superboss.modules.devices.models import (
     DeviceConnection,
     DevicePairingCode,
@@ -31,7 +31,8 @@ from superboss.modules.files.models import (
     Upload,
 )
 from superboss.modules.projects.models import Project, ProjectMember
-from superboss.modules.users.models import Role, User, UserStatus
+from superboss.modules.users.models import Role, User
+from tests.identity import local_user
 
 SERVER_ROOT = Path(__file__).resolve().parents[1]
 
@@ -90,7 +91,6 @@ async def db_session(postgres_database: str) -> AsyncIterator[AsyncSession]:
             await connection.execute(delete(File))
             await connection.execute(delete(ProjectMember))
             await connection.execute(delete(Project))
-            await connection.execute(delete(OAuthState))
             await connection.execute(delete(AuthSession))
             await connection.execute(delete(User))
 
@@ -118,9 +118,7 @@ def test_settings(postgres_database: str) -> Settings:
 
 @pytest_asyncio.fixture
 async def active_owner(db_session: AsyncSession) -> User:
-    owner = User(
-        wecom_userid="owner-1", display_name="Owner", role=Role.OWNER, status=UserStatus.ACTIVE
-    )
+    owner = local_user("owner", display_name="Owner", role=Role.OWNER)
     db_session.add(owner)
     await db_session.flush()
     return owner

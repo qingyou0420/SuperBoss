@@ -5,13 +5,14 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
 
+from superboss.modules.auth.schemas import USERNAME_PATTERN
 from superboss.modules.users.models import Role, UserStatus
 
 
 class StaffCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    wecom_userid: StrictStr = Field(min_length=1, max_length=255)
+    username: StrictStr = Field(min_length=3, max_length=32, pattern=USERNAME_PATTERN)
     display_name: StrictStr = Field(min_length=1, max_length=255)
     project_ids: list[UUID] = Field(max_length=1000)
 
@@ -54,9 +55,22 @@ class OwnerUserRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
-    wecom_userid: str
+    username: str
     display_name: str
     role: Role
     status: UserStatus
     last_login_at: datetime | None
     projects: tuple[UserProjectRead, ...]
+
+
+class StaffCreateRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    user: OwnerUserRead
+    temporary_password: str
+
+
+class PasswordResetRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    temporary_password: str

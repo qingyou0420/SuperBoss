@@ -24,14 +24,17 @@ from superboss.modules.devices.models import (
 from superboss.modules.devices.service import DeviceService
 from superboss.modules.files.models import File, FileState
 from superboss.modules.projects.models import Project, ProjectStatus
-from superboss.modules.users.models import Role, User, UserStatus
+from superboss.modules.users.models import User
 from tests.files.storage import InMemoryObjectStorage
+from tests.identity import LOCAL_TEST_PASSWORD, local_user
 
 
 @pytest_asyncio.fixture
 async def device_client(
-    db_session: AsyncSession, test_settings: Settings
+    db_session: AsyncSession, test_settings: Settings, active_owner: User
 ) -> AsyncIterator[TestClient]:
+    del active_owner
+    await db_session.commit()
     app = create_app(test_settings, object_storage=InMemoryObjectStorage())
     with TestClient(
         app, base_url="https://testserver", raise_server_exceptions=False
@@ -40,10 +43,12 @@ async def device_client(
 
 
 def _login(client: TestClient, code: str = "owner-code") -> None:
-    started = client.get("/api/v1/auth/wecom/start")
-    response = client.get(
-        "/api/v1/auth/wecom/callback",
-        params={"code": code, "state": started.json()["state"]},
+    username = {"owner-code": "owner", "staff-code": "staff-1"}.get(code, code)
+    assert client.get("/api/v1/auth/csrf").status_code == 204
+    response = client.post(
+        "/api/v1/auth/login",
+        json={"username": username, "password": LOCAL_TEST_PASSWORD},
+        headers=_csrf(client),
     )
     assert response.status_code == 204
 
@@ -189,12 +194,7 @@ async def test_owner_endpoint_actor_matrix_and_browser_csrf(
 ) -> None:
     """OWNER management must reject anonymous, STAFF, and device actors before mutation."""
     project = Project(name="Owner matrix")
-    staff = User(
-        wecom_userid="staff-1",
-        display_name="Staff",
-        role=Role.STAFF,
-        status=UserStatus.ACTIVE,
-    )
+    staff = local_user("staff-1", display_name="Staff")
     db_session.add_all([project, staff])
     await db_session.commit()
     body = {"project_ids": [str(project.id)]}
@@ -351,12 +351,7 @@ async def test_authenticated_owner_denials_are_safely_audited_but_anonymous_is_n
 ) -> None:
     """Authenticated OWNER probes need evidence without persisting headers or credentials."""
     project = Project(name="Device denial audit")
-    staff = User(
-        wecom_userid="staff-1",
-        display_name="Staff",
-        role=Role.STAFF,
-        status=UserStatus.ACTIVE,
-    )
+    staff = local_user("staff-1", display_name="Staff")
     db_session.add_all([project, staff])
     await db_session.commit()
     pair = await _pair_device(device_client, db_session, active_owner.id, project.id)

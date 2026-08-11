@@ -33,6 +33,7 @@ from superboss.modules.imports.service import ImportService
 from superboss.modules.projects.models import Project, ProjectStatus
 from superboss.modules.users.models import Role, User, UserStatus
 from tests.files.storage import InMemoryObjectStorage
+from tests.identity import LOCAL_TEST_PASSWORD, local_user
 
 DEVICE_SCOPES = frozenset(
     {"imports:create", "imports:upload", "imports:submit", "imports:read-own"}
@@ -144,7 +145,10 @@ class SeededImport:
 async def import_api(
     db_session: AsyncSession,
     test_settings: Settings,
+    active_owner: User,
 ) -> AsyncIterator[ImportApiContext]:
+    del active_owner
+    await db_session.commit()
     storage = ImportApiStorage(complete_size=1)
     dispatched: list[tuple[UUID, UUID]] = []
 
@@ -170,10 +174,12 @@ def _factory(db_session: AsyncSession) -> async_sessionmaker[AsyncSession]:
 
 
 def _login(client: TestClient, code: str = "owner-code") -> None:
-    started = client.get("/api/v1/auth/wecom/start")
-    response = client.get(
-        "/api/v1/auth/wecom/callback",
-        params={"code": code, "state": started.json()["state"]},
+    username = {"owner-code": "owner", "staff-code": "staff-1"}.get(code, code)
+    assert client.get("/api/v1/auth/csrf").status_code == 204
+    response = client.post(
+        "/api/v1/auth/login",
+        json={"username": username, "password": LOCAL_TEST_PASSWORD},
+        headers=_csrf(client),
     )
     assert response.status_code == 204
 
@@ -990,12 +996,7 @@ async def test_browser_owner_and_staff_cannot_substitute_for_device_actor(
     db_session.add(project)
     if browser_role == Role.STAFF:
         db_session.add(
-            User(
-                wecom_userid="staff-1",
-                display_name="Staff",
-                role=Role.STAFF,
-                status=UserStatus.ACTIVE,
-            )
+            local_user("staff-1", display_name="Staff")
         )
     await db_session.commit()
     pair = await _pair(import_api, db_session, active_owner.id, project.id)
@@ -1718,12 +1719,7 @@ async def test_owner_list_rejects_anonymous_staff_and_device_with_safe_actor_aud
     active_owner: User,
 ) -> None:
     project = Project(name="Owner import list actor matrix")
-    staff = User(
-        wecom_userid="staff-1",
-        display_name="Staff",
-        role=Role.STAFF,
-        status=UserStatus.ACTIVE,
-    )
+    staff = local_user("staff-1", display_name="Staff")
     db_session.add_all([project, staff])
     await db_session.commit()
     pair = await _pair(import_api, db_session, active_owner.id, project.id)

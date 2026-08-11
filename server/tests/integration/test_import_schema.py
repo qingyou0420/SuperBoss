@@ -913,7 +913,7 @@ def test_0017_round_trip_and_populated_downgrade_guard_are_atomic(
         assert not IMPORT_TABLES & baseline[1]
 
         subprocess.run(
-            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            [sys.executable, "-m", "alembic", "upgrade", "0017_import_jobs"],
             cwd=SERVER_ROOT,
             env=environment,
             check=True,
@@ -990,7 +990,7 @@ def test_0017_round_trip_and_populated_downgrade_guard_are_atomic(
         )
         assert asyncio.run(snapshot()) == baseline
         subprocess.run(
-            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            [sys.executable, "-m", "alembic", "upgrade", "0017_import_jobs"],
             cwd=SERVER_ROOT,
             env=environment,
             check=True,

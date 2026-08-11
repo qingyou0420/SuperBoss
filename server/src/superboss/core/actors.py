@@ -9,7 +9,11 @@ from fastapi import Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from superboss.core.errors import ForbiddenError, UnauthenticatedError
+from superboss.core.errors import (
+    ForbiddenError,
+    PasswordChangeRequiredError,
+    UnauthenticatedError,
+)
 from superboss.modules.auth.repository import AuthRepository
 from superboss.modules.auth.service import AuthService, InvalidSession
 from superboss.modules.projects.models import ProjectMember
@@ -51,7 +55,6 @@ async def get_actor(request: Request) -> Actor:
             session,
             AuthRepository(session),
             UserRepository(session),
-            None,
             request.app.state.settings,
         )
         try:
@@ -74,6 +77,8 @@ async def get_actor(request: Request) -> Actor:
             request.state.resolved_actor = actor
             return actor
         else:
+            if user.must_change_password:
+                raise PasswordChangeRequiredError()
             project_ids: frozenset[UUID] = frozenset()
             if user.role == Role.STAFF:
                 project_ids = frozenset(
