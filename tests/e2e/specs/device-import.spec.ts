@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test'
 
 import { loginThroughWeCom } from './support/auth'
 import { buildConnectorFixture, runConnector } from './support/connector'
+import { consumePairingCode } from './support/pairing-code'
 import { e2e } from './support/runtime'
 
 test.use({ storageState: e2e.ownerStorageStatePath })
@@ -24,8 +25,7 @@ test('OWNER 配对真实 connector 后提交 fixture，导入到 RECEIVED 且不
     await page.goto('/owner/devices')
     await page.getByText('验收测试', { exact: true }).click()
     await page.getByRole('button', { name: '生成配对码' }).click()
-    const rawCode = await page.locator('.pairing-code code').innerText()
-    expect(rawCode).not.toBe('')
+    const rawCode = await consumePairingCode(page.locator('.pairing-code code'))
     runConnector(['pair', '--server', e2e.baseUrl, '--code', rawCode, '--name', 'E2E-CONNECTOR'])
 
     const manifestPath = await buildConnectorFixture(

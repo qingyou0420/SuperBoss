@@ -61,6 +61,7 @@ test('独立 STAFF 直接请求项目、设备、导入列表与外项目文件�
         body: Buffer.from(foreignFileId),
         contentType: 'text/plain',
     })
+    console.log('ACCEPTANCE_FOREIGN_FILE_ID=' + foreignFileId)
 
     await loginThroughWeCom(page, 'STAFF')
     const headers = await csrfHeaders(page.context())

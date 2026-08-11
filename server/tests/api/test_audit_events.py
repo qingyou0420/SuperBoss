@@ -3,8 +3,9 @@
 import ast
 import asyncio
 import inspect
+import re
 from collections.abc import AsyncIterator
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -14,7 +15,7 @@ import pytest_asyncio
 from fastapi import Depends, FastAPI, Request
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.routing import Mount
 
@@ -64,6 +65,87 @@ async def _latest_event(session: AsyncSession) -> AuditLog:
     event = await session.scalar(select(AuditLog).order_by(AuditLog.created_at.desc()))
     assert event is not None
     return event
+
+
+@pytest.mark.asyncio
+async def test_documented_audit_sql_returns_complete_owner_staff_device_evidence(
+    client: TestClient, db_session: AsyncSession
+) -> None:
+    del client
+    owner_id, staff_id, device_id, outsider_id = uuid4(), uuid4(), uuid4(), uuid4()
+    foreign_file_id = uuid4()
+    started_at = datetime.now(UTC) - timedelta(minutes=1)
+    required = [
+        ("user", owner_id, "auth.login", "SUCCESS", owner_id),
+        ("user", owner_id, "project.create", "SUCCESS", uuid4()),
+        ("user", owner_id, "file.upload.complete", "SUCCESS", uuid4()),
+        ("user", owner_id, "file.download", "DENIED", uuid4()),
+        ("user", owner_id, "file.download", "SUCCESS", uuid4()),
+        ("user", owner_id, "device.pairing_code.create", "SUCCESS", None),
+        ("user", owner_id, "device.revoke", "SUCCESS", device_id),
+        ("user", owner_id, "import.list", "SUCCESS", None),
+        ("user", staff_id, "auth.login", "SUCCESS", staff_id),
+        ("user", staff_id, "project.create", "DENIED", None),
+        ("user", staff_id, "device.pairing_code.create", "DENIED", None),
+        ("user", staff_id, "import.list", "DENIED", None),
+        ("user", staff_id, "file.download", "DENIED", foreign_file_id),
+        ("device", device_id, "device.pair", "SUCCESS", device_id),
+        ("device", device_id, "import.submit", "SUCCESS", uuid4()),
+    ]
+    db_session.add_all(
+        [
+            AuditLog(
+                actor_kind=actor_kind,
+                actor_id=actor_id,
+                action=action,
+                object_type="acceptance",
+                object_id=object_id,
+                outcome=outcome,
+                metadata_json={"actor_role": "OWNER" if actor_id == owner_id else None},
+                request_id=uuid4(),
+            )
+            for actor_kind, actor_id, action, outcome, object_id in required
+        ]
+        + [
+            AuditLog(
+                actor_kind="user",
+                actor_id=outsider_id,
+                action="auth.login",
+                object_type="user",
+                object_id=outsider_id,
+                outcome="SUCCESS",
+                metadata_json={"actor_role": "STAFF"},
+                request_id=uuid4(),
+            )
+        ]
+    )
+    await db_session.commit()
+    ended_at = datetime.now(UTC) + timedelta(minutes=1)
+
+    runbook = (Path(__file__).resolve().parents[3] / "docs/runbooks/m1-owner-acceptance.md").read_text(
+        encoding="utf-8"
+    )
+    match = re.search(r'\$AuditSql=@"\n(.*?)\n"@', runbook, re.DOTALL)
+    assert match is not None
+    documented_sql = match.group(1)
+    assert documented_sql.startswith("\\set ON_ERROR_STOP on\n")
+    substitutions = {
+        "$OwnerActorId": str(owner_id),
+        "$StaffActorId": str(staff_id),
+        "$DeviceActorId": str(device_id),
+        "$AuditStart": started_at.isoformat(),
+        "$AuditEnd": ended_at.isoformat(),
+    }
+    for placeholder, value in substitutions.items():
+        assert placeholder in documented_sql
+        documented_sql = documented_sql.replace(placeholder, value)
+    query = documented_sql.removeprefix("\\set ON_ERROR_STOP on\n")
+    rows = (await db_session.execute(text(query))).mappings().all()
+
+    assert {
+        (row["actor_kind"], row["actor_id"], row["action"], row["outcome"], row["object_id"])
+        for row in rows
+    } == set(required)
 
 
 @pytest.mark.asyncio

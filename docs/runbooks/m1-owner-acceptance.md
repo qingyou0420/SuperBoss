@@ -82,27 +82,30 @@ Run the Playwright STAFF spec with the distinct account. It sends real direct re
 creation, pairing-code creation, OWNER import listing, and a foreign-project file download; each must
 return 403. UI hiding alone is not evidence.
 
-Record the safe foreign-file ID attached/annotated by the STAFF spec before clearing its ignored
-output. After the operations, set the two actor record IDs and the exact UTC start/end of the live
-acceptance window, then inspect only the required bounded audit rows. The three OWNER-only STAFF
-denials intentionally have a null `object_id`; the foreign-file denial must carry the recorded file
-ID.
+The successful STAFF spec prints exactly one safe labeled line through the list reporter:
+`ACCEPTANCE_FOREIGN_FILE_ID=<UUID>`. Copy that line from the captured terminal transcript into the
+checklist. It remains visible after the `finally` block deletes ignored output; do not depend on the
+annotation, attachment, or HTML report. After the operations, set the OWNER, STAFF, and DEVICE actor
+record IDs plus the exact UTC start/end of the live acceptance window, then inspect only the
+required bounded audit rows. The three OWNER-only STAFF denials intentionally have a null
+`object_id`; the foreign-file denial must carry the recorded file ID.
 
 ```powershell
 $OwnerActorId='<OWNER_USER_RECORD_ID>'
 $StaffActorId='<STAFF_USER_RECORD_ID>'
+$DeviceActorId='<DEVICE_ID>'
 $AuditStart='<UTC_START_ISO8601>'
 $AuditEnd='<UTC_END_ISO8601>'
 $AuditSql=@"
 \set ON_ERROR_STOP on
-SELECT created_at, actor_id, action, outcome, object_type, object_id, project_id, request_id
+SELECT created_at, actor_kind, actor_id, action, outcome, object_type, object_id, project_id, request_id
 FROM audit_logs
-WHERE actor_id IN ('$OwnerActorId'::uuid, '$StaffActorId'::uuid)
+WHERE actor_id IN ('$OwnerActorId'::uuid, '$StaffActorId'::uuid, '$DeviceActorId'::uuid)
   AND created_at >= '$AuditStart'::timestamptz
   AND created_at <= '$AuditEnd'::timestamptz
   AND action IN (
     'auth.login', 'project.create', 'file.upload.complete', 'file.download',
-    'device.pairing_code.create', 'device.revoke', 'import.list', 'import.submit'
+    'device.pairing_code.create', 'device.pair', 'device.revoke', 'import.list', 'import.submit'
   )
   AND outcome IN ('SUCCESS', 'DENIED')
 ORDER BY created_at, id;
@@ -112,10 +115,11 @@ $AuditSql | docker compose --env-file .env -f docker-compose.yml exec -T postgre
 ```
 
 Confirm OWNER/STAFF `auth.login` success, upload, pre-CLEAN denied and CLEAN successful download,
-pairing, revocation, import submission, and all four STAFF denials. The expected STAFF denial rows
-are `project.create`, `device.pairing_code.create`, and `import.list` with `object_id IS NULL`, plus
-`file.download` with the recorded foreign-file ID. A missing row is FAIL, not a documentation
-exception.
+pairing, revocation, import submission, and all four STAFF denials. Pairing requires the DEVICE
+actor's `device.pair` row; import submission requires the same DEVICE actor's `import.submit` row.
+The expected STAFF denial rows are `project.create`, `device.pairing_code.create`, and `import.list`
+with `object_id IS NULL`, plus `file.download` with the recorded foreign-file ID. A missing row is
+FAIL, not a documentation exception.
 
 ## Blank sign-off checklist
 
