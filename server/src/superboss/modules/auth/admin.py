@@ -17,6 +17,7 @@ from superboss.modules.audit.models import AuditLog
 from superboss.modules.auth.models import AuthSession
 from superboss.modules.auth.passwords import PasswordPolicyError, hash_password, validate_password
 from superboss.modules.auth.schemas import USERNAME_PATTERN
+from superboss.modules.projects.models import Project  # noqa: F401 -- register audit FK target
 from superboss.modules.users.models import Role, User, UserStatus
 
 PasswordReader = Callable[[str], str]

@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import importlib.util
+import os
+import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import ModuleType
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from superboss.modules.audit.models import AuditLog
 from superboss.modules.auth.models import AuthSession
@@ -46,6 +51,59 @@ def test_cli_parser_has_no_password_argument() -> None:
     assert "--password" not in options
     assert "--password-file" not in options
     assert parser.parse_args(["bootstrap", "--username", "owner", "--display-name", "Owner"])
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_works_in_a_fresh_process_without_fixture_model_imports(
+    postgres_database: str,
+) -> None:
+    engine = create_async_engine(postgres_database)
+    async with engine.begin() as connection:
+        await connection.execute(delete(AuditLog))
+        await connection.execute(delete(User))
+    environment = os.environ.copy()
+    environment["SUPERBOSS_DATABASE_URL"] = postgres_database
+    code = f"""
+import asyncio
+from superboss.core.db import async_session_factory
+from superboss.modules.auth.admin import bootstrap_owner
+
+result = asyncio.run(
+    bootstrap_owner(
+        async_session_factory(),
+        username="owner",
+        display_name="Owner",
+        password_reader=lambda _prompt: {INITIAL_PASSWORD!r},
+    )
+)
+print(result.user_id)
+"""
+
+    result = await asyncio.to_thread(
+        subprocess.run,
+        [sys.executable, "-c", code],
+        cwd=Path(__file__).resolve().parents[2],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    try:
+        assert result.returncode == 0, result.stderr
+        async with AsyncSession(engine, expire_on_commit=False) as session:
+            owner = await session.scalar(select(User).where(User.username == "owner"))
+            assert owner is not None
+            event = await session.scalar(
+                select(AuditLog).where(AuditLog.action == "auth.owner.bootstrap")
+            )
+            assert event is not None and event.actor_id == owner.id
+    finally:
+        async with engine.begin() as connection:
+            await connection.execute(delete(AuditLog))
+            await connection.execute(delete(User))
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
