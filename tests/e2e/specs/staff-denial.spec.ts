@@ -3,10 +3,8 @@ import { readFile } from 'node:fs/promises'
 
 import { expect, test } from '@playwright/test'
 
-import { csrfHeaders, loginThroughWeCom } from './support/auth'
+import { csrfHeaders, loginThroughLocalAccount } from './support/auth'
 import { e2e } from './support/runtime'
-
-test.use({ storageState: e2e.staffStorageStatePath })
 
 test('独立 STAFF 直接请求项目、设备、导入列表与外项目文件均返回 403', async ({
     browser,
@@ -15,12 +13,11 @@ test('独立 STAFF 直接请求项目、设备、导入列表与外项目文件�
     const ownerContext = await browser.newContext({
         baseURL: e2e.baseUrl,
         ignoreHTTPSErrors: e2e.ignoreHTTPSErrors,
-        storageState: e2e.ownerStorageStatePath,
     })
     let foreignFileId: string
     try {
         const ownerPage = await ownerContext.newPage()
-        await loginThroughWeCom(ownerPage, 'OWNER')
+        await loginThroughLocalAccount(ownerPage, 'OWNER', e2e.ownerCredentials)
         const projectResponse = await ownerPage.request.get('/api/v1/projects')
         expect(projectResponse.status()).toBe(200)
         const projects = (await projectResponse.json()) as Array<{
@@ -32,7 +29,9 @@ test('独立 STAFF 直接请求项目、设备、导入列表与外项目文件�
         if (acceptanceProject === undefined) {
             throw new Error('Acceptance project fixture is missing.')
         }
-        const fixture = await readFile(e2e.connectorFixtureDir + '/k3-result.json')
+        const fixture = await readFile(
+            e2e.connectorFixtureDir + '/k3-result.json',
+        )
         const started = await ownerPage.request.post('/api/v1/files/uploads', {
             data: {
                 category: 'E2E',
@@ -63,17 +62,22 @@ test('独立 STAFF 直接请求项目、设备、导入列表与外项目文件�
     })
     console.log('ACCEPTANCE_FOREIGN_FILE_ID=' + foreignFileId)
 
-    await loginThroughWeCom(page, 'STAFF')
+    await loginThroughLocalAccount(page, 'STAFF', e2e.staffCredentials)
     const headers = await csrfHeaders(page.context())
     const projectCreate = await page.request.post('/api/v1/projects', {
         data: { is_test: true, name: `STAFF forbidden ${randomUUID()}` },
         headers,
     })
-    const deviceCreate = await page.request.post('/api/v1/owner/devices/pairing-codes', {
-        data: { project_ids: [randomUUID()] },
-        headers,
-    })
-    const importList = await page.request.get('/api/v1/owner/import-jobs?limit=1')
+    const deviceCreate = await page.request.post(
+        '/api/v1/owner/devices/pairing-codes',
+        {
+            data: { project_ids: [randomUUID()] },
+            headers,
+        },
+    )
+    const importList = await page.request.get(
+        '/api/v1/owner/import-jobs?limit=1',
+    )
     const foreignFile = await page.request.get(
         `/api/v1/files/${foreignFileId}/download`,
     )

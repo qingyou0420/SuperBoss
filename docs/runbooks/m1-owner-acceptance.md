@@ -2,33 +2,35 @@
 
 This checklist is evidence collection, not evidence that acceptance has happened. Leave every field
 blank until a human performs the step against a live deployment. Never record a cookie, token,
-pairing code, WeCom authorization code, password, or connector credential.
+pairing code, password, or connector credential.
 
 ## Secure Playwright preparation
 
-Use two different WeCom accounts and two different browser profiles. The external storage-state
-files may contain account cookies: keep them outside the repository, or under the ignored
-`tests/e2e/output/` directory, restrict their filesystem permissions, and delete them after the run.
+Use two distinct local accounts created by the interactive acceptance seed. Put credentials only in
+the current private PowerShell process, never in a script or `.env`. The harness creates fresh
+browser contexts and keeps screenshots, trace, and video disabled so passwords and cookies are not
+retained in Playwright artifacts.
 
 ```powershell
-$env:E2E_BASE_URL='https://<APP_HOST>'
-$env:E2E_OWNER_STORAGE_STATE_PATH='<ABSOLUTE_OWNER_STATE_PATH>'
-$env:E2E_STAFF_STORAGE_STATE_PATH='<ABSOLUTE_STAFF_STATE_PATH>'
+$env:E2E_BASE_URL='https://app.localhost'
+$env:E2E_ALLOW_LOCAL_SELF_SIGNED='true'
+$env:E2E_OWNER_USERNAME='<OWNER_USERNAME>'
+$env:E2E_OWNER_PASSWORD='<OWNER_PASSWORD>'
+$env:E2E_STAFF_USERNAME='<STAFF_USERNAME>'
+$env:E2E_STAFF_PASSWORD='<STAFF_PASSWORD>'
 $env:E2E_CONNECTOR_COMMAND_JSON='["<ABSOLUTE_CONNECTOR_EXE>"]'
-$env:E2E_TARGET='production'
+$env:E2E_TARGET='local'
 
 Push-Location tests/e2e
 try {
     npm ci
     npx playwright install chromium
-    npx playwright codegen --save-storage "$env:E2E_OWNER_STORAGE_STATE_PATH" "$env:E2E_BASE_URL/login"
-    # Complete OWNER WeCom login in the opened profile, then close it.
-    npx playwright codegen --save-storage "$env:E2E_STAFF_STORAGE_STATE_PATH" "$env:E2E_BASE_URL/login"
-    # Complete the distinct STAFF WeCom login in the opened profile, then close it.
     npm test
 } finally {
-    Remove-Item -LiteralPath "$env:E2E_OWNER_STORAGE_STATE_PATH" -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath "$env:E2E_STAFF_STORAGE_STATE_PATH" -Force -ErrorAction SilentlyContinue
+    Remove-Item Env:E2E_OWNER_USERNAME,Env:E2E_OWNER_PASSWORD `
+      -ErrorAction SilentlyContinue
+    Remove-Item Env:E2E_STAFF_USERNAME,Env:E2E_STAFF_PASSWORD `
+      -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path (Get-Location) 'output') -Recurse -Force -ErrorAction SilentlyContinue
     Pop-Location
 }
@@ -38,7 +40,7 @@ For the documented local HTTPS loopback deployment only, set
 `E2E_ALLOW_LOCAL_SELF_SIGNED=true`. The harness rejects this opt-in for production, HTTP, and every
 non-loopback host. Production must use a trusted certificate.
 
-If `E2E_BASE_URL`, either account state, the connector command, or the connector fixture is missing,
+If `E2E_BASE_URL`, any local credential, the connector command, or the connector fixture is missing,
 `npm test` fails before running tests. A failed or not-run live test remains FAIL or NOT RUN; do not
 replace it with `npm run test:contracts`, `npm run test:list`, mocks, or skipped tests.
 
@@ -53,9 +55,9 @@ Set-Content -LiteralPath (Join-Path $AcceptanceDir 'clean.txt') -Value 'SuperBos
 Set-Content -LiteralPath (Join-Path $AcceptanceDir 'eicar.com.txt') -Value 'X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*' -Encoding ascii -NoNewline
 ```
 
-With the OWNER profile:
+With the OWNER account:
 
-1. Open `https://<APP_HOST>/owner/drive` and select `验收测试`.
+1. Open `https://app.localhost/owner/drive` and select `验收测试`.
 2. Upload `clean.txt`; record the file ID while it says `扫描中`.
 3. Try download before CLEAN and record the denial. Retry until the UI offers the download; download
    and compare the bytes.
@@ -64,13 +66,13 @@ With the OWNER profile:
 5. Inspect safe service logs without copying secrets:
 
 ```powershell
-docker compose --env-file .env -f docker-compose.yml logs --tail 200 api worker clamav
+docker compose --env-file .env -f docker-compose.dev.yml logs --tail 200 api file-scan-worker clamav
 ```
 
 ## Connector pairing, import, and revocation
 
-Follow `kimi-connector-installation.md`. In the OWNER profile, open
-`https://<APP_HOST>/owner/devices`, select `验收测试`, generate a one-time code, and enter it only in
+Follow `kimi-connector-installation.md`. In the OWNER account, open
+`https://app.localhost/owner/devices`, select `验收测试`, generate a one-time code, and enter it only in
 the local connector command. Submit one fixture package and poll its job until the server reports
 the literal status `RECEIVED`. Record the device and job IDs, but not the pairing code. Verify the
 OWNER import response has no M2 document/version fields. Then select **撤销设备**, confirm, and
@@ -110,7 +112,7 @@ WHERE actor_id IN ('$OwnerActorId'::uuid, '$StaffActorId'::uuid, '$DeviceActorId
   AND outcome IN ('SUCCESS', 'DENIED')
 ORDER BY created_at, id;
 "@
-$AuditSql | docker compose --env-file .env -f docker-compose.yml exec -T postgres `
+$AuditSql | docker compose --env-file .env -f docker-compose.dev.yml exec -T postgres `
   sh -ceu 'psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB"'
 ```
 
@@ -135,7 +137,7 @@ FAIL, not a documentation exception.
 - STAFF foreign file denial ID: ________________________
 - Device ID: ___________________________________________
 - Import job ID: _______________________________________
-- OWNER login callback: PASS / FAIL / NOT RUN __________
+- OWNER local login: PASS / FAIL / NOT RUN ______________
 - OWNER creates test project: PASS / FAIL / NOT RUN _____
 - CLEAN-before-download denial: PASS / FAIL / NOT RUN ___
 - Clean upload downloadable: PASS / FAIL / NOT RUN ______
@@ -148,6 +150,6 @@ FAIL, not a documentation exception.
 - Reviewer name/signature: ______________________________
 - Notes/incident IDs (no secrets): ______________________
 
-The command's `finally` block deletes both external storage-state files and every file under the
+The command's `finally` block removes credential environment variables and every file under the
 ignored `tests/e2e/output/` tree whether the run succeeds or fails. Confirm that cleanup completed.
 Do not mark M1 accepted while any required line is FAIL or NOT RUN.

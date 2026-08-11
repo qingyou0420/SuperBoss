@@ -132,19 +132,11 @@ def test_workers_and_beat_use_explicit_queues_and_shared_backend_environment() -
     assert "beat" in _command(services["celery-beat"])
 
 
-def test_shared_environment_uses_real_wecom_boundary_and_explicit_pass_through() -> None:
+def test_shared_environment_uses_local_auth_without_legacy_identity_pass_through() -> None:
     shared_environment = _compose()["services"]["api"]["environment"]
 
     assert shared_environment["SUPERBOSS_ENVIRONMENT"] == "development"
-    assert "SUPERBOSS_WECOM_FAKE" not in shared_environment
-    for name in (
-        "SUPERBOSS_WECOM_CORP_ID",
-        "SUPERBOSS_WECOM_AGENT_ID",
-        "SUPERBOSS_WECOM_CORP_SECRET",
-        "SUPERBOSS_WECOM_REDIRECT_URI",
-        "SUPERBOSS_OWNER_WECOM_USERID",
-    ):
-        assert shared_environment[name] == f"${{{name}:-}}"
+    assert not any("WECOM" in name for name in shared_environment)
     assert shared_environment["SUPERBOSS_JWT_SECRET"] == (
         "${SUPERBOSS_JWT_SECRET:-development-only-jwt-secret-change-before-deploy}"
     )
@@ -167,7 +159,7 @@ import superboss.workers.celery_app
 import superboss.workers.schedules
 
 assert main.app.state.settings.environment == "development"
-assert main.app.state.settings.wecom_fake is False
+assert not any("wecom" in name.lower() for name in main.app.state.settings.model_fields)
 """
 
     result = subprocess.run(

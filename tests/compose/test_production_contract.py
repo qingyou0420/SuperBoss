@@ -271,8 +271,8 @@ def test_production_environment_example_contains_no_secret_values() -> None:
         values[key] = value
 
     assert values["SUPERBOSS_ENVIRONMENT"] == "production"
-    assert values["SUPERBOSS_APP_HOST"] == "nightforest.com"
-    assert values["SUPERBOSS_OBJECTS_HOST"] == "objects.nightforest.com"
+    assert values["SUPERBOSS_APP_HOST"] == "app.example.invalid"
+    assert values["SUPERBOSS_OBJECTS_HOST"] == "objects.example.invalid"
     assert values["SUPERBOSS_POSTGRES_DB"] == "superboss"
     assert values["SUPERBOSS_POSTGRES_USER"] == "superboss"
     assert values["SUPERBOSS_S3_BUCKET"] == "superboss-files"
@@ -280,7 +280,6 @@ def test_production_environment_example_contains_no_secret_values() -> None:
         "SUPERBOSS_POSTGRES_PASSWORD",
         "SUPERBOSS_REDIS_PASSWORD",
         "SUPERBOSS_JWT_SECRET",
-        "SUPERBOSS_WECOM_CORP_SECRET",
         "SUPERBOSS_S3_ACCESS_KEY_ID",
         "SUPERBOSS_S3_SECRET_ACCESS_KEY",
         "SUPERBOSS_TLS_CERT_PATH",
@@ -288,6 +287,7 @@ def test_production_environment_example_contains_no_secret_values() -> None:
         "SUPERBOSS_ALLOWLIST_PATH",
     ):
         assert values[sensitive_name] == ""
+    assert not any("WECOM" in name for name in values)
     rendered = "\n".join(values.values()).lower()
     assert "development-only" not in rendered
     assert "change_me" not in rendered

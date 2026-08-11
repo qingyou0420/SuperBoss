@@ -14,8 +14,6 @@ def _settings(**updates: object) -> Settings:
         environment="test",
         database_url="postgresql+asyncpg://postgres@127.0.0.1:55432/superboss_task3",
         jwt_secret="test-only-signing-secret-with-at-least-thirty-two-bytes",
-        wecom_fake=True,
-        owner_wecom_userid="owner-1",
         **updates,
     )
 

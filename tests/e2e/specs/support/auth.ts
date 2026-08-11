@@ -1,20 +1,28 @@
 import { expect, type BrowserContext, type Page } from '@playwright/test'
 
 import { e2e } from './runtime'
+import type { LocalCredentials } from './environment'
 
-const APP_COOKIE_NAMES = /^(access_token|refresh_token|XSRF-TOKEN|wecom_oauth_state)$/
+const APP_COOKIE_NAMES = /^(access_token|refresh_token|XSRF-TOKEN)$/
 
-export async function csrfHeaders(context: BrowserContext): Promise<Record<string, string>> {
+export async function csrfHeaders(
+    context: BrowserContext,
+): Promise<Record<string, string>> {
     const cookie = (await context.cookies(e2e.baseUrl)).find(
         (candidate) => candidate.name === 'XSRF-TOKEN',
     )
-    if (!cookie?.value) throw new Error('Authenticated state has no XSRF-TOKEN cookie.')
+    if (!cookie?.value)
+        throw new Error('Authenticated state has no XSRF-TOKEN cookie.')
     return { 'X-CSRF-Token': cookie.value }
 }
 
-export async function loginThroughWeCom(page: Page, expectedRole: 'OWNER' | 'STAFF'): Promise<void> {
-    const appCookies = (await page.context().cookies(e2e.baseUrl)).filter((cookie) =>
-        APP_COOKIE_NAMES.test(cookie.name),
+export async function loginThroughLocalAccount(
+    page: Page,
+    expectedRole: 'OWNER' | 'STAFF',
+    credentials: LocalCredentials,
+): Promise<void> {
+    const appCookies = (await page.context().cookies(e2e.baseUrl)).filter(
+        (cookie) => APP_COOKIE_NAMES.test(cookie.name),
     )
     for (const cookie of appCookies) {
         await page.context().clearCookies({
@@ -24,7 +32,9 @@ export async function loginThroughWeCom(page: Page, expectedRole: 'OWNER' | 'STA
         })
     }
     await page.goto('/login')
-    await page.getByRole('button', { name: '企业微信登录' }).click()
+    await page.getByLabel('用户名').fill(credentials.username)
+    await page.getByLabel('密码').fill(credentials.password)
+    await page.getByRole('button', { name: '登录' }).click()
     await page.waitForURL(
         (url) =>
             url.origin === e2e.baseUrl &&

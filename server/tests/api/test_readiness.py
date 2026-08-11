@@ -49,7 +49,6 @@ def _test_settings() -> Settings:
         environment="test",
         database_url="postgresql+asyncpg://unit:unit@127.0.0.1:1/unit",
         jwt_secret="test-only-signing-secret-with-at-least-thirty-two-bytes",
-        wecom_fake=True,
         lifecycle_reconcile_interval_seconds=0,
     )
 
@@ -365,7 +364,6 @@ settings = Settings(
     environment="test",
     database_url="postgresql+asyncpg://unit:unit@127.0.0.1:1/unit",
     jwt_secret="test-only-signing-secret-with-at-least-thirty-two-bytes",
-    wecom_fake=True,
     lifecycle_reconcile_interval_seconds=0,
 )
 app = create_app(

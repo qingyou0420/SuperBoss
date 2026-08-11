@@ -11,12 +11,6 @@ class Settings(BaseSettings):
     environment: str = "development"
     database_url: str = "postgresql+asyncpg://superboss:CHANGE_ME@localhost:5432/superboss"
     jwt_secret: str = ""
-    wecom_corp_id: str = ""
-    wecom_agent_id: str = ""
-    wecom_corp_secret: str = ""
-    wecom_redirect_uri: str = ""
-    wecom_fake: bool = False
-    owner_wecom_userid: str = ""
     s3_bucket: str = "superboss-files"
     s3_endpoint_url: str = "http://127.0.0.1:9000"
     s3_public_endpoint_url: str | None = None

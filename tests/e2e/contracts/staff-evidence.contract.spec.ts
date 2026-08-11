@@ -1,5 +1,12 @@
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+    existsSync,
+    mkdtempSync,
+    mkdirSync,
+    readFileSync,
+    rmSync,
+    writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
 import { resolve } from 'node:path'
@@ -16,7 +23,9 @@ test('a passing list run keeps the labeled safe UUID in captured terminal output
     mkdirSync(output)
     try {
         const require = createRequire(import.meta.url)
-        const playwrightTest = pathToFileURL(require.resolve('@playwright/test')).href
+        const playwrightTest = pathToFileURL(
+            require.resolve('@playwright/test'),
+        ).href
         writeFileSync(
             resolve(root, 'synthetic.spec.mjs'),
             `import playwright from ${JSON.stringify(playwrightTest)};\n` +
@@ -30,7 +39,12 @@ test('a passing list run keeps the labeled safe UUID in captured terminal output
         const playwrightCli = require.resolve('@playwright/test/cli')
         const run = spawnSync(
             process.execPath,
-            [playwrightCli, 'test', '--config', resolve(root, 'playwright.config.mjs')],
+            [
+                playwrightCli,
+                'test',
+                '--config',
+                resolve(root, 'playwright.config.mjs'),
+            ],
             { encoding: 'utf8' },
         )
         expect(run.status, run.stderr || run.stdout).toBe(0)
@@ -45,7 +59,9 @@ test('a passing list run keeps the labeled safe UUID in captured terminal output
             resolve(import.meta.dirname, '../specs/staff-denial.spec.ts'),
             'utf8',
         )
-        expect(liveSpec).toContain("console.log('ACCEPTANCE_FOREIGN_FILE_ID=' + foreignFileId)")
+        expect(liveSpec).toMatch(
+            /console\.log\(["']ACCEPTANCE_FOREIGN_FILE_ID=["']\s*\+\s*foreignFileId\)/,
+        )
     } finally {
         rmSync(root, { force: true, recursive: true })
     }

@@ -12,31 +12,47 @@ function validEnvironment(): Record<string, string> {
     mkdirSync(fixture)
     writeFileSync(resolve(fixture, 'manifest.template.json'), '{}')
     writeFileSync(resolve(fixture, 'k3-result.json'), '{}')
-    const owner = resolve(root, 'owner.json')
-    const staff = resolve(root, 'staff.json')
-    writeFileSync(owner, '{"cookies":[],"origins":[]}')
-    writeFileSync(staff, '{"cookies":[],"origins":[]}')
     return {
         E2E_BASE_URL: 'https://127.0.0.1:8443',
         E2E_CONNECTOR_COMMAND_JSON: '["connector-placeholder"]',
         E2E_CONNECTOR_FIXTURE_DIR: fixture,
-        E2E_OWNER_STORAGE_STATE_PATH: owner,
-        E2E_STAFF_STORAGE_STATE_PATH: staff,
+        E2E_OWNER_USERNAME: 'owner-acceptance',
+        E2E_OWNER_PASSWORD: 'owner-password-synthetic',
+        E2E_STAFF_USERNAME: 'staff-acceptance',
+        E2E_STAFF_PASSWORD: 'staff-password-synthetic',
     }
 }
 
 test('missing live deployment origin fails fast instead of skipping', () => {
     const environment = validEnvironment()
     delete environment.E2E_BASE_URL
-    expect(() => loadE2eEnvironment(environment)).toThrow(/E2E_BASE_URL is required/)
+    expect(() => loadE2eEnvironment(environment)).toThrow(
+        /E2E_BASE_URL is required/,
+    )
 })
 
-test('missing account state fails fast without printing its contents', () => {
+test('missing local account credential fails fast without printing its contents', () => {
     const environment = validEnvironment()
-    delete environment.E2E_OWNER_STORAGE_STATE_PATH
+    delete environment.E2E_OWNER_PASSWORD
     expect(() => loadE2eEnvironment(environment)).toThrow(
-        /E2E_OWNER_STORAGE_STATE_PATH is required/,
+        /E2E_OWNER_PASSWORD is required/,
     )
+})
+
+test('local credentials are required without external browser storage state', () => {
+    const environment = validEnvironment()
+    const loaded = loadE2eEnvironment(environment)
+
+    expect(loaded.ownerCredentials).toEqual({
+        username: 'owner-acceptance',
+        password: 'owner-password-synthetic',
+    })
+    expect(loaded.staffCredentials).toEqual({
+        username: 'staff-acceptance',
+        password: 'staff-password-synthetic',
+    })
+    expect(loaded).not.toHaveProperty('ownerStorageStatePath')
+    expect(loaded).not.toHaveProperty('staffStorageStatePath')
 })
 
 test('missing connector fixture fails fast before a live test starts', () => {
@@ -66,6 +82,16 @@ test('bracketed IPv6 loopback supports the explicit local self-signed opt-in', (
 
     const loaded = loadE2eEnvironment(environment)
     expect(loaded.baseUrl).toBe('https://[::1]:8443')
+    expect(loaded.ignoreHTTPSErrors).toBe(true)
+})
+
+test('the frozen app.localhost origin supports the local self-signed opt-in', () => {
+    const environment = validEnvironment()
+    environment.E2E_BASE_URL = 'https://app.localhost'
+    environment.E2E_ALLOW_LOCAL_SELF_SIGNED = 'true'
+
+    const loaded = loadE2eEnvironment(environment)
+    expect(loaded.baseUrl).toBe('https://app.localhost')
     expect(loaded.ignoreHTTPSErrors).toBe(true)
 })
 

@@ -25,7 +25,8 @@ const COOKIE_MARKER = 'COOKIE-SYNTHETIC-MARKER'
 const temporaryRoots: string[] = []
 
 test.afterEach(() => {
-    for (const root of temporaryRoots.splice(0)) rmSync(root, { force: true, recursive: true })
+    for (const root of temporaryRoots.splice(0))
+        rmSync(root, { force: true, recursive: true })
 })
 
 function filesBelow(root: string): string[] {
@@ -40,19 +41,31 @@ test('live config disables credential-bearing screenshots, traces, and video', (
         trace: 'off',
         video: 'off',
     })
-    const liveConfig = readFileSync(resolve(import.meta.dirname, '../playwright.config.ts'), 'utf8')
+    const liveConfig = readFileSync(
+        resolve(import.meta.dirname, '../playwright.config.ts'),
+        'utf8',
+    )
     expect(liveConfig).toContain('...SAFE_LIVE_ARTIFACT_OPTIONS')
     expect(liveConfig).toContain("reporter: [['list'], ['html'")
     expect(liveConfig).not.toMatch(/only-on-failure|retain-on-failure/)
 })
 
 test('the live device flow atomically consumes and redacts the pairing code', () => {
-    const liveSpec = readFileSync(resolve(import.meta.dirname, '../specs/device-import.spec.ts'), 'utf8')
-    expect(liveSpec).toContain("consumePairingCode(page.locator('.pairing-code code'))")
-    expect(liveSpec).not.toContain("page.locator('.pairing-code code').innerText()")
+    const liveSpec = readFileSync(
+        resolve(import.meta.dirname, '../specs/device-import.spec.ts'),
+        'utf8',
+    )
+    expect(liveSpec).toMatch(
+        /consumePairingCode\(\s*page\.locator\(["']\.pairing-code code["']\),?\s*\)/,
+    )
+    expect(liveSpec).not.toMatch(
+        /page\.locator\(["']\.pairing-code code["']\)\.innerText\(\)/,
+    )
     const implementation = consumePairingCode.toString()
     expect(implementation.match(/\.evaluate\(/g)).toHaveLength(1)
-    expect(implementation.indexOf('textContent')).toBeLessThan(implementation.lastIndexOf('return'))
+    expect(implementation.indexOf('textContent')).toBeLessThan(
+        implementation.lastIndexOf('return'),
+    )
     expect(PAIRING_CODE_REDACTED).not.toContain(DOM_MARKER)
 })
 
@@ -69,7 +82,9 @@ test('a failed authenticated pairing page leaves no marker-bearing artifact', ()
     )
     const specPath = resolve(root, 'synthetic.spec.mjs')
     const require = createRequire(import.meta.url)
-    const playwrightTestUrl = pathToFileURL(require.resolve('@playwright/test')).href
+    const playwrightTestUrl = pathToFileURL(
+        require.resolve('@playwright/test'),
+    ).href
     const pairingHelperUrl = pathToFileURL(
         resolve(import.meta.dirname, '../specs/support/pairing-code.ts'),
     ).href
@@ -99,21 +114,31 @@ test('a failed authenticated pairing page leaves no marker-bearing artifact', ()
         ['-p', "require.resolve('@playwright/test/cli')"],
         { encoding: 'utf8' },
     ).trim()
-    const run = spawnSync(process.execPath, [playwrightCli, 'test', '--config', configPath], {
-        cwd: dirname(import.meta.dirname),
-        encoding: 'utf8',
-        env: {
-            ...process.env,
-            SYNTH_COOKIE_MARKER: COOKIE_MARKER,
-            SYNTH_DOM_MARKER: DOM_MARKER,
+    const run = spawnSync(
+        process.execPath,
+        [playwrightCli, 'test', '--config', configPath],
+        {
+            cwd: dirname(import.meta.dirname),
+            encoding: 'utf8',
+            env: {
+                ...process.env,
+                SYNTH_COOKIE_MARKER: COOKIE_MARKER,
+                SYNTH_DOM_MARKER: DOM_MARKER,
+            },
         },
-    })
+    )
     expect(run.status).toBe(1)
     const failureFiles = filesBelow(output)
     const reportFiles = filesBelow(report)
-    expect(failureFiles.some((path) => path.endsWith('error-context.md'))).toBe(true)
-    expect(failureFiles.some((path) => readFileSync(path).byteLength > 0)).toBe(true)
-    expect(reportFiles.some((path) => readFileSync(path).byteLength > 0)).toBe(true)
+    expect(failureFiles.some((path) => path.endsWith('error-context.md'))).toBe(
+        true,
+    )
+    expect(failureFiles.some((path) => readFileSync(path).byteLength > 0)).toBe(
+        true,
+    )
+    expect(reportFiles.some((path) => readFileSync(path).byteLength > 0)).toBe(
+        true,
+    )
     const terminalOutput = run.stdout + run.stderr
     expect(terminalOutput).not.toContain(DOM_MARKER)
     expect(terminalOutput).not.toContain(COOKIE_MARKER)
