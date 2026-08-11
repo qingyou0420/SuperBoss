@@ -21,6 +21,32 @@
 - Current delivery uses only `app.localhost`, one OWNER, and synthetic data; no public endpoint or formal-domain claim.
 - Do not implement the future `night-forest.com` portal, company DNS, VPN, Tencent Cloud deployment, or real employee onboarding.
 
+## Execution amendment after critical plan review
+
+The numbered sections below preserve the complete file-level acceptance criteria, but their first
+four tasks must not be executed as four isolated production commits. Changing `User` before local
+login exists would leave the checked-in runtime unable to authenticate, while keeping a nullable or
+fake password column would create a transitional security contract that the design explicitly
+forbids.
+
+Execute the opening backend work in this order:
+
+1. Complete the password-library portion of Task 2 first: dependency, lock, `passwords.py`, and its
+   unit tests. Defer the OWNER CLI and its integration test. Commit this independently as
+   `feat(auth): add local password primitives`.
+2. Write and verify all RED tests from Task 1, the CLI portion of Task 2, Task 3, and Task 4 before
+   changing identity production code.
+3. Implement the 0018 schema/model, repository, local login, CSRF bootstrap, refresh hint, forced
+   password change, actor gate, and OWNER CLI as one coherent backend cutover. Run every focused gate
+   listed in Tasks 1–4 plus the full backend suite. Commit the combined unit as
+   `feat(auth): replace WeCom browser identity`.
+4. Continue with Task 5 and later tasks in their written order.
+
+The standalone commit steps at the end of original Tasks 1, 3, and 4 are therefore verification
+checkpoints only and must be skipped; their paths are staged together at the combined cutover. This
+amendment prevents an intentionally broken intermediate HEAD without introducing compatibility
+aliases, nullable hashes, default credentials, or dual authentication modes.
+
 ---
 
 ## File map
