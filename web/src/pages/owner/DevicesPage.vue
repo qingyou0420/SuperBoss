@@ -17,9 +17,18 @@ const loading = ref(true)
 const creating = ref(false)
 const errorMessage = ref('')
 let expiryTimer: ReturnType<typeof globalThis.setTimeout> | undefined
+const timestampFormatter = new Intl.DateTimeFormat('zh-CN', {
+    dateStyle: 'short',
+    timeStyle: 'medium',
+    timeZone: 'Asia/Shanghai',
+})
 
 function formatTimestamp(value: string | null): string {
-    return value ? new Date(value).toLocaleString('zh-CN') : '暂无'
+    if (!value) return '暂无'
+    const timestamp = new Date(value)
+    return Number.isNaN(timestamp.getTime())
+        ? '暂无'
+        : timestampFormatter.format(timestamp)
 }
 
 function clearPairingCode(): void {

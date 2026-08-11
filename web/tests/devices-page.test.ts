@@ -69,6 +69,52 @@ afterEach(() => {
 })
 
 describe('OWNER device management page', () => {
+    test('renders every device timestamp explicitly in Asia/Shanghai', async () => {
+        const originalTimezone = process.env.TZ
+        process.env.TZ = 'UTC'
+        mocks.devicesApi.list.mockResolvedValue([
+            {
+                ...activeDevice,
+                revoked_at: '2026-08-10T04:00:00.000Z',
+                status: 'REVOKED',
+            },
+        ])
+        try {
+            await renderPage()
+
+            expect(
+                await screen.findByText('首次配对：2026/8/10 10:00:00'),
+            ).toBeInTheDocument()
+            expect(
+                screen.getByText('最近使用：2026/8/10 11:00:00'),
+            ).toBeInTheDocument()
+            expect(
+                screen.getByText('撤销时间：2026/8/10 12:00:00'),
+            ).toBeInTheDocument()
+
+            await fireEvent.click(screen.getByLabelText('客户方案'))
+            await fireEvent.click(
+                screen.getByRole('button', { name: '生成配对码' }),
+            )
+            expect(
+                await screen.findByText(/2026\/8\/10 11:10:00/),
+            ).toBeInTheDocument()
+        } finally {
+            if (originalTimezone === undefined) delete process.env.TZ
+            else process.env.TZ = originalTimezone
+        }
+    })
+
+    test('renders invalid timestamps as a fixed safe placeholder', async () => {
+        mocks.devicesApi.list.mockResolvedValue([
+            { ...activeDevice, paired_at: 'not-a-date' },
+        ])
+
+        await renderPage()
+
+        expect(await screen.findByText('首次配对：暂无')).toBeInTheDocument()
+    })
+
     test('shows device identity, grants, timestamps, and lifecycle state', async () => {
         await renderPage()
 
