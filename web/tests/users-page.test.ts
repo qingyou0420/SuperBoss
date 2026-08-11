@@ -5,10 +5,10 @@ import type {
 } from 'axios'
 import { fireEvent, render, screen, waitFor } from '@testing-library/vue'
 import ElementPlus from 'element-plus'
-import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { createHttpClient } from '../src/api/http'
-import { createUsersApi, usersApi } from '../src/api/users'
+import { UserContractError, createUsersApi, usersApi } from '../src/api/users'
 import UsersPage from '../src/pages/owner/UsersPage.vue'
 
 vi.mock('../src/api/users', async () => {
@@ -23,6 +23,7 @@ vi.mock('../src/api/users', async () => {
             create: vi.fn(),
             update: vi.fn(),
             replaceProjects: vi.fn(),
+            resetPassword: vi.fn(),
         },
         userErrorMessage: () => '员工操作暂时无法完成，请稍后重试。',
     }
@@ -41,16 +42,20 @@ vi.mock('../src/api/projects', () => ({
 }))
 
 const mockedUsersApi = vi.mocked(usersApi)
-const project = { id: '019f2b8e-18f0-7f31-9f42-3e6a76b9f810', name: '验收项目' }
+const project = {
+    id: '019f2b8e-18f0-7f31-9f42-3e6a76b9f810',
+    name: '验收项目',
+}
 const staff = {
     id: '019f2b8e-18f0-7f31-9f42-3e6a76b9f811',
-    wecom_userid: 'existing-staff',
+    username: 'existing-staff',
     display_name: 'Existing Staff',
     role: 'STAFF' as const,
     status: 'ACTIVE' as const,
     last_login_at: '2026-08-09T12:00:00Z',
     projects: [project],
 }
+const temporaryPassword = 'temporary-password-sentinel'
 
 function response(
     config: InternalAxiosRequestConfig,
@@ -68,132 +73,160 @@ function response(
 
 beforeEach(() => {
     vi.clearAllMocks()
+    localStorage.clear()
+    sessionStorage.clear()
     mockedUsersApi.list.mockResolvedValue([staff])
 })
 
-describe('OWNER user management', () => {
-    test('creates and renders staff-acceptance through an injected narrow facade', async () => {
+afterEach(() => {
+    Reflect.deleteProperty(navigator, 'clipboard')
+})
+
+describe('OWNER local user API', () => {
+    test('decodes exact one-time create and reset envelopes', async () => {
         const seen: InternalAxiosRequestConfig[] = []
         const adapter: AxiosAdapter = async (config) => {
             seen.push(config)
-            if (config.method === 'get') return response(config, [])
+            if (config.url?.endsWith('/password-reset')) {
+                return response(config, {
+                    temporary_password: temporaryPassword,
+                })
+            }
             return response(
                 config,
-                {
-                    ...staff,
-                    wecom_userid: 'staff-acceptance',
-                    display_name: 'Acceptance',
-                },
+                { user: staff, temporary_password: temporaryPassword },
                 201,
             )
         }
-        render(UsersPage, {
-            props: { userApi: createUsersApi(createHttpClient({ adapter })) },
-            global: { plugins: [ElementPlus] },
-        })
-        const createButton = screen
-            .getAllByRole('button')
-            .find(
-                (button) =>
-                    button instanceof HTMLButtonElement &&
-                    button.type === 'submit',
-            )
-        if (!createButton) throw new Error('create button missing')
-        const [wecomUserId, displayName] = screen.getAllByRole('textbox')
-        await fireEvent.update(wecomUserId, 'staff-acceptance')
-        await fireEvent.update(displayName, 'Acceptance')
-        await fireEvent.click(createButton)
-
-        expect(await screen.findByText('staff-acceptance')).toBeInTheDocument()
-        expect(screen.getAllByText('STAFF').length).toBeGreaterThan(0)
-        expect(screen.queryByLabelText(/role/i)).not.toBeInTheDocument()
-        const post = seen.find((config) => config.method === 'post')
-        expect(post?.url).toBe('/owner/users')
-        expect(JSON.parse(String(post?.data))).toEqual({
-            wecom_userid: 'staff-acceptance',
-            display_name: 'Acceptance',
-            project_ids: [],
-        })
-    })
-
-    test('creates a STAFF whitelist account through the narrow HTTP facade contract', async () => {
-        const adapter: AxiosAdapter = async (config) =>
-            response(
-                config,
-                {
-                    ...staff,
-                    wecom_userid: 'staff-acceptance',
-                    display_name: 'Acceptance',
-                },
-                201,
-            )
         const api = createUsersApi(createHttpClient({ adapter }))
 
         await expect(
             api.create({
-                wecom_userid: 'staff-acceptance',
-                display_name: 'Acceptance',
-                project_ids: [],
+                username: 'existing-staff',
+                display_name: 'Existing Staff',
+                project_ids: [project.id],
             }),
-        ).resolves.toMatchObject({
-            wecom_userid: 'staff-acceptance',
-            role: 'STAFF',
+        ).resolves.toEqual({
+            user: staff,
+            temporary_password: temporaryPassword,
         })
+        await expect(api.resetPassword(staff.id)).resolves.toEqual({
+            temporary_password: temporaryPassword,
+        })
+        expect(JSON.parse(String(seen[0]?.data))).toEqual({
+            username: 'existing-staff',
+            display_name: 'Existing Staff',
+            project_ids: [project.id],
+        })
+        expect(seen[1]?.url).toBe(`/owner/users/${staff.id}/password-reset`)
     })
 
-    test('adds and displays a STAFF user without role, password, or delete-owner controls', async () => {
+    test.each([
+        { user: staff, temporary_password: temporaryPassword, extra: true },
+        {
+            user: { ...staff, wecom_userid: 'legacy' },
+            temporary_password: temporaryPassword,
+        },
+        { user: staff, temporary_password: '' },
+        { temporary_password: temporaryPassword, password_hash: 'secret' },
+    ])(
+        'rejects expanded or malformed credential envelopes %#',
+        async (body) => {
+            const adapter: AxiosAdapter = async (config) =>
+                response(
+                    config,
+                    body,
+                    config.url?.endsWith('/password-reset') ? 200 : 201,
+                )
+            const api = createUsersApi(createHttpClient({ adapter }))
+            await expect(
+                'user' in body
+                    ? api.create({
+                          username: 'existing-staff',
+                          display_name: 'Existing Staff',
+                          project_ids: [],
+                      })
+                    : api.resetPassword(staff.id),
+            ).rejects.toBeInstanceOf(UserContractError)
+        },
+    )
+})
+
+describe('OWNER local user management page', () => {
+    test('shows a created temporary password once without storage or clipboard writes', async () => {
         mockedUsersApi.create.mockResolvedValue({
-            ...staff,
-            wecom_userid: 'staff-acceptance',
-            display_name: 'Acceptance',
+            user: { ...staff, username: 'staff-acceptance' },
+            temporary_password: temporaryPassword,
+        })
+        const clipboard = vi.fn()
+        Object.defineProperty(navigator, 'clipboard', {
+            configurable: true,
+            value: { writeText: clipboard },
         })
         render(UsersPage, { global: { plugins: [ElementPlus] } })
         await screen.findByText('existing-staff')
-
         await fireEvent.update(
-            screen.getByLabelText('WeCom UserID'),
+            screen.getByLabelText('用户名'),
             'staff-acceptance',
         )
         await fireEvent.update(screen.getByLabelText('显示名称'), 'Acceptance')
         await fireEvent.click(screen.getByRole('button', { name: '添加员工' }))
 
+        expect(await screen.findByText(temporaryPassword)).toBeInTheDocument()
+        expect(mockedUsersApi.create).toHaveBeenCalledWith({
+            username: 'staff-acceptance',
+            display_name: 'Acceptance',
+            project_ids: [],
+        })
+        expect(clipboard).not.toHaveBeenCalled()
+        expect(localStorage).toHaveLength(0)
+        expect(sessionStorage).toHaveLength(0)
+        await fireEvent.click(screen.getByRole('button', { name: '我已保存' }))
         await waitFor(() =>
-            expect(mockedUsersApi.create).toHaveBeenCalledWith({
-                wecom_userid: 'staff-acceptance',
-                display_name: 'Acceptance',
-                project_ids: [],
-            }),
+            expect(
+                screen.queryByText(temporaryPassword),
+            ).not.toBeInTheDocument(),
         )
-        expect(await screen.findByText('staff-acceptance')).toBeInTheDocument()
-        expect(screen.getAllByText('STAFF').length).toBeGreaterThan(0)
-        expect(screen.queryByLabelText(/角色|密码/i)).not.toBeInTheDocument()
-        expect(
-            screen.queryByRole('button', { name: /删除/i }),
-        ).not.toBeInTheDocument()
     })
 
-    test('requires confirmation before disable and displays projects plus Shanghai last-login time', async () => {
+    test('clears a reset password on close and component unmount', async () => {
+        mockedUsersApi.resetPassword.mockResolvedValue({
+            temporary_password: temporaryPassword,
+        })
+        const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+        const rendered = render(UsersPage, {
+            global: { plugins: [ElementPlus] },
+        })
+        await screen.findByText('existing-staff')
+        await fireEvent.click(screen.getByRole('button', { name: '重置密码' }))
+        expect(await screen.findByText(temporaryPassword)).toBeInTheDocument()
+        expect(confirm).toHaveBeenCalledWith(
+            '确认重置 existing-staff 的密码吗？',
+        )
+        rendered.unmount()
+        expect(document.body.textContent).not.toContain(temporaryPassword)
+    })
+
+    test('confirms disable by username and preserves project assignment behavior', async () => {
         mockedUsersApi.update.mockResolvedValue({
             ...staff,
             status: 'DISABLED',
         })
-        const confirm = vi
-            .spyOn(window, 'confirm')
-            .mockReturnValueOnce(false)
-            .mockReturnValueOnce(true)
+        mockedUsersApi.replaceProjects.mockResolvedValue(staff)
+        const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
         render(UsersPage, { global: { plugins: [ElementPlus] } })
         await screen.findByText('existing-staff')
         expect(screen.getAllByText('验收项目').length).toBeGreaterThan(0)
-        expect(screen.getByText(/2026/)).toBeInTheDocument()
-        const disable = screen.getByRole('button', { name: '禁用' })
-        await fireEvent.click(disable)
-        expect(mockedUsersApi.update).not.toHaveBeenCalled()
-        await fireEvent.click(disable)
-        await waitFor(() =>
-            expect(mockedUsersApi.update).toHaveBeenCalledWith(staff.id, {
-                status: 'DISABLED',
-            }),
-        )
-        expect(confirm).toHaveBeenCalledTimes(2)
+        await fireEvent.click(screen.getByRole('button', { name: '禁用' }))
+        expect(confirm).toHaveBeenCalledWith('确认禁用 existing-staff 吗？')
+        expect(mockedUsersApi.update).toHaveBeenCalledWith(staff.id, {
+            status: 'DISABLED',
+        })
+        expect(
+            screen.queryByLabelText(/角色|明文密码/i),
+        ).not.toBeInTheDocument()
+        expect(
+            screen.queryByRole('button', { name: /删除/i }),
+        ).not.toBeInTheDocument()
     })
 })
