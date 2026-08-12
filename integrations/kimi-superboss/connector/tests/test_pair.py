@@ -59,6 +59,80 @@ def test_pair_stores_only_refresh_under_normalized_origin(
         assert secret not in combined
 
 
+def test_pair_accepts_the_backend_canonical_bearer_token_type(
+    runner: CliRunner,
+    memory_keyring: MemoryKeyring,
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    respx_mock: respx.MockRouter,
+) -> None:
+    app = load_app(monkeypatch, state_dir)
+    route = respx_mock.post(f"{ORIGIN}/api/v1/device-auth/pair").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                **token_payload(access="canonical-access", refresh="canonical-refresh"),
+                "token_type": "Bearer",
+            },
+        )
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "pair",
+            "--server",
+            ORIGIN,
+            "--code",
+            "canonical-pair-code",
+            "--name",
+            "Owner-PC",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert route.call_count == 1
+    assert memory_keyring.values == {(SERVICE, USERNAME): "canonical-refresh"}
+    combined = f"{result.stdout}\n{result.stderr}"
+    for secret in ("canonical-pair-code", "canonical-access", "canonical-refresh"):
+        assert secret not in combined
+
+
+def test_pair_rejects_a_noncanonical_token_type_before_credential_save(
+    runner: CliRunner,
+    memory_keyring: MemoryKeyring,
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    respx_mock: respx.MockRouter,
+) -> None:
+    app = load_app(monkeypatch, state_dir)
+    response = token_payload(access="lowercase-access", refresh="lowercase-refresh")
+    response["token_type"] = "bearer"
+    route = respx_mock.post(f"{ORIGIN}/api/v1/device-auth/pair").mock(
+        return_value=httpx.Response(200, json=response)
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "pair",
+            "--server",
+            ORIGIN,
+            "--code",
+            "lowercase-pair-code",
+            "--name",
+            "Owner-PC",
+        ],
+    )
+
+    assert result.exit_code == 3
+    assert route.call_count == 1
+    assert memory_keyring.values == {}
+    combined = f"{result.stdout}\n{result.stderr}"
+    for secret in ("lowercase-pair-code", "lowercase-access", "lowercase-refresh"):
+        assert secret not in combined
+
+
 @pytest.mark.parametrize(
     "origin",
     [

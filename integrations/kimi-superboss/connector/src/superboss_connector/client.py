@@ -44,7 +44,7 @@ class TokenResponse(BaseModel):
 
     access_token: str = Field(min_length=1, max_length=TOKEN_MAX_CHARS)
     refresh_token: str = Field(min_length=1, max_length=TOKEN_MAX_CHARS)
-    token_type: Literal["bearer"]
+    token_type: Literal["Bearer"]
     expires_at: datetime
     refresh_expires_at: datetime
 

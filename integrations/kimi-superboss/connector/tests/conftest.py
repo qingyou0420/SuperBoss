@@ -131,7 +131,7 @@ def token_payload(*, access: str, refresh: str) -> dict[str, str]:
     return {
         "access_token": access,
         "refresh_token": refresh,
-        "token_type": "bearer",
+        "token_type": "Bearer",
         "expires_at": "2026-08-10T11:54:00Z",
         "refresh_expires_at": "2026-08-24T09:54:00Z",
     }

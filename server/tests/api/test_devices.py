@@ -123,6 +123,7 @@ async def test_exact_six_endpoints_return_bounded_non_secret_shapes(
         "expires_at",
         "refresh_expires_at",
     }
+    assert pair_response.json()["token_type"] == "Bearer"
     assert "set-cookie" not in pair_response.headers
     first_access = pair_response.json()["access_token"]
     first_refresh = pair_response.json()["refresh_token"]
