@@ -34,6 +34,13 @@ def _load_task_cards() -> list[dict[str, Any]]:
     ]
 
 
+def _task_card(cards: list[dict[str, Any]], task_id: str) -> dict[str, Any]:
+    matches = [card for card in cards if card["task_id"] == task_id]
+    if len(matches) != 1:
+        raise ValueError(f"expected one task card: {task_id}")
+    return matches[0]
+
+
 def _reject_unknown_fields(value: dict[str, Any], allowed: set[str], label: str) -> None:
     unknown = set(value) - allowed
     if unknown:
@@ -90,11 +97,18 @@ def _validate_document(name: str, value: dict[str, Any]) -> None:
 
     if name == "policy":
         for level in _mapping(value["levels"], "policy levels").values():
+            level_mapping = _mapping(level, "policy level")
             _reject_unknown_fields(
-                _mapping(level, "policy level"),
+                level_mapping,
                 {"budgets", "verification", "timeout_seconds", "requires_approval", "triggers"},
                 "policy level",
             )
+            if "budgets" in level_mapping:
+                _reject_unknown_fields(
+                    _mapping(level_mapping["budgets"], "policy level budgets"),
+                    {"files", "production_lines", "test_lines", "documentation_lines"},
+                    "policy level budgets",
+                )
         for gate in _mapping(value["gates"], "policy gates").values():
             _reject_unknown_fields(
                 _mapping(gate, "policy gate"),
@@ -162,7 +176,7 @@ def test_metadata_contract() -> None:
     baseline = _load(".governance/baseline.json")
     schema = _load(".governance/task-card.schema.json")
     cards = _load_task_cards()
-    card = cards[0]
+    card = _task_card(cards, "development-governance-guardrails")
 
     for name, document in (("policy", policy), ("baseline", baseline), ("schema", schema)):
         _validate_document(name, document)
@@ -204,6 +218,16 @@ def test_metadata_contract() -> None:
     assert len([item for item in cards if item["status"] == "active"]) == 1
 
 
+def test_metadata_selects_bootstrap_card_by_task_id() -> None:
+    bootstrap = _load(".governance/tasks/development-governance-guardrails.json")
+    completed = deepcopy(bootstrap)
+    completed["task_id"] = "archived-governance-task"
+    completed["status"] = "complete"
+    completed["level"] = "L0"
+
+    assert _task_card([completed, bootstrap], "development-governance-guardrails") is bootstrap
+
+
 @pytest.mark.parametrize(
     ("name", "relative_path"),
     [
@@ -225,6 +249,7 @@ def test_metadata_rejects_unknown_top_level_fields(name: str, relative_path: str
     ("name", "relative_path", "path"),
     [
         ("policy", ".governance/policy.json", ("gates", "governance")),
+        ("policy", ".governance/policy.json", ("levels", "L2", "budgets")),
         ("baseline", ".governance/baseline.json", ("historical_debt", 0)),
         ("schema", ".governance/task-card.schema.json", ("properties", "task_id")),
         ("card", ".governance/tasks/development-governance-guardrails.json", ("budgets",)),
