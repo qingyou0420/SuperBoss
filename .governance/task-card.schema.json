@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "task_id", "status", "base_commit", "bootstrap", "candidate", "review_round", "level", "problem", "non_goals", "threat_model", "budgets", "allowed_paths", "conditional_allowed_paths", "gate_ids", "historical_debt_ids", "approval_ids", "success_criteria", "stop_conditions"],
+  "properties": {
+    "schema_version": {"type": "integer", "const": 1},
+    "task_id": {"type": "string", "pattern": "^[a-z0-9-]+$"},
+    "status": {"type": "string", "enum": ["active", "complete", "cancelled"]},
+    "base_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "bootstrap": {"type": "boolean"},
+    "candidate": {"type": "boolean"},
+    "review_round": {"type": "integer", "minimum": 1},
+    "level": {"type": "string", "enum": ["L0", "L1", "L2", "L3"]},
+    "problem": {"type": "string", "minLength": 1},
+    "non_goals": {"type": "array", "items": {"type": "string"}},
+    "threat_model": {"type": "object", "additionalProperties": false, "required": ["assets", "attackers", "capabilities", "entry_points", "excluded_capabilities"], "properties": {"assets": {"type": "array", "items": {"type": "string"}}, "attackers": {"type": "array", "items": {"type": "string"}}, "capabilities": {"type": "array", "items": {"type": "string"}}, "entry_points": {"type": "array", "items": {"type": "string"}}, "excluded_capabilities": {"type": "array", "items": {"type": "string"}}}},
+    "budgets": {"type": "object", "additionalProperties": false, "required": ["files", "production_lines", "test_lines", "documentation_lines", "migrations", "dependencies", "services", "containers", "routes", "auth_sources", "persistent_state", "network_boundaries"], "properties": {"files": {"type": "integer", "minimum": 0}, "production_lines": {"type": "integer", "minimum": 0}, "test_lines": {"type": "integer", "minimum": 0}, "documentation_lines": {"type": "integer", "minimum": 0}, "migrations": {"type": "integer", "minimum": 0}, "dependencies": {"type": "integer", "minimum": 0}, "services": {"type": "integer", "minimum": 0}, "containers": {"type": "integer", "minimum": 0}, "routes": {"type": "integer", "minimum": 0}, "auth_sources": {"type": "integer", "minimum": 0}, "persistent_state": {"type": "integer", "minimum": 0}, "network_boundaries": {"type": "integer", "minimum": 0}}},
+    "allowed_paths": {"type": "array", "items": {"type": "string"}},
+    "conditional_allowed_paths": {"type": "array", "items": {"type": "string"}},
+    "gate_ids": {"type": "array", "items": {"type": "string"}},
+    "historical_debt_ids": {"type": "array", "items": {"type": "string"}},
+    "approval_ids": {"type": "array", "items": {"type": "string"}},
+    "success_criteria": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["id", "description"], "properties": {"id": {"type": "string", "pattern": "^SC-[0-9]+$"}, "description": {"type": "string", "minLength": 1}}}},
+    "stop_conditions": {"type": "array", "items": {"type": "string"}}
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "baseline_commit": "51cd8491fa593eb3095684d7528ecea6d1dc17de",
+  "baseline_tree": "e84f5e49c2a374c6ac11fb5e74d231d6cfa993cd",
+  "historical_debt": [
+    {"id": "HD-1", "path": "server/src/superboss", "description": "browser Bearer fallback authentication channel"},
+    {"id": "HD-2", "path": "integrations/kimi-superboss/connector/src/superboss_connector/pinned.py", "description": "connector global-only DNS and pinned transport"},
+    {"id": "HD-3", "path": "server/src/superboss/modules/files", "description": "currently unreachable File and Project deletion recovery protocol"},
+    {"id": "HD-4", "path": "server/src/superboss/core/config.py", "description": "JWT secret entropy heuristic"},
+    {"id": "HD-5", "path": "integrations/kimi-superboss/connector/src/superboss_connector", "description": "pairing output exactly-once marker"},
+    {"id": "HD-6", "path": "server", "description": "oversized service and test files"},
+    {"id": "HD-7", "path": "server/tests", "description": "duplicate test matrix"},
+    {"id": "HD-8", "path": ".superpowers", "description": "multiple ignored reports and diff snapshots"}
+  ]
+}

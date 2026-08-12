@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "task_id": "development-governance-guardrails",
+  "status": "active",
+  "base_commit": "23b659854bf7457972288a4c2fce57fde1aa1e54",
+  "bootstrap": true,
+  "candidate": false,
+  "review_round": 1,
+  "level": "L2",
+  "problem": "Repository changes lack a declared, executable contract for scope, boundaries, proportional verification, and reusable evidence.",
+  "non_goals": ["Do not add a governance service, database, or third-party runtime dependency.", "Do not create CODEOWNERS before a real remote and OWNER identity are verified.", "Do not retroactively block untouched historical debt."],
+  "threat_model": {"assets": ["repository change contract", "reviewer time"], "attackers": ["unreviewed or over-broad changes"], "capabilities": ["modify repository files in a proposed change"], "entry_points": ["task cards", "changed paths", "local and CI gate invocations"], "excluded_capabilities": ["arbitrary same-origin JavaScript execution", "unverified remote OWNER identity"]},
+  "budgets": {"files": 20, "production_lines": 700, "test_lines": 1000, "documentation_lines": 300, "migrations": 0, "dependencies": 0, "services": 0, "containers": 0, "routes": 0, "auth_sources": 0, "persistent_state": 0, "network_boundaries": 0},
+  "allowed_paths": [".governance/policy.json", ".governance/baseline.json", ".governance/task-card.schema.json", ".governance/tasks/development-governance-guardrails.json", "scripts/governance_check.py", "scripts/verify_changed.py", "server/tests/unit/governance/test_governance_check.py", "server/tests/unit/governance/test_verify_changed.py", ".github/workflows/governance.yml", "docs/runbooks/development-governance.md", "README.md"],
+  "conditional_allowed_paths": [".github/CODEOWNERS"],
+  "gate_ids": ["governance", "backend", "web", "connector", "e2e-contract", "compose", "windows-packaging"],
+  "historical_debt_ids": ["HD-1", "HD-2", "HD-3", "HD-4", "HD-5", "HD-6", "HD-7", "HD-8"],
+  "approval_ids": [],
+  "success_criteria": [
+    {"id": "SC-1", "description": "Paths outside the declared task scope are rejected."},
+    {"id": "SC-2", "description": "Approvals are scoped to their immutable task contract and are not trusted locally without platform OWNER enforcement."},
+    {"id": "SC-3", "description": "Untouched historical-baseline debt does not block unrelated work; touched debt requires a disposition."},
+    {"id": "SC-4", "description": "Verification selects proportional fixed gates and reuses green evidence for the same tree, task card, and gate."},
+    {"id": "SC-5", "description": "The governance tool adds no third-party governance dependency."}
+  ],
+  "stop_conditions": ["All success criteria pass.", "No unresolved Critical or Important finding remains.", "One implementer self-review and one independent review are complete.", "Candidate verification meets the declared plan."]
+}
