@@ -661,10 +661,26 @@ async def test_deleted_file_cascades_upload_and_operations_fail_closed(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("state", ["UPLOADING", "QUARANTINED", "SCANNING", "INFECTED", "FAILED"])
-async def test_download_rejects_non_clean_state(db_session, active_owner, state) -> None:
+@pytest.mark.parametrize(
+    ("state", "expected_error"),
+    [
+        ("UPLOADING", "FileNotReadyError"),
+        ("QUARANTINED", "FileNotReadyError"),
+        ("SCANNING", "FileNotReadyError"),
+        ("INFECTED", "FileInfectedError"),
+        ("FAILED", "FileScanFailedError"),
+    ],
+)
+async def test_download_rejects_non_clean_state(
+    db_session, active_owner, state, expected_error
+) -> None:
     from superboss.modules.files.models import File, FileState
-    from superboss.modules.files.service import FileNotReadyError, FileService
+    from superboss.modules.files.service import (
+        FileInfectedError,
+        FileNotReadyError,
+        FileScanFailedError,
+        FileService,
+    )
 
     project = Project(name=f"Download {state}")
     db_session.add(project)
@@ -686,7 +702,12 @@ async def test_download_rejects_non_clean_state(db_session, active_owner, state)
     await db_session.flush()
     storage = InMemoryObjectStorage()
     actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
-    with pytest.raises(FileNotReadyError):
+    error_types = {
+        "FileInfectedError": FileInfectedError,
+        "FileNotReadyError": FileNotReadyError,
+        "FileScanFailedError": FileScanFailedError,
+    }
+    with pytest.raises(error_types[expected_error]):
         await FileService(db_session, storage).presign_download(actor, file.id)
     assert storage.expiries == []
 
