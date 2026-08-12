@@ -28,11 +28,14 @@
     "unknown": "production"
   },
   "gates": {
-    "governance": {"cwd": "server", "steps": ["C:/Users/Administrator/.local/bin/uv.exe", "run", "pytest", "-q", "tests/unit/governance"], "timeout_seconds": 300, "kind": "governance"},
-    "backend": {"cwd": "server", "steps": ["C:/Users/Administrator/.local/bin/uv.exe", "run", "pytest", "-q", "tests/unit"], "timeout_seconds": 900, "kind": "backend"},
+    "governance": {"cwd": "server", "steps": ["uv", "run", "pytest", "-q", "tests/unit/governance"], "timeout_seconds": 300, "kind": "governance"},
+    "governance-static": {"cwd": "server", "steps": ["uv", "run", "ruff", "check", "../scripts/governance_check.py", "../scripts/verify_changed.py", "tests/unit/governance"], "timeout_seconds": 300, "kind": "governance"},
+    "backend": {"cwd": "server", "steps": ["uv", "run", "pytest", "-q", "tests/unit"], "timeout_seconds": 900, "kind": "backend"},
+    "web-focused": {"cwd": "web", "steps": ["npm", "run", "test", "--", "--run"], "timeout_seconds": 900, "kind": "web"},
+    "web-static": {"cwd": "web", "steps": ["npm", "run", "typecheck"], "timeout_seconds": 900, "kind": "web"},
     "web": {"cwd": "web", "steps": ["npm", "run", "test", "--", "--run"], "timeout_seconds": 900, "kind": "web"},
-    "connector": {"cwd": "integrations/kimi-superboss/connector", "steps": ["C:/Users/Administrator/.local/bin/uv.exe", "run", "pytest", "-q"], "timeout_seconds": 900, "kind": "connector"},
-    "e2e-contract": {"cwd": "server", "steps": ["C:/Users/Administrator/.local/bin/uv.exe", "run", "pytest", "-q", "tests/unit/test_deployment_contract.py"], "timeout_seconds": 1800, "kind": "e2e-contract"},
+    "connector": {"cwd": "integrations/kimi-superboss/connector", "steps": ["uv", "run", "pytest", "-q"], "timeout_seconds": 900, "kind": "connector"},
+    "e2e-contract": {"cwd": "server", "steps": ["uv", "run", "pytest", "-q", "tests/unit/test_deployment_contract.py"], "timeout_seconds": 1800, "kind": "e2e-contract"},
     "compose": {"cwd": ".", "steps": ["docker", "compose", "config"], "timeout_seconds": 1800, "kind": "compose"},
     "windows-packaging": {"cwd": "integrations/kimi-superboss", "steps": ["powershell", "-File", "scripts/build-windows.ps1"], "timeout_seconds": 1800, "kind": "windows-packaging"}
   },

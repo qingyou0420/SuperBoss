@@ -1,5 +1,3 @@
-"""Check a declared governance task against a Git change."""
-
 from __future__ import annotations
 
 import argparse
@@ -14,19 +12,13 @@ from pathlib import Path
 
 GOVERNANCE_PREFIX = ".governance/"
 LIFECYCLE_FIELDS = {"status", "bootstrap", "candidate", "review_round", "approval_ids"}
-
-
 @dataclass(frozen=True)
 class CheckResult:
     errors: tuple[str, ...]
     warnings: tuple[str, ...]
     metrics: Mapping[str, int]
-
-
 class ConfigurationError(Exception):
-    """The repository cannot provide a valid governance contract."""
-
-
+    pass
 def _no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -34,34 +26,21 @@ def _no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
             raise ValueError(f"duplicate JSON key: {key}")
         result[key] = value
     return result
-
-
 def load_strict_json(path: Path) -> dict[str, object]:
-    """Load a JSON object while refusing ambiguous duplicate keys."""
     with path.open(encoding="utf-8") as source:
         value = json.load(source, object_pairs_hook=_no_duplicates)
     if not isinstance(value, dict):
         raise TypeError("top-level JSON value must be an object")
     return value
-
-
 def canonical_sha256(value: object) -> str:
-    """Return the stable JSON digest used to bind an approval to a contract."""
     encoded = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-
-
 def immutable_contract(card: Mapping[str, object]) -> dict[str, object]:
-    """Drop state-machine fields that must not invalidate an approval."""
     return {key: value for key, value in card.items() if key not in LIFECYCLE_FIELDS}
-
-
 def _git(repo: Path, *args: str) -> str:
     return subprocess.run(
         ["git", "-C", str(repo), *args], text=True, capture_output=True, check=True
     ).stdout
-
-
 def _git_exists(repo: Path, revision_path: str) -> bool:
     return subprocess.run(
         ["git", "-C", str(repo), "cat-file", "-e", revision_path],
@@ -69,23 +48,12 @@ def _git_exists(repo: Path, revision_path: str) -> bool:
         capture_output=True,
         check=False,
     ).returncode == 0
-
-
-def _path_from_name_status(line: str) -> str:
-    fields = line.split("\t")
-    if len(fields) < 2:
-        raise ConfigurationError(f"invalid git name-status output: {line}")
-    return fields[-1]
-
-
 def collect_diff(repo: Path, base: str, head: str) -> Mapping[str, object]:
-    """Collect changed paths and added-line counts from the two required Git views."""
     try:
         names = _git(repo, "diff", "-z", "--name-status", "--find-renames", base, head).split("\0")
         stats = _git(repo, "diff", "-z", "--numstat", base, head).split("\0")
     except subprocess.CalledProcessError as error:
         raise ConfigurationError("GIT_DIFF: unable to collect change") from error
-
     paths: list[str] = []
     index = 0
     while index < len(names) and names[index]:
@@ -116,20 +84,14 @@ def collect_diff(repo: Path, base: str, head: str) -> Mapping[str, object]:
             additions[path] = int(added)
         index += 1
     return {"paths": paths, "additions": additions, "binary_paths": tuple(binary_paths)}
-
-
 def _mapping(value: object, label: str) -> Mapping[str, object]:
     if not isinstance(value, dict):
         raise ConfigurationError(f"INVALID_METADATA: {label} must be an object")
     return value
-
-
 def _list(value: object, label: str) -> list[object]:
     if not isinstance(value, list):
         raise ConfigurationError(f"INVALID_METADATA: {label} must be an array")
     return value
-
-
 def _validate_path_pattern(pattern: object) -> str:
     if not isinstance(pattern, str) or not pattern:
         raise ConfigurationError(f"INVALID_PATH_PATTERN: {pattern}")
@@ -137,15 +99,12 @@ def _validate_path_pattern(pattern: object) -> str:
     if pure.is_absolute() or pattern.startswith(("/", "\\")) or ".." in pure.parts or pattern in {"*", "**"}:
         raise ConfigurationError(f"INVALID_PATH_PATTERN: {pattern}")
     return pattern
-
-
 def _load_metadata(repo: Path) -> tuple[dict[str, object], dict[str, object], dict[str, object], str]:
     def load(relative: str) -> dict[str, object]:
         try:
             return load_strict_json(repo / relative)
         except (OSError, TypeError, ValueError) as error:
             raise ConfigurationError(f"INVALID_JSON: {relative}: {error}") from error
-
     try:
         policy = load(".governance/policy.json")
         baseline = load(".governance/baseline.json")
@@ -153,15 +112,12 @@ def _load_metadata(repo: Path) -> tuple[dict[str, object], dict[str, object], di
         cards = [(path, load(path.relative_to(repo).as_posix())) for path in task_paths]
     except OSError as error:
         raise ConfigurationError(f"INVALID_JSON: metadata: {error}") from error
-
     active = [(path, card) for path, card in cards if card.get("status") == "active"]
     if len(active) != 1:
         raise ConfigurationError(f"ACTIVE_TASKS: expected 1, found {len(active)}")
     path, card = active[0]
     _validate_metadata(policy, baseline, card)
     return policy, baseline, card, path.relative_to(repo).as_posix()
-
-
 def _validate_metadata(
     policy: Mapping[str, object], baseline: Mapping[str, object], card: Mapping[str, object]
 ) -> None:
@@ -257,8 +213,6 @@ def _validate_metadata(
         ceiling = _mapping(_mapping(levels[card["level"]], "level").get("budgets", {}), "level budgets").get(budget_name, 0)
         if card["level"] != "L3" and budget > int(ceiling):
             raise ConfigurationError(f"BUDGET_CEILING: {budget_name}")
-
-
 def _classify(policy: Mapping[str, object], path: str) -> str:
     classification = _mapping(policy["path_classification"], "path_classification")
     for kind in ("tests", "documentation"):
@@ -266,13 +220,9 @@ def _classify(policy: Mapping[str, object], path: str) -> str:
         if any(fnmatch.fnmatchcase(path, str(pattern)) for pattern in patterns):
             return kind
     return "production"
-
-
 def _is_allowed(card: Mapping[str, object], path: str) -> bool:
     patterns = [*_list(card["allowed_paths"], "allowed_paths"), *_list(card["conditional_allowed_paths"], "conditional_allowed_paths")]
     return any(fnmatch.fnmatchcase(path, str(pattern)) for pattern in patterns)
-
-
 def _direct_dependencies(repo: Path, revision: str, path: str) -> set[str]:
     if not _git_exists(repo, f"{revision}:{path}"):
         return set()
@@ -297,8 +247,6 @@ def _direct_dependencies(repo: Path, revision: str, path: str) -> set[str]:
         return set(dependencies if isinstance(dependencies, dict) else ()) | set(dev_dependencies if isinstance(dev_dependencies, dict) else ())
     except (json.JSONDecodeError, tomllib.TOMLDecodeError) as error:
         raise ConfigurationError(f"DEPENDENCY_PARSE: {path}") from error
-
-
 def _l3_triggers(repo: Path, base: str, head: str, paths: Sequence[str]) -> set[str]:
     triggers: set[str] = set()
     for path in paths:
@@ -316,8 +264,6 @@ def _l3_triggers(repo: Path, base: str, head: str, paths: Sequence[str]) -> set[
         if any(word in lowered for word in ("external", "webhook", "transport", "network", "io_")):
             triggers.add("network_boundary")
     return triggers
-
-
 def _approval_status(
     repo: Path, card: Mapping[str, object], triggers: set[str], trigger_paths: Sequence[str]
 ) -> tuple[bool, str | None]:
@@ -359,10 +305,7 @@ def _approval_status(
             return True, approval_id
         return False, approval_id
     return False, None
-
-
 def check(repo: Path, base: str, head: str) -> CheckResult:
-    """Return all local governance findings for the requested Git change."""
     repo = repo.resolve()
     try:
         ancestor = subprocess.run(
@@ -373,7 +316,6 @@ def check(repo: Path, base: str, head: str) -> CheckResult:
         raise ConfigurationError("GIT_REPOSITORY: unavailable") from error
     if ancestor.returncode != 0:
         raise ConfigurationError(f"BASE_NOT_ANCESTOR: {base}")
-
     policy, baseline, card, _card_path = _load_metadata(repo)
     if card["base_commit"] != base:
         raise ConfigurationError(f"TASK_BASE_MISMATCH: {card['base_commit']}")
@@ -392,7 +334,6 @@ def check(repo: Path, base: str, head: str) -> CheckResult:
         raise ConfigurationError("BOOTSTRAP_REUSED: policy exists at base")
     if card["bootstrap"] is not True and (not base_has_policy or not base_has_baseline):
         raise ConfigurationError("BOOTSTRAP_REQUIRED: policy absent at base")
-
     diff = collect_diff(repo, base, head)
     paths = [str(path) for path in diff["paths"]]
     additions = _mapping(diff["additions"], "additions")
@@ -403,7 +344,6 @@ def check(repo: Path, base: str, head: str) -> CheckResult:
             errors.append(f"FORBIDDEN_ARTIFACT: {path}")
         if not _is_allowed(card, path):
             errors.append(f"SCOPE_PATH: {path}")
-
     non_governance = [path for path in paths if not path.startswith(GOVERNANCE_PREFIX)]
     metrics = {"files": len(non_governance), "production_lines": 0, "test_lines": 0, "documentation_lines": 0}
     for path in non_governance:
@@ -414,7 +354,6 @@ def check(repo: Path, base: str, head: str) -> CheckResult:
         metrics[metric_key] += added
         if added > int(_mapping(policy["limits"], "limits")["single_file_lines"]):
             warnings.append(f"WARNING_SINGLE_FILE_LINES: {path} has {added} lines")
-
     budgets = _mapping(card["budgets"], "budgets")
     for key in ("files", "production_lines", "test_lines", "documentation_lines"):
         if metrics[key] > int(budgets[key]):
@@ -422,7 +361,6 @@ def check(repo: Path, base: str, head: str) -> CheckResult:
     ratio = int(_mapping(policy["limits"], "limits")["test_to_production_ratio"])
     if metrics["test_lines"] > metrics["production_lines"] * ratio:
         warnings.append(f"WARNING_TEST_RATIO: {metrics['test_lines']} > {metrics['production_lines'] * ratio}")
-
     limits = _mapping(policy["limits"], "limits")
     if int(card["review_round"]) > int(limits["max_review_round"]):
         raise ConfigurationError(f"REVIEW_ROUND: {card['review_round']} > {limits['max_review_round']}")
@@ -436,7 +374,6 @@ def check(repo: Path, base: str, head: str) -> CheckResult:
             and str(debt_map["id"]) not in declared_debts
         ):
             errors.append(f"HISTORICAL_DEBT: {debt_map['id']} requires disposition")
-
     triggers = _l3_triggers(repo, base, head, paths)
     trigger_paths = [
         path for path in paths
@@ -451,8 +388,6 @@ def check(repo: Path, base: str, head: str) -> CheckResult:
     if not errors and needs_l3 and approval_matches:
         warnings.append(str(_mapping(policy["approval"], "approval")["local_status"]))
     return CheckResult(tuple(errors), tuple(warnings), metrics)
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", required=True, type=Path)
@@ -471,7 +406,5 @@ def main(argv: Sequence[str] | None = None) -> int:
     if "WAITING_FOR_OWNER_VERIFICATION" in result.warnings and not args.platform_owner_enforced:
         return 4
     return 0
-
-
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -1,5 +1,3 @@
-"""Repository contracts for the bootstrap governance metadata."""
-
 from __future__ import annotations
 
 import json
@@ -216,9 +214,16 @@ def test_metadata_contract() -> None:
     gate_ids = set(policy["gates"])
     debt_ids = {entry["id"] for entry in baseline["historical_debt"]}
     assert set(card["gate_ids"]) <= gate_ids
+    assert policy["gates"]["web-focused"]["steps"] == ["npm", "run", "test", "--", "--run"]
+    assert policy["gates"]["web-static"]["steps"] == ["npm", "run", "typecheck"]
+    assert policy["gates"]["governance"]["steps"] == ["uv", "run", "pytest", "-q", "tests/unit/governance"]
+    assert policy["gates"]["governance-static"]["steps"] == [
+        "uv", "run", "ruff", "check", "../scripts/governance_check.py",
+        "../scripts/verify_changed.py", "tests/unit/governance",
+    ]
+    assert {"governance-static", "web-focused", "web-static"} <= set(card["gate_ids"])
     assert set(card["historical_debt_ids"]) <= debt_ids
     assert len([item for item in cards if item["status"] == "active"]) == 1
-
 
 def test_metadata_selects_bootstrap_card_by_task_id() -> None:
     bootstrap = _load(".governance/tasks/development-governance-guardrails.json")
@@ -749,7 +754,6 @@ def test_each_direct_dependency_source_triggers_l3(tmp_path: Path, path: str, co
 
 
 def test_prepared_governance_workflow_runs_contract_before_proportional_verification() -> None:
-    """A ready PR must use a candidate card only after its contract check succeeds."""
     workflow = (REPO / ".github/workflows/governance.yml").read_text(encoding="utf-8")
 
     assert "actions/checkout@v4" in workflow
@@ -773,7 +777,6 @@ def test_prepared_governance_workflow_runs_contract_before_proportional_verifica
 
 
 def test_governance_workflow_runs_unit_suite_from_server_directory() -> None:
-    """The governance unit path is relative to the backend project, not the repository root."""
     workflow = (REPO / ".github/workflows/governance.yml").read_text(encoding="utf-8")
 
     unit_step = workflow[workflow.index("- name: Run governance unit tests"):]
@@ -782,7 +785,6 @@ def test_governance_workflow_runs_unit_suite_from_server_directory() -> None:
 
 
 def test_governance_workflow_reads_base_from_the_active_task_card() -> None:
-    """Push verification cannot rely on GitHub's zero-valued new-branch before SHA."""
     workflow = (REPO / ".github/workflows/governance.yml").read_text(encoding="utf-8")
 
     assert "id: active_task" in workflow
@@ -793,7 +795,6 @@ def test_governance_workflow_reads_base_from_the_active_task_card() -> None:
 
 
 def test_governance_workflow_uses_pr_head_not_synthetic_merge_sha() -> None:
-    """A pull request check must compare the task card against the contributor's actual head."""
     workflow = (REPO / ".github/workflows/governance.yml").read_text(encoding="utf-8")
 
     head = "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
@@ -801,7 +802,6 @@ def test_governance_workflow_uses_pr_head_not_synthetic_merge_sha() -> None:
 
 
 def test_governance_runbook_keeps_remote_enforcement_unconfigured_without_identity() -> None:
-    """Unverified ownership cannot be represented by a placeholder CODEOWNERS file."""
     runbook = (REPO / "docs/runbooks/development-governance.md").read_text(encoding="utf-8")
 
     assert "REMOTE_ENFORCEMENT=NOT_CONFIGURED" in runbook

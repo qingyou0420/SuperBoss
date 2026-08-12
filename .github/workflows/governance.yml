@@ -1,16 +1,7 @@
 name: governance
-
-on:
-  pull_request:
-  push:
-
-permissions:
-  contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
+on: [pull_request, push]
+permissions: {contents: read}
+concurrency: {group: "${{ github.workflow }}-${{ github.ref }}", cancel-in-progress: true}
 jobs:
   governance:
     runs-on: ubuntu-latest
@@ -40,7 +31,6 @@ jobs:
           python - <<'PY' >> "$GITHUB_OUTPUT"
           import json
           from pathlib import Path
-
           active = []
           for path in Path(".governance/tasks").glob("*.json"):
               card = json.loads(path.read_text(encoding="utf-8"))

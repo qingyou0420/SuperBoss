@@ -1,5 +1,3 @@
-"""Behavioral tests for proportional verification-gate selection."""
-
 from __future__ import annotations
 
 import hashlib
@@ -34,7 +32,7 @@ def _git(repo: Path, *args: str) -> str:
 def _policy(log: Path) -> dict[str, object]:
     gates: dict[str, object] = {}
     for gate_id in (
-        "governance", "web-focused", "web-static", "backend-full", "web-full",
+        "governance", "governance-static", "web-focused", "web-static", "backend-full", "web-full",
         "connector-full", "compose", "e2e-contract", "windows-packaging",
     ):
         gates[gate_id] = {
@@ -65,7 +63,7 @@ def _card(**overrides: object) -> dict[str, object]:
         "candidate": True,
         "review_round": 1,
         "gate_ids": [
-            "governance", "web-focused", "web-static", "backend-full", "web-full",
+            "governance", "governance-static", "web-focused", "web-static", "backend-full", "web-full",
             "connector-full", "compose", "e2e-contract", "windows-packaging",
         ],
     }
@@ -86,12 +84,15 @@ def _repo(tmp_path: Path) -> Path:
 
 
 def test_selects_only_the_proportionate_declared_gates(tmp_path: Path) -> None:
-    """A routing regression must not run unrelated boundary or platform gates."""
     module = _module()
     policy = _policy(tmp_path / "gates.log")
     card = _card()
 
     assert module.selected_gates(policy, card, ("docs/runbook.md",), "affected") == ("governance",)
+    assert module.selected_gates(policy, card, (
+        ".governance/policy.json", "scripts/verify_changed.py",
+        "server/tests/unit/governance/test_verify_changed.py", ".github/workflows/governance.yml",
+    ), "affected") == ("governance", "governance-static")
     assert module.selected_gates(policy, card, ("web/src/app.ts",), "affected") == (
         "web-focused", "web-static",
     )
@@ -102,7 +103,6 @@ def test_selects_only_the_proportionate_declared_gates(tmp_path: Path) -> None:
 
 
 def test_rejects_web_changes_when_only_a_full_web_gate_is_declared(tmp_path: Path) -> None:
-    """A Web routing regression must not silently expand an L2 run to the full suite."""
     module = _module()
     policy = _policy(tmp_path / "gates.log")
     policy["gates"] = {"web": policy["gates"]["web-full"]}
@@ -112,13 +112,14 @@ def test_rejects_web_changes_when_only_a_full_web_gate_is_declared(tmp_path: Pat
 
 
 def test_reuses_green_evidence_without_capturing_command_output(tmp_path: Path) -> None:
-    """A cache regression must not execute an already-green identical gate."""
     module = _module()
     repo = _repo(tmp_path)
     log = tmp_path / "gates.log"
     policy = _policy(log)
     card = _card()
 
+    missing = module.verify(repo, policy, card, ("web/src/app.ts",), "affected", "c" * 40, "d" * 64, dry_run=True)
+    assert [(r.status, r.evidence_key) for r in missing] == [("MISSING", module.evidence_key("c" * 40, "d" * 64, gate)) for gate in ("web-focused", "web-static")] and not log.exists()
     first = module.verify(repo, policy, card, ("web/src/app.ts",), "affected", "a" * 40, "b" * 64)
     second = module.verify(repo, policy, card, ("web/src/app.ts",), "affected", "a" * 40, "b" * 64)
 
@@ -130,9 +131,7 @@ def test_reuses_green_evidence_without_capturing_command_output(tmp_path: Path) 
         "gate_id", "tree_sha", "card_sha", "argv_digest", "timestamp", "duration_ms", "returncode", "status"
     } for path in evidence_dir.glob("*.json"))
 
-
 def test_does_not_reuse_evidence_for_a_changed_policy_argv(tmp_path: Path) -> None:
-    """A policy-command change must invalidate otherwise matching green evidence."""
     module = _module()
     repo = _repo(tmp_path)
     log = tmp_path / "gates.log"
@@ -145,9 +144,7 @@ def test_does_not_reuse_evidence_for_a_changed_policy_argv(tmp_path: Path) -> No
 
     assert rerun[0].status == "PASS"
 
-
 def test_evidence_key_binds_tree_card_and_gate() -> None:
-    """Changing any identity input must prevent a stale green result from matching."""
     module = _module()
     key = module.evidence_key(tree_sha="a" * 40, card_sha="b" * 64, gate="web-full")
 
@@ -157,7 +154,6 @@ def test_evidence_key_binds_tree_card_and_gate() -> None:
 
 
 def test_rejects_card_commands_and_ineligible_candidate_runs(tmp_path: Path) -> None:
-    """A task card cannot inject commands or bypass candidate review controls."""
     module = _module()
     policy = _policy(tmp_path / "gates.log")
 
@@ -170,7 +166,6 @@ def test_rejects_card_commands_and_ineligible_candidate_runs(tmp_path: Path) -> 
 
 
 def test_timeout_does_not_create_green_evidence(tmp_path: Path) -> None:
-    """A timed-out command must remain eligible for a future rerun."""
     module = _module()
     repo = _repo(tmp_path)
     gate = {
