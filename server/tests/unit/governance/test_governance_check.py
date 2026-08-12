@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import sys
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -266,3 +268,305 @@ def test_metadata_rejects_unknown_nested_fields(
 
     with pytest.raises(ValueError, match="unknown field: unexpected"):
         _validate_document(name, document)
+
+
+CHECKER = REPO / "scripts/governance_check.py"
+
+
+def _write_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=repo, check=True, text=True, capture_output=True
+    ).stdout.strip()
+
+
+def _card(**overrides: object) -> dict[str, object]:
+    card: dict[str, object] = {
+        "schema_version": 1,
+        "task_id": "temporary-task",
+        "status": "active",
+        "base_commit": "0" * 40,
+        "bootstrap": False,
+        "candidate": False,
+        "review_round": 1,
+        "level": "L1",
+        "problem": "Exercise the checker.",
+        "non_goals": [],
+        "threat_model": {
+            "assets": [], "attackers": [], "capabilities": [], "entry_points": [],
+            "excluded_capabilities": [],
+        },
+        "budgets": {
+            "files": 8, "production_lines": 250, "test_lines": 500,
+            "documentation_lines": 300, "migrations": 0, "dependencies": 0,
+            "services": 0, "containers": 0, "routes": 0, "auth_sources": 0,
+            "persistent_state": 0, "network_boundaries": 0,
+        },
+        "allowed_paths": ["allowed/**", "server/tests/**", ".governance/**"],
+        "conditional_allowed_paths": [],
+        "gate_ids": ["focused"],
+        "historical_debt_ids": [],
+        "approval_ids": [],
+        "success_criteria": [{"id": "SC-1", "description": "Works."}],
+        "stop_conditions": [],
+    }
+    card.update(overrides)
+    return card
+
+
+def _policy() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "levels": {"L1": {"budgets": _card()["budgets"]}, "L3": {"requires_approval": True}},
+        "path_classification": {
+            "tests": ["server/tests/**"], "documentation": ["docs/**", "**/*.md"],
+            "unknown": "production",
+        },
+        "gates": {"focused": {"cwd": ".", "steps": ["true"], "kind": "focused"}},
+        "limits": {
+            "single_file_lines": 800, "test_to_production_ratio": 2,
+            "max_review_round": 2, "max_active_tasks": 1,
+        },
+        "forbidden_artifacts": ["**/*.diff", "**/*.patch"],
+        "approval": {
+            "local_status": "WAITING_FOR_OWNER_VERIFICATION",
+            "platform_owner_enforced_only": True,
+        },
+    }
+
+
+def _seed_repo(tmp_path: Path, *, bootstrap: bool = False) -> tuple[Path, str]:
+    repo = tmp_path / "repository"
+    repo.mkdir(parents=True)
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "tests@example.invalid")
+    _git(repo, "config", "user.name", "Governance tests")
+    _write_json(repo / ".governance/policy.json", _policy())
+    _write_json(repo / ".governance/baseline.json", {
+        "schema_version": 1, "baseline_commit": "0" * 40, "baseline_tree": "0" * 40,
+        "historical_debt": [{"id": "HD-1", "path": "legacy", "description": "old"}],
+    })
+    _write_json(repo / ".governance/tasks/temporary-task.json", _card(bootstrap=bootstrap))
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "base")
+    return repo, _git(repo, "rev-parse", "HEAD")
+
+
+def _change(repo: Path, relative_path: str, content: str = "changed\n") -> None:
+    path = repo / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def _run_check(repo: Path, base: str, *extra: str) -> subprocess.CompletedProcess[str]:
+    if _git(repo, "status", "--porcelain"):
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", "change")
+    return subprocess.run(
+        [sys.executable, str(CHECKER), "--repo", str(repo), "--base", base, "--head", "HEAD", *extra],
+        text=True, capture_output=True, check=False,
+    )
+
+
+def _payload(result: subprocess.CompletedProcess[str]) -> dict[str, object]:
+    return json.loads(result.stdout)
+
+
+def test_scope_rejects_path_outside_declared_contract(tmp_path: Path) -> None:
+    repo, base = _seed_repo(tmp_path)
+    _change(repo, "outside.txt")
+
+    result = _run_check(repo, base)
+
+    assert result.returncode == 2
+    assert _payload(result)["errors"] == ["SCOPE_PATH: outside.txt"]
+
+
+def test_requires_one_active_card_and_an_ancestor_base(tmp_path: Path) -> None:
+    repo, base = _seed_repo(tmp_path)
+    _write_json(repo / ".governance/tasks/second.json", _card(task_id="second"))
+
+    two_cards = _run_check(repo, base)
+
+    assert two_cards.returncode == 3
+    assert _payload(two_cards)["errors"] == ["ACTIVE_TASKS: expected 1, found 2"]
+
+    repo, _base = _seed_repo(tmp_path / "ancestor")
+    non_ancestor = _run_check(repo, "0" * 40)
+    assert non_ancestor.returncode == 3
+    assert _payload(non_ancestor)["errors"] == ["BASE_NOT_ANCESTOR: " + "0" * 40]
+
+
+def test_budget_reports_metrics_and_proportion_warnings(tmp_path: Path) -> None:
+    repo, base = _seed_repo(tmp_path)
+    _change(repo, "allowed/huge.py", "x\n" * 801)
+    _change(repo, "server/tests/test_small.py", "x\n")
+    card = _card(budgets={**_card()["budgets"], "production_lines": 700, "test_lines": 1})
+    _write_json(repo / ".governance/tasks/temporary-task.json", card)
+
+    result = _run_check(repo, base)
+    payload = _payload(result)
+
+    assert result.returncode == 2
+    assert payload["metrics"] == {
+        "files": 2, "production_lines": 801, "test_lines": 1, "documentation_lines": 0,
+    }
+    assert "BUDGET_PRODUCTION_LINES: 801 > 700" in payload["errors"]
+    assert "WARNING_SINGLE_FILE_LINES: allowed/huge.py has 801 lines" in payload["warnings"]
+    assert "WARNING_TEST_RATIO: 1 < 1602" in payload["warnings"]
+
+
+def test_file_budget_overflow_is_a_policy_failure(tmp_path: Path) -> None:
+    repo, base = _seed_repo(tmp_path)
+    _write_json(repo / ".governance/tasks/temporary-task.json", _card(
+        budgets={**_card()["budgets"], "files": 0}
+    ))
+    _change(repo, "allowed/one.py")
+
+    result = _run_check(repo, base)
+
+    assert result.returncode == 2
+    assert "BUDGET_FILES: 1 > 0" in _payload(result)["errors"]
+
+
+@pytest.mark.parametrize(
+    ("path", "error"),
+    [
+        ("server/alembic/versions/a.py", "L3_TRIGGER: migration"),
+        ("docker-compose.yml", "L3_TRIGGER: deployment_boundary"),
+        ("server/auth.py", "L3_TRIGGER: auth_source"),
+    ],
+)
+def test_boundary_changes_require_l3_approval(tmp_path: Path, path: str, error: str) -> None:
+    repo, base = _seed_repo(tmp_path)
+    card = _card(allowed_paths=["**"])
+    _write_json(repo / ".governance/tasks/temporary-task.json", card)
+    _change(repo, path)
+
+    result = _run_check(repo, base)
+
+    assert result.returncode == 2
+    assert error in _payload(result)["errors"]
+
+
+def test_dependency_and_debt_changes_need_declarations(tmp_path: Path) -> None:
+    repo, base = _seed_repo(tmp_path)
+    card = _card(allowed_paths=["**"])
+    _write_json(repo / ".governance/tasks/temporary-task.json", card)
+    _change(repo, "package.json", json.dumps({"dependencies": {"new-package": "1.0.0"}}))
+    _change(repo, "legacy/file.py")
+
+    result = _run_check(repo, base)
+
+    assert result.returncode == 2
+    assert "L3_TRIGGER: dependency" in _payload(result)["errors"]
+    assert "HISTORICAL_DEBT: HD-1 requires disposition" in _payload(result)["errors"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("review_round", 3, "REVIEW_ROUND: 3 > 2"),
+        ("gate_ids", ["unknown"], "UNKNOWN_GATE: unknown"),
+        ("allowed_paths", ["/absolute"], "INVALID_PATH_PATTERN: /absolute"),
+        ("allowed_paths", ["../parent"], "INVALID_PATH_PATTERN: ../parent"),
+        ("allowed_paths", ["*"], "INVALID_PATH_PATTERN: *"),
+    ],
+)
+def test_configuration_boundaries_are_rejected(
+    tmp_path: Path, field: str, value: object, error: str
+) -> None:
+    repo, base = _seed_repo(tmp_path)
+    _write_json(repo / ".governance/tasks/temporary-task.json", _card(**{field: value}))
+
+    result = _run_check(repo, base)
+
+    assert result.returncode == 3
+    assert _payload(result)["errors"] == [error]
+
+
+def test_rejects_duplicate_metadata_and_forbidden_artifact(tmp_path: Path) -> None:
+    repo, base = _seed_repo(tmp_path)
+    _change(repo, ".governance/tasks/temporary-task.json", '{"task_id":"one","task_id":"two"}')
+
+    duplicate = _run_check(repo, base)
+
+    assert duplicate.returncode == 3
+    assert _payload(duplicate)["errors"] == [
+        "INVALID_JSON: .governance/tasks/temporary-task.json: duplicate JSON key: task_id"
+    ]
+
+    repo, base = _seed_repo(tmp_path / "artifact")
+    _change(repo, "allowed/change.diff")
+    artifact = _run_check(repo, base)
+    assert artifact.returncode == 2
+    assert _payload(artifact)["errors"] == ["FORBIDDEN_ARTIFACT: allowed/change.diff"]
+
+
+def test_bootstrap_only_passes_when_policy_was_absent_at_base(tmp_path: Path) -> None:
+    repo, base = _seed_repo(tmp_path, bootstrap=True)
+    result = _run_check(repo, base)
+    assert result.returncode == 3
+    assert _payload(result)["errors"] == ["BOOTSTRAP_REUSED: policy exists at base"]
+
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    _git(fresh, "init")
+    _git(fresh, "config", "user.email", "tests@example.invalid")
+    _git(fresh, "config", "user.name", "Governance tests")
+    _change(fresh, "README.md", "base\n")
+    _git(fresh, "add", ".")
+    _git(fresh, "commit", "-m", "empty base")
+    empty_base = _git(fresh, "rev-parse", "HEAD")
+    _write_json(fresh / ".governance/policy.json", _policy())
+    _write_json(fresh / ".governance/baseline.json", {
+        "schema_version": 1, "baseline_commit": "0" * 40, "baseline_tree": "0" * 40,
+        "historical_debt": [],
+    })
+    _write_json(fresh / ".governance/tasks/temporary-task.json", _card(bootstrap=True))
+    assert _run_check(fresh, empty_base).returncode == 0
+
+
+def test_untouched_historical_debt_does_not_block_an_unrelated_task(tmp_path: Path) -> None:
+    repo, base = _seed_repo(tmp_path)
+    _change(repo, "allowed/unrelated.py")
+
+    result = _run_check(repo, base)
+
+    assert result.returncode == 0
+    assert "HISTORICAL_DEBT: HD-1 requires disposition" not in _payload(result)["errors"]
+
+
+def test_approval_is_contract_bound_and_waits_for_platform_owner(tmp_path: Path) -> None:
+    repo, base = _seed_repo(tmp_path)
+    card = _card(level="L3", allowed_paths=["**"], approval_ids=["approval-1"])
+    _write_json(repo / ".governance/tasks/temporary-task.json", card)
+    _change(repo, "server/security.py")
+    _write_json(repo / ".governance/approvals/approval-1.json", {
+        "task_id": "temporary-task", "contract_sha256": "wrong", "approved_by": "untrusted",
+        "rules": ["L3"], "reason": "test", "paths": ["server/security.py"], "expires": "merge",
+    })
+
+    mismatch = _run_check(repo, base)
+    assert mismatch.returncode == 2
+    assert "APPROVAL_MISMATCH: approval-1" in _payload(mismatch)["errors"]
+
+    from importlib.util import module_from_spec, spec_from_file_location
+
+    spec = spec_from_file_location("governance_check", CHECKER)
+    assert spec and spec.loader
+    module = module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    approval = json.loads((repo / ".governance/approvals/approval-1.json").read_text())
+    approval["contract_sha256"] = module.canonical_sha256(module.immutable_contract(card))
+    _write_json(repo / ".governance/approvals/approval-1.json", approval)
+
+    waiting = _run_check(repo, base)
+    assert waiting.returncode == 4
+    assert "WAITING_FOR_OWNER_VERIFICATION" in _payload(waiting)["warnings"]
+    assert _run_check(repo, base, "--platform-owner-enforced").returncode == 0
