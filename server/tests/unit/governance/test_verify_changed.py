@@ -32,7 +32,7 @@ def _git(repo: Path, *args: str) -> str:
 def _policy(log: Path) -> dict[str, object]:
     gates: dict[str, object] = {}
     for gate_id in (
-        "governance", "governance-static", "web-focused", "web-static", "backend-full", "web-full",
+        "governance", "governance-static", "web-focused", "web-lint", "web-static", "backend-full", "web-full",
         "connector-full", "compose", "e2e-contract", "windows-packaging",
     ):
         gates[gate_id] = {
@@ -63,7 +63,7 @@ def _card(**overrides: object) -> dict[str, object]:
         "candidate": True,
         "review_round": 1,
         "gate_ids": [
-            "governance", "governance-static", "web-focused", "web-static", "backend-full", "web-full",
+            "governance", "governance-static", "web-focused", "web-lint", "web-static", "backend-full", "web-full",
             "connector-full", "compose", "e2e-contract", "windows-packaging",
         ],
     }
@@ -94,7 +94,7 @@ def test_selects_only_the_proportionate_declared_gates(tmp_path: Path) -> None:
         "server/tests/unit/governance/test_verify_changed.py", ".github/workflows/governance.yml",
     ), "affected") == ("governance", "governance-static")
     assert module.selected_gates(policy, card, ("web/src/app.ts",), "affected") == (
-        "web-focused", "web-static",
+        "web-focused", "web-lint", "web-static",
     )
     assert module.selected_gates(policy, card, ("docker-compose.yml",), "affected") == ("compose",)
     assert module.selected_gates(policy, card, ("server/api.py",), "candidate") == (
@@ -119,13 +119,13 @@ def test_reuses_green_evidence_without_capturing_command_output(tmp_path: Path) 
     card = _card()
 
     missing = module.verify(repo, policy, card, ("web/src/app.ts",), "affected", "c" * 40, "d" * 64, dry_run=True)
-    assert [(r.status, r.evidence_key) for r in missing] == [("MISSING", module.evidence_key("c" * 40, "d" * 64, gate)) for gate in ("web-focused", "web-static")] and not log.exists()
+    assert [(r.status, r.evidence_key) for r in missing] == [("MISSING", module.evidence_key("c" * 40, "d" * 64, gate)) for gate in ("web-focused", "web-lint", "web-static")] and not log.exists()
     first = module.verify(repo, policy, card, ("web/src/app.ts",), "affected", "a" * 40, "b" * 64)
     second = module.verify(repo, policy, card, ("web/src/app.ts",), "affected", "a" * 40, "b" * 64)
 
-    assert [result.status for result in first] == ["PASS", "PASS"]
-    assert [result.status for result in second] == ["REUSED", "REUSED"]
-    assert log.read_text(encoding="utf-8").splitlines() == ["web-focused", "web-static"]
+    assert [result.status for result in first] == ["PASS", "PASS", "PASS"]
+    assert [result.status for result in second] == ["REUSED", "REUSED", "REUSED"]
+    assert log.read_text(encoding="utf-8").splitlines() == ["web-focused", "web-lint", "web-static"]
     evidence_dir = repo / _git(repo, "rev-parse", "--git-path", "governance-evidence")
     assert all(set(json.loads(path.read_text(encoding="utf-8"))) == {
         "gate_id", "tree_sha", "card_sha", "argv_digest", "timestamp", "duration_ms", "returncode", "status"
@@ -153,6 +153,17 @@ def test_evidence_key_binds_tree_card_and_gate() -> None:
     assert key != module.evidence_key("a" * 40, "d" * 64, "web-full")
 
 
+def test_web_focused_appends_only_git_derived_related_paths(tmp_path: Path) -> None:
+    module = _module()
+    repo = _repo(tmp_path)
+    log = tmp_path / "related.log"
+    policy = _policy(tmp_path / "other.log")
+    policy["gates"]["web-focused"] = {"cwd": ".", "steps": [sys.executable, "-c", "import sys; from pathlib import Path; Path(sys.argv[1]).write_text('|'.join(sys.argv[2:]))", str(log)], "timeout_seconds": 10, "kind": "web"}
+    result = module.verify(repo, policy, _card(), ("web/src/app.ts", "web/--help", "server/api.py"), "affected", "a" * 40, "b" * 64)
+    assert result[0].status == "PASS"
+    assert log.read_text() == "./src/app.ts|./--help"
+
+
 def test_rejects_card_commands_and_ineligible_candidate_runs(tmp_path: Path) -> None:
     module = _module()
     policy = _policy(tmp_path / "gates.log")
@@ -163,6 +174,8 @@ def test_rejects_card_commands_and_ineligible_candidate_runs(tmp_path: Path) -> 
         module.selected_gates(policy, _card(candidate=False), (), "candidate")
     with pytest.raises(module.VerificationError, match="review round"):
         module.selected_gates(policy, _card(review_round=3), (), "candidate")
+    with pytest.raises(module.VerificationError, match="backend-full, web-full, connector-full"):
+        module.selected_gates(policy, _card(gate_ids=["backend-full", "web-full"]), (), "candidate")
 
 
 def test_timeout_does_not_create_green_evidence(tmp_path: Path) -> None:
@@ -175,11 +188,11 @@ def test_timeout_does_not_create_green_evidence(tmp_path: Path) -> None:
         "kind": "web-focused",
     }
     policy = _policy(tmp_path / "gates.log")
-    policy["gates"] = {"web-focused": gate}
-    card = _card(gate_ids=["web-focused"])
+    policy["gates"]["web-focused"] = gate
+    card = _card()
 
     result = module.verify(repo, policy, card, ("web/src/app.ts",), "affected", "a" * 40, "b" * 64)
 
     assert result[0].status == "TIMEOUT"
     evidence_dir = repo / _git(repo, "rev-parse", "--git-path", "governance-evidence")
-    assert not list(evidence_dir.glob("*.json"))
+    assert all(json.loads(path.read_text())["gate_id"] != "web-focused" for path in evidence_dir.glob("*.json"))

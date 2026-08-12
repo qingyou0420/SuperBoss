@@ -13,8 +13,8 @@
   "budgets": {"files": 20, "production_lines": 700, "test_lines": 1000, "documentation_lines": 300, "migrations": 0, "dependencies": 0, "services": 0, "containers": 0, "routes": 0, "auth_sources": 0, "persistent_state": 0, "network_boundaries": 0},
   "allowed_paths": [".governance/policy.json", ".governance/baseline.json", ".governance/task-card.schema.json", ".governance/tasks/development-governance-guardrails.json", "scripts/governance_check.py", "scripts/verify_changed.py", "server/tests/unit/governance/test_governance_check.py", "server/tests/unit/governance/test_verify_changed.py", ".github/workflows/governance.yml", "docs/runbooks/development-governance.md", "README.md"],
   "conditional_allowed_paths": [".github/CODEOWNERS"],
-  "gate_ids": ["governance", "governance-static", "backend", "web-focused", "web-static", "web", "connector", "e2e-contract", "compose", "windows-packaging"],
-  "historical_debt_ids": ["HD-1", "HD-2", "HD-3", "HD-4", "HD-5", "HD-6", "HD-7", "HD-8"],
+  "gate_ids": ["governance", "governance-static", "backend", "backend-full", "web-focused", "web-lint", "web-static", "web-full", "connector", "connector-full", "e2e-contract", "compose", "windows-packaging"],
+  "historical_debts": [],
   "approval_ids": [],
   "success_criteria": [
     {"id": "SC-1", "description": "Paths outside the declared task scope are rejected."},

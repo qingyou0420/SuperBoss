@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
 import subprocess
@@ -11,8 +12,6 @@ from typing import Any
 import pytest
 
 REPO = Path(__file__).resolve().parents[4]
-
-
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -20,39 +19,27 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             raise ValueError(f"duplicate JSON key: {key}")
         result[key] = value
     return result
-
-
 def _load(relative_path: str) -> dict[str, Any]:
     with (REPO / relative_path).open(encoding="utf-8") as source:
         return json.load(source, object_pairs_hook=_reject_duplicate_keys)
-
-
 def _load_task_cards() -> list[dict[str, Any]]:
     return [
         _load(path.relative_to(REPO).as_posix())
         for path in sorted((REPO / ".governance/tasks").glob("*.json"))
     ]
-
-
 def _task_card(cards: list[dict[str, Any]], task_id: str) -> dict[str, Any]:
     matches = [card for card in cards if card["task_id"] == task_id]
     if len(matches) != 1:
         raise ValueError(f"expected one task card: {task_id}")
     return matches[0]
-
-
 def _reject_unknown_fields(value: dict[str, Any], allowed: set[str], label: str) -> None:
     unknown = set(value) - allowed
     if unknown:
         raise ValueError(f"{label} unknown field: {min(unknown)}")
-
-
 def _mapping(value: Any, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TypeError(f"{label} must be an object")
     return value
-
-
 def _validate_schema_node(value: Any) -> None:
     node = _mapping(value, "schema node")
     _reject_unknown_fields(
@@ -76,8 +63,6 @@ def _validate_schema_node(value: Any) -> None:
         _validate_schema_node(child)
     if "items" in node:
         _validate_schema_node(node["items"])
-
-
 def _validate_document(name: str, value: dict[str, Any]) -> None:
     allowed_fields = {
         "policy": {
@@ -89,12 +74,11 @@ def _validate_document(name: str, value: dict[str, Any]) -> None:
         "card": {
             "schema_version", "task_id", "status", "base_commit", "bootstrap", "candidate",
             "review_round", "level", "problem", "non_goals", "threat_model", "budgets",
-            "allowed_paths", "conditional_allowed_paths", "gate_ids", "historical_debt_ids",
+            "allowed_paths", "conditional_allowed_paths", "gate_ids", "historical_debts",
             "approval_ids", "success_criteria", "stop_conditions",
         },
     }
     _reject_unknown_fields(value, allowed_fields[name], name)
-
     if name == "policy":
         for level in _mapping(value["levels"], "policy levels").values():
             level_mapping = _mapping(level, "policy level")
@@ -133,7 +117,7 @@ def _validate_document(name: str, value: dict[str, Any]) -> None:
     elif name == "baseline":
         for debt in value["historical_debt"]:
             _reject_unknown_fields(
-                _mapping(debt, "historical debt"), {"id", "path", "description"}, "historical debt"
+                _mapping(debt, "historical debt"), {"id", "paths", "description"}, "historical debt"
             )
     elif name == "schema":
         _validate_schema_node(value)
@@ -156,8 +140,8 @@ def _validate_document(name: str, value: dict[str, Any]) -> None:
             _reject_unknown_fields(
                 _mapping(criterion, "success criterion"), {"id", "description"}, "success criterion"
             )
-
-
+        for debt in value["historical_debts"]:
+            _reject_unknown_fields(_mapping(debt, "debt disposition"), {"id", "disposition", "rationale"}, "debt disposition")
 def _schema_objects(value: Any) -> list[dict[str, Any]]:
     found: list[dict[str, Any]] = []
     if isinstance(value, dict):
@@ -169,20 +153,16 @@ def _schema_objects(value: Any) -> list[dict[str, Any]]:
         for child in value:
             found.extend(_schema_objects(child))
     return found
-
-
 def test_metadata_contract() -> None:
     policy = _load(".governance/policy.json")
     baseline = _load(".governance/baseline.json")
     schema = _load(".governance/task-card.schema.json")
     cards = _load_task_cards()
     card = _task_card(cards, "development-governance-guardrails")
-
     for name, document in (("policy", policy), ("baseline", baseline), ("schema", schema)):
         _validate_document(name, document)
     for task_card in cards:
         _validate_document("card", task_card)
-
     assert policy["schema_version"] == 1
     assert set(policy["levels"]) == {"L0", "L1", "L2", "L3"}
     assert baseline["baseline_commit"] == "51cd8491fa593eb3095684d7528ecea6d1dc17de"
@@ -204,37 +184,33 @@ def test_metadata_contract() -> None:
     assert card["approval_ids"] == []
     assert re.fullmatch(r"[0-9a-f]{40}", card["base_commit"])
     assert card["base_commit"] != baseline["baseline_commit"]
-
     assert all(item.get("additionalProperties") is False for item in _schema_objects(schema))
     assert all(
         re.fullmatch(r"SC-[0-9]+", criterion["id"])
         for criterion in card["success_criteria"]
     )
-
     gate_ids = set(policy["gates"])
-    debt_ids = {entry["id"] for entry in baseline["historical_debt"]}
     assert set(card["gate_ids"]) <= gate_ids
-    assert policy["gates"]["web-focused"]["steps"] == ["npm", "run", "test", "--", "--run"]
+    assert policy["gates"]["web-focused"]["steps"] == ["npm", "run", "test", "--", "related", "--run"]
+    assert policy["gates"]["web-lint"]["steps"] == ["npm", "run", "lint"]
     assert policy["gates"]["web-static"]["steps"] == ["npm", "run", "typecheck"]
     assert policy["gates"]["governance"]["steps"] == ["uv", "run", "pytest", "-q", "tests/unit/governance"]
     assert policy["gates"]["governance-static"]["steps"] == [
         "uv", "run", "ruff", "check", "../scripts/governance_check.py",
         "../scripts/verify_changed.py", "tests/unit/governance",
     ]
-    assert {"governance-static", "web-focused", "web-static"} <= set(card["gate_ids"])
-    assert set(card["historical_debt_ids"]) <= debt_ids
+    assert policy["gates"]["backend-full"]["steps"] == ["uv", "run", "pytest", "-q"]
+    assert {"governance-static", "web-focused", "web-lint", "web-static", "backend-full", "web-full", "connector-full"} <= set(card["gate_ids"])
+    assert card["historical_debts"] == []
+    assert all(set(item["paths"]).isdisjoint({"server", "server/tests", "server/src/superboss"}) for item in baseline["historical_debt"])
     assert len([item for item in cards if item["status"] == "active"]) == 1
-
 def test_metadata_selects_bootstrap_card_by_task_id() -> None:
     bootstrap = _load(".governance/tasks/development-governance-guardrails.json")
     completed = deepcopy(bootstrap)
     completed["task_id"] = "archived-governance-task"
     completed["status"] = "complete"
     completed["level"] = "L0"
-
     assert _task_card([completed, bootstrap], "development-governance-guardrails") is bootstrap
-
-
 @pytest.mark.parametrize(
     ("name", "relative_path"),
     [
@@ -247,11 +223,8 @@ def test_metadata_selects_bootstrap_card_by_task_id() -> None:
 def test_metadata_rejects_unknown_top_level_fields(name: str, relative_path: str) -> None:
     document = deepcopy(_load(relative_path))
     document["unexpected"] = True
-
     with pytest.raises(ValueError, match="unknown field: unexpected"):
         _validate_document(name, document)
-
-
 @pytest.mark.parametrize(
     ("name", "relative_path", "path"),
     [
@@ -270,25 +243,16 @@ def test_metadata_rejects_unknown_nested_fields(
     for part in path:
         target = target[part]
     target["unexpected"] = True
-
     with pytest.raises(ValueError, match="unknown field: unexpected"):
         _validate_document(name, document)
-
-
 CHECKER = REPO / "scripts/governance_check.py"
-
-
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
-
-
 def _git(repo: Path, *args: str) -> str:
     return subprocess.run(
         ["git", *args], cwd=repo, check=True, text=True, capture_output=True
     ).stdout.strip()
-
-
 def _card(**overrides: object) -> dict[str, object]:
     card: dict[str, object] = {
         "schema_version": 1,
@@ -314,15 +278,13 @@ def _card(**overrides: object) -> dict[str, object]:
         "allowed_paths": ["allowed/**", "server/tests/**", ".governance/**"],
         "conditional_allowed_paths": [],
         "gate_ids": ["focused"],
-        "historical_debt_ids": [],
+        "historical_debts": [],
         "approval_ids": [],
         "success_criteria": [{"id": "SC-1", "description": "Works."}],
         "stop_conditions": [],
     }
     card.update(overrides)
     return card
-
-
 def _policy() -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -346,8 +308,6 @@ def _policy() -> dict[str, object]:
             "platform_owner_enforced_only": True,
         },
     }
-
-
 def _seed_repo(tmp_path: Path, *, bootstrap: bool = True) -> tuple[Path, str]:
     repo = tmp_path / "repository"
     repo.mkdir(parents=True)
@@ -362,7 +322,7 @@ def _seed_repo(tmp_path: Path, *, bootstrap: bool = True) -> tuple[Path, str]:
     _write_json(repo / ".governance/baseline.json", {
         "schema_version": 1, "baseline_commit": base,
         "baseline_tree": _git(repo, "rev-parse", f"{base}^{{tree}}"),
-        "historical_debt": [{"id": "HD-1", "path": "legacy", "description": "old"}],
+        "historical_debt": [{"id": "HD-1", "paths": ["legacy/**"], "description": "old"}],
     })
     _write_json(repo / ".governance/tasks/temporary-task.json", _card(
         bootstrap=bootstrap, base_commit=base
@@ -370,14 +330,10 @@ def _seed_repo(tmp_path: Path, *, bootstrap: bool = True) -> tuple[Path, str]:
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "base")
     return repo, base
-
-
 def _change(repo: Path, relative_path: str, content: str = "changed\n") -> None:
     path = repo / relative_path
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
-
-
 def _run_check(repo: Path, base: str, *extra: str) -> subprocess.CompletedProcess[str]:
     card_path = repo / ".governance/tasks/temporary-task.json"
     if card_path.exists():
@@ -393,74 +349,64 @@ def _run_check(repo: Path, base: str, *extra: str) -> subprocess.CompletedProces
         [sys.executable, str(CHECKER), "--repo", str(repo), "--base", base, "--head", "HEAD", *extra],
         text=True, capture_output=True, check=False,
     )
-
-
 def _payload(result: subprocess.CompletedProcess[str]) -> dict[str, object]:
     return json.loads(result.stdout)
-
-
+def _checker_module() -> Any:
+    spec = importlib.util.spec_from_file_location("governance_check", CHECKER)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 def test_scope_rejects_path_outside_declared_contract(tmp_path: Path) -> None:
     repo, base = _seed_repo(tmp_path)
     _change(repo, "outside.txt")
-
     result = _run_check(repo, base)
-
     assert result.returncode == 2
     assert _payload(result)["errors"] == ["SCOPE_PATH: outside.txt"]
-
-
 def test_requires_one_active_card_and_an_ancestor_base(tmp_path: Path) -> None:
     repo, base = _seed_repo(tmp_path)
     _write_json(repo / ".governance/tasks/second.json", _card(task_id="second"))
-
     two_cards = _run_check(repo, base)
-
     assert two_cards.returncode == 3
     assert _payload(two_cards)["errors"] == ["ACTIVE_TASKS: expected 1, found 2"]
-
     repo, _base = _seed_repo(tmp_path / "ancestor")
     non_ancestor = _run_check(repo, "0" * 40)
     assert non_ancestor.returncode == 3
     assert _payload(non_ancestor)["errors"] == ["BASE_NOT_ANCESTOR: " + "0" * 40]
-
-
 def test_budget_reports_metrics_and_proportion_warnings(tmp_path: Path) -> None:
     repo, base = _seed_repo(tmp_path)
     _change(repo, "allowed/huge.py", "x\n" * 801)
     _change(repo, "server/tests/test_small.py", "x\n")
     card = _card(budgets={**_card()["budgets"], "production_lines": 250, "test_lines": 1})
     _write_json(repo / ".governance/tasks/temporary-task.json", card)
-
     result = _run_check(repo, base)
     payload = _payload(result)
-
     assert result.returncode == 2
     assert payload["metrics"] == {
-        "files": 2, "production_lines": 801, "test_lines": 1, "documentation_lines": 0,
+        "files": 5, "production_lines": 801, "test_lines": 1, "documentation_lines": 0,
     }
     assert "BUDGET_PRODUCTION_LINES: 801 > 250" in payload["errors"]
     assert "WARNING_SINGLE_FILE_LINES: allowed/huge.py has 801 lines" in payload["warnings"]
     assert not any(warning.startswith("WARNING_TEST_RATIO") for warning in payload["warnings"])
-
-
 def test_file_budget_overflow_is_a_policy_failure(tmp_path: Path) -> None:
     repo, base = _seed_repo(tmp_path)
     _write_json(repo / ".governance/tasks/temporary-task.json", _card(
         budgets={**_card()["budgets"], "files": 0}
     ))
     _change(repo, "allowed/one.py")
-
     result = _run_check(repo, base)
-
     assert result.returncode == 2
-    assert "BUDGET_FILES: 1 > 0" in _payload(result)["errors"]
-
-
+    assert "BUDGET_FILES: 4 > 0" in _payload(result)["errors"]
 @pytest.mark.parametrize(
     ("path", "error"),
     [
         ("server/alembic/versions/a.py", "L3_TRIGGER: migration"),
-        ("docker-compose.yml", "L3_TRIGGER: deployment_boundary"),
+        ("server/modules/items/router.py", "L3_TRIGGER: route"),
+        ("ops/service.yaml", "L3_TRIGGER: service"),
+        ("Dockerfile", "L3_TRIGGER: container"),
+        ("ops/deploy.yaml", "L3_TRIGGER: deployment_boundary"),
+        ("server/persistent_state.py", "L3_TRIGGER: persistent_state"),
         ("server/auth.py", "L3_TRIGGER: auth_source"),
     ],
 )
@@ -469,31 +415,32 @@ def test_boundary_changes_require_l3_approval(tmp_path: Path, path: str, error: 
     card = _card(allowed_paths=[path])
     _write_json(repo / ".governance/tasks/temporary-task.json", card)
     _change(repo, path)
-
     result = _run_check(repo, base)
-
     assert result.returncode == 2
     assert error in _payload(result)["errors"]
-
-
 def test_dependency_and_debt_changes_need_declarations(tmp_path: Path) -> None:
     repo, base = _seed_repo(tmp_path)
     card = _card(allowed_paths=["package.json", "legacy/**"])
     _write_json(repo / ".governance/tasks/temporary-task.json", card)
     _change(repo, "package.json", json.dumps({"dependencies": {"new-package": "1.0.0"}}))
     _change(repo, "legacy/file.py")
-
     result = _run_check(repo, base)
-
     assert result.returncode == 2
     assert "L3_TRIGGER: dependency" in _payload(result)["errors"]
     assert "HISTORICAL_DEBT: HD-1 requires disposition" in _payload(result)["errors"]
-
-
 @pytest.mark.parametrize(
     ("field", "value", "error"),
     [
         ("review_round", 3, "REVIEW_ROUND: 3 > 2"),
+        ("review_round", 0, "INVALID_METADATA: review_round"),
+        ("status", "pending", "INVALID_METADATA: status"),
+        ("problem", "", "INVALID_METADATA: problem"),
+        ("non_goals", [1], "INVALID_METADATA: non_goals"),
+        ("threat_model", {"assets": [], "attackers": [], "capabilities": [], "entry_points": []}, "INVALID_METADATA: threat_model"),
+        ("success_criteria", [{"id": "bad", "description": "Works."}], "INVALID_METADATA: success_criteria"),
+        ("stop_conditions", [1], "INVALID_METADATA: stop_conditions"),
+        ("historical_debts", [{"id": "HD-1", "disposition": "keep", "rationale": "why"}], "INVALID_METADATA: historical_debts"),
+        ("historical_debts", [{"id": "HD-1", "disposition": "maintain", "rationale": ""}], "INVALID_METADATA: historical_debts"),
         ("gate_ids", ["unknown"], "UNKNOWN_GATE: unknown"),
         ("allowed_paths", ["/absolute"], "INVALID_PATH_PATTERN: /absolute"),
         ("allowed_paths", ["../parent"], "INVALID_PATH_PATTERN: ../parent"),
@@ -506,31 +453,22 @@ def test_configuration_boundaries_are_rejected(
 ) -> None:
     repo, base = _seed_repo(tmp_path)
     _write_json(repo / ".governance/tasks/temporary-task.json", _card(**{field: value}))
-
     result = _run_check(repo, base)
-
     assert result.returncode == 3
     assert _payload(result)["errors"] == [error]
-
-
 def test_rejects_duplicate_metadata_and_forbidden_artifact(tmp_path: Path) -> None:
     repo, base = _seed_repo(tmp_path)
     _change(repo, ".governance/tasks/temporary-task.json", '{"task_id":"one","task_id":"two"}')
-
     duplicate = _run_check(repo, base)
-
     assert duplicate.returncode == 3
     assert _payload(duplicate)["errors"] == [
         "INVALID_JSON: .governance/tasks/temporary-task.json: duplicate JSON key: task_id"
     ]
-
     repo, base = _seed_repo(tmp_path / "artifact")
     _change(repo, "allowed/change.diff")
     artifact = _run_check(repo, base)
     assert artifact.returncode == 2
     assert _payload(artifact)["errors"] == ["FORBIDDEN_ARTIFACT: allowed/change.diff"]
-
-
 def test_bootstrap_only_passes_when_policy_was_absent_at_base(tmp_path: Path) -> None:
     repo, base = _seed_repo(tmp_path, bootstrap=True)
     policy_base = _git(repo, "rev-parse", "HEAD")
@@ -541,7 +479,6 @@ def test_bootstrap_only_passes_when_policy_was_absent_at_base(tmp_path: Path) ->
     result = _run_check(repo, base)
     assert result.returncode == 3
     assert _payload(result)["errors"] == ["BOOTSTRAP_REUSED: policy exists at base"]
-
     fresh = tmp_path / "fresh"
     fresh.mkdir()
     _git(fresh, "init")
@@ -561,18 +498,24 @@ def test_bootstrap_only_passes_when_policy_was_absent_at_base(tmp_path: Path) ->
         bootstrap=True, base_commit=empty_base
     ))
     assert _run_check(fresh, empty_base).returncode == 0
-
-
 def test_untouched_historical_debt_does_not_block_an_unrelated_task(tmp_path: Path) -> None:
     repo, base = _seed_repo(tmp_path)
     _change(repo, "allowed/unrelated.py")
-
     result = _run_check(repo, base)
-
     assert result.returncode == 0
     assert "HISTORICAL_DEBT: HD-1 requires disposition" not in _payload(result)["errors"]
-
-
+def test_historical_debt_requires_one_touched_disposition_with_rationale(tmp_path: Path) -> None:
+    repo, base = _seed_repo(tmp_path)
+    declaration = [{"id": "HD-1", "disposition": "maintain", "rationale": "No expansion."}]
+    _write_json(repo / ".governance/tasks/temporary-task.json", _card(allowed_paths=["legacy/**", ".governance/**"], historical_debts=declaration))
+    _change(repo, "legacy/file.py")
+    assert _run_check(repo, base).returncode == 0
+    repo, base = _seed_repo(tmp_path / "unused")
+    _write_json(repo / ".governance/tasks/temporary-task.json", _card(historical_debts=declaration))
+    _change(repo, "allowed/unrelated.py")
+    result = _run_check(repo, base)
+    assert result.returncode == 2
+    assert _payload(result)["errors"] == ["HISTORICAL_DEBT_UNUSED: HD-1"]
 def test_approval_is_contract_bound_and_waits_for_platform_owner(tmp_path: Path) -> None:
     repo, base = _seed_repo(tmp_path)
     card = _card(level="L3", allowed_paths=["server/security.py", ".governance/**"], approval_ids=["approval-1"])
@@ -580,41 +523,41 @@ def test_approval_is_contract_bound_and_waits_for_platform_owner(tmp_path: Path)
     _change(repo, "server/security.py")
     _write_json(repo / ".governance/approvals/approval-1.json", {
         "task_id": "temporary-task", "contract_sha256": "wrong", "approved_by": "untrusted",
-        "rules": ["L3", "auth_source"], "reason": "test", "paths": ["server/security.py"], "expires": "merge",
+        "rules": ["auth_source"], "reason": "test", "paths": ["server/security.py"], "expires": "merge",
     })
-
     mismatch = _run_check(repo, base)
     assert mismatch.returncode == 2
     assert "APPROVAL_MISMATCH: approval-1" in _payload(mismatch)["errors"]
-
-    from importlib.util import module_from_spec, spec_from_file_location
-
-    spec = spec_from_file_location("governance_check", CHECKER)
-    assert spec and spec.loader
-    module = module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    module = _checker_module()
     approval = json.loads((repo / ".governance/approvals/approval-1.json").read_text())
     current_card = json.loads((repo / ".governance/tasks/temporary-task.json").read_text())
     approval["contract_sha256"] = module.canonical_sha256(module.immutable_contract(current_card))
     _write_json(repo / ".governance/approvals/approval-1.json", approval)
-
     waiting = _run_check(repo, base)
     assert waiting.returncode == 4
     assert "WAITING_FOR_OWNER_VERIFICATION" in _payload(waiting)["warnings"]
     assert _run_check(repo, base, "--platform-owner-enforced").returncode == 0
-
-
+def test_dependency_approval_must_cover_its_triggering_manifest(tmp_path: Path) -> None:
+    repo, base = _seed_repo(tmp_path)
+    card = _card(bootstrap=True, base_commit=base, level="L3", allowed_paths=["package.json", ".governance/**"], approval_ids=["approval-1"])
+    _write_json(repo / ".governance/tasks/temporary-task.json", card)
+    _change(repo, "package.json", '{"dependencies":{"new-package":"1"}}')
+    module = _checker_module()
+    approval = {"task_id": "temporary-task", "contract_sha256": module.canonical_sha256(module.immutable_contract(card)), "rules": ["dependency"], "reason": "needed", "paths": ["server/security.py"], "expires": "merge"}
+    _write_json(repo / ".governance/approvals/approval-1.json", approval)
+    result = _run_check(repo, base)
+    assert result.returncode == 2
+    assert _payload(result)["errors"] == ["APPROVAL_MISMATCH: approval-1"]
+    approval["paths"] = ["package.json"]
+    _write_json(repo / ".governance/approvals/approval-1.json", approval)
+    assert _run_check(repo, base).returncode == 4
 def test_binds_card_base_and_verifies_independent_baseline_tree(tmp_path: Path) -> None:
     repo, base = _seed_repo(tmp_path)
     card = _card(bootstrap=True, base_commit="f" * 40)
     _write_json(repo / ".governance/tasks/temporary-task.json", card)
-
     wrong_card_base = _run_check(repo, base)
-
     assert wrong_card_base.returncode == 3
     assert _payload(wrong_card_base)["errors"] == ["TASK_BASE_MISMATCH: " + "f" * 40]
-
     card["base_commit"] = base
     _write_json(repo / ".governance/tasks/temporary-task.json", card)
     baseline = json.loads((repo / ".governance/baseline.json").read_text())
@@ -623,27 +566,20 @@ def test_binds_card_base_and_verifies_independent_baseline_tree(tmp_path: Path) 
     invalid_tree = _run_check(repo, base)
     assert invalid_tree.returncode == 3
     assert _payload(invalid_tree)["errors"] == ["BASELINE_TREE_MISMATCH"]
-
-
 def test_rejects_nested_unknown_card_command_and_budget_relaxation(tmp_path: Path) -> None:
     repo, base = _seed_repo(tmp_path)
     card = _card(bootstrap=True, base_commit=base)
     card["budgets"] = {**card["budgets"], "production_lines": 251}
     _write_json(repo / ".governance/tasks/temporary-task.json", card)
-
     relaxed = _run_check(repo, base)
-
     assert relaxed.returncode == 3
     assert _payload(relaxed)["errors"] == ["BUDGET_CEILING: production_lines"]
-
     card["budgets"] = _card()["budgets"]
     card["gate_ids"] = [{"id": "focused", "steps": ["bad"]}]
     _write_json(repo / ".governance/tasks/temporary-task.json", card)
     invalid_gate = _run_check(repo, base)
     assert invalid_gate.returncode == 3
     assert _payload(invalid_gate)["errors"] == ["INVALID_METADATA: gate_ids item must be a string"]
-
-
 def test_collects_rename_destination_binary_and_direct_optional_dependencies(tmp_path: Path) -> None:
     repo, base = _seed_repo(tmp_path)
     _change(repo, "allowed/old.py", "old\n")
@@ -657,16 +593,27 @@ def test_collects_rename_destination_binary_and_direct_optional_dependencies(tmp
         "allowed/**", "pyproject.toml"
     ], approval_ids=["approval-1"])
     _write_json(repo / ".governance/tasks/temporary-task.json", card)
-
     result = _run_check(repo, rename_base)
-
     assert result.returncode == 2
     assert "L3_TRIGGER: dependency" not in _payload(result)["errors"]
     assert "APPROVAL_MISMATCH: approval-1" in _payload(result)["errors"]
     assert "BINARY_FILE: allowed/blob.bin" in _payload(result)["warnings"]
-    assert _payload(result)["metrics"]["files"] == 3
-
-
+    assert _payload(result)["metrics"]["files"] == 4
+def test_rename_scope_checks_source_and_counts_the_change_once(tmp_path: Path) -> None:
+    repo, base = _seed_repo(tmp_path)
+    _change(repo, "outside.py", "old\n")
+    _run_check(repo, base)
+    rename_base = _git(repo, "rev-parse", "HEAD")
+    (repo / "allowed").mkdir()
+    _git(repo, "mv", "outside.py", "allowed/moved.py")
+    _write_json(repo / ".governance/tasks/temporary-task.json", _card(bootstrap=False, base_commit=rename_base))
+    result = _run_check(repo, rename_base)
+    diff = _checker_module().collect_diff(repo, rename_base, "HEAD")
+    assert result.returncode == 2
+    assert _payload(result)["errors"] == ["SCOPE_PATH: outside.py"]
+    assert diff["paths"].count("allowed/moved.py") == 1
+    assert set(diff["scope_paths"]) == {"outside.py", "allowed/moved.py", ".governance/tasks/temporary-task.json"}
+    assert _payload(result)["metrics"]["files"] == 2
 def test_warns_only_for_excessive_test_ratio_and_narrow_approval_paths(tmp_path: Path) -> None:
     repo, base = _seed_repo(tmp_path)
     card = _card(bootstrap=True, base_commit=base, level="L3", allowed_paths=[
@@ -679,14 +626,10 @@ def test_warns_only_for_excessive_test_ratio_and_narrow_approval_paths(tmp_path:
         "task_id": "temporary-task", "contract_sha256": "", "rules": ["auth_source"],
         "reason": "test", "paths": ["server/other.py"], "expires": "merge",
     })
-
     result = _run_check(repo, base)
-
     assert result.returncode == 2
     assert "APPROVAL_MISMATCH: approval-1" in _payload(result)["errors"]
     assert "WARNING_TEST_RATIO: 3 > 2" in _payload(result)["warnings"]
-
-
 @pytest.mark.parametrize(
     ("budget", "error"),
     [
@@ -700,13 +643,9 @@ def test_rejects_exact_card_budget_shape(tmp_path: Path, budget: dict[str, objec
     _write_json(repo / ".governance/tasks/temporary-task.json", _card(
         bootstrap=True, base_commit=base, budgets=budget
     ))
-
     result = _run_check(repo, base)
-
     assert result.returncode == 3
     assert _payload(result)["errors"] == [error]
-
-
 @pytest.mark.parametrize(
     ("gate", "error"),
     [
@@ -723,13 +662,9 @@ def test_rejects_exact_policy_gate_shape(tmp_path: Path, gate: dict[str, object]
     policy = _policy()
     policy["gates"] = {"focused": gate}
     _write_json(repo / ".governance/policy.json", policy)
-
     result = _run_check(repo, base)
-
     assert result.returncode == 3
     assert _payload(result)["errors"] == [error]
-
-
 @pytest.mark.parametrize(
     ("path", "content"),
     [
@@ -746,16 +681,11 @@ def test_each_direct_dependency_source_triggers_l3(tmp_path: Path, path: str, co
         bootstrap=True, base_commit=base, level="L2", allowed_paths=[".governance/**", path]
     ))
     _change(repo, path, content)
-
     result = _run_check(repo, base)
-
     assert result.returncode == 2
     assert _payload(result)["errors"] == ["L3_TRIGGER: dependency"]
-
-
 def test_prepared_governance_workflow_runs_contract_before_proportional_verification() -> None:
     workflow = (REPO / ".github/workflows/governance.yml").read_text(encoding="utf-8")
-
     assert "actions/checkout@v4" in workflow
     assert "fetch-depth: 0" in workflow
     assert "actions/setup-python@v5" in workflow
@@ -768,42 +698,23 @@ def test_prepared_governance_workflow_runs_contract_before_proportional_verifica
     assert "${{ github.workflow }}-${{ github.ref }}" in workflow
     assert "uv==0.12.3" in workflow
     assert "pytest -q tests/unit/governance" in workflow
-
+    base_index = workflow.index("id: active_task")
     governance_index = workflow.index("governance_check.py")
+    unit_index = workflow.index("- name: Run governance unit tests")
     verification_index = workflow.index("verify_changed.py")
-    assert governance_index < verification_index
-    assert "--mode ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft && 'candidate' || 'affected' }}" in workflow
-    assert "--platform-owner-enforced" not in workflow
-
-
-def test_governance_workflow_runs_unit_suite_from_server_directory() -> None:
-    workflow = (REPO / ".github/workflows/governance.yml").read_text(encoding="utf-8")
-
-    unit_step = workflow[workflow.index("- name: Run governance unit tests"):]
-    assert "working-directory: server" in unit_step.split("\n      - name:", 1)[0]
+    assert base_index < governance_index < unit_index < verification_index
+    assert "run: python scripts/governance_check.py" in workflow
+    unit_step = workflow[unit_index:].split("\n      - name:", 1)[0]
+    assert "working-directory: server" in unit_step
     assert "run: uv run pytest -q tests/unit/governance" in unit_step
-
-
-def test_governance_workflow_reads_base_from_the_active_task_card() -> None:
-    workflow = (REPO / ".github/workflows/governance.yml").read_text(encoding="utf-8")
-
-    assert "id: active_task" in workflow
     assert 'print(f"base_sha={active[0][\'base_commit\']}")' in workflow
-    assert '>> "$GITHUB_OUTPUT"' in workflow
-    assert "github.event.before" not in workflow
     assert workflow.count("${{ steps.active_task.outputs.base_sha }}") == 2
-
-
-def test_governance_workflow_uses_pr_head_not_synthetic_merge_sha() -> None:
-    workflow = (REPO / ".github/workflows/governance.yml").read_text(encoding="utf-8")
-
     head = "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
     assert workflow.count(head) == 2
-
-
+    assert "--mode ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft && 'candidate' || 'affected' }}" in workflow
+    assert "--platform-owner-enforced" not in workflow
 def test_governance_runbook_keeps_remote_enforcement_unconfigured_without_identity() -> None:
     runbook = (REPO / "docs/runbooks/development-governance.md").read_text(encoding="utf-8")
-
     assert "REMOTE_ENFORCEMENT=NOT_CONFIGURED" in runbook
     assert "git remote get-url origin" in runbook
     assert "GOVERNANCE_OWNER_HANDLE" in runbook

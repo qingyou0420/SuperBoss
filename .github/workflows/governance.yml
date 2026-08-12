@@ -21,21 +21,13 @@ jobs:
           key: governance-evidence-${{ github.sha }}
       - name: Install CI tooling
         run: python -m pip install uv==0.12.3
-      - name: Run governance unit tests
-        working-directory: server
-        run: uv run pytest -q tests/unit/governance
       - name: Read active task card base
         id: active_task
         shell: bash
         run: |
           python - <<'PY' >> "$GITHUB_OUTPUT"
-          import json
-          from pathlib import Path
-          active = []
-          for path in Path(".governance/tasks").glob("*.json"):
-              card = json.loads(path.read_text(encoding="utf-8"))
-              if card.get("status") == "active":
-                  active.append(card)
+          import json; from pathlib import Path
+          active = [card for path in Path(".governance/tasks").glob("*.json") if (card := json.loads(path.read_text(encoding="utf-8"))).get("status") == "active"]
           if len(active) != 1 or not isinstance(active[0].get("base_commit"), str):
               raise SystemExit("expected one active task card with a base_commit")
           print(f"base_sha={active[0]['base_commit']}")
@@ -44,7 +36,10 @@ jobs:
         env:
           BASE_SHA: ${{ steps.active_task.outputs.base_sha }}
           HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-        run: uv run --project server python scripts/governance_check.py --repo . --base "$BASE_SHA" --head "$HEAD_SHA"
+        run: python scripts/governance_check.py --repo . --base "$BASE_SHA" --head "$HEAD_SHA"
+      - name: Run governance unit tests
+        working-directory: server
+        run: uv run pytest -q tests/unit/governance
       - name: Verify changed scope
         env:
           BASE_SHA: ${{ steps.active_task.outputs.base_sha }}

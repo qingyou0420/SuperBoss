@@ -41,10 +41,10 @@ def _first_declared(declared: tuple[str, ...], *choices: str) -> tuple[str, ...]
             return (choice,)
     return ()
 def _web_gates(declared: tuple[str, ...]) -> tuple[str, ...]:
-    focused = tuple(gate for gate in ("web-focused", "web-static") if gate in declared)
-    if not focused:
+    required = ("web-focused", "web-lint", "web-static")
+    if any(gate not in declared for gate in required):
         raise VerificationError("web changes require declared focused/static gates")
-    return focused
+    return required
 def selected_gates(
     policy: Mapping[str, object],
     card: Mapping[str, object],
@@ -66,12 +66,10 @@ def selected_gates(
             raise VerificationError("candidate review round is invalid")
         if review_round > max_round:
             raise VerificationError("candidate review round exceeds the policy limit")
-        selected = (
-            _first_declared(declared, "backend-full", "backend")
-            + _first_declared(declared, "web-full", "web")
-            + _first_declared(declared, "connector-full", "connector")
-        )
-        return tuple(dict.fromkeys(selected))
+        required = ("backend-full", "web-full", "connector-full")
+        if any(gate not in declared for gate in required):
+            raise VerificationError("candidate requires exactly backend-full, web-full, connector-full")
+        return required
     governance_files = {"scripts/governance_check.py", "scripts/verify_changed.py", ".github/workflows/governance.yml", "docs/runbooks/development-governance.md", "README.md"}
     if paths and all(
         path.startswith((".governance/", "server/tests/unit/governance/"))
@@ -94,11 +92,11 @@ def selected_gates(
     return focused or _first_declared(declared, "backend", "governance")
 def evidence_key(tree_sha: str, card_sha: str, gate: str) -> str:
     return hashlib.sha256(f"{tree_sha}\0{card_sha}\0{gate}".encode()).hexdigest()
-def _gate_argv(gate: Mapping[str, object]) -> tuple[str, ...]:
+def _gate_argv(gate: Mapping[str, object], extra: Sequence[str] = ()) -> tuple[str, ...]:
     steps = gate.get("steps")
     if not isinstance(steps, list) or not steps or not all(isinstance(step, str) and step for step in steps):
         raise VerificationError("policy gate steps must be a non-empty argv array")
-    return tuple(steps)
+    return (*steps, *extra)
 def _gate_cwd(repo: Path, gate: Mapping[str, object]) -> Path:
     cwd = gate.get("cwd")
     if not isinstance(cwd, str) or not cwd:
@@ -109,13 +107,13 @@ def _gate_cwd(repo: Path, gate: Mapping[str, object]) -> Path:
     except ValueError as error:
         raise VerificationError("policy gate cwd escapes repository") from error
     return candidate
-def run_gate(repo: Path, gate_id: str, gate: Mapping[str, object], timeout: int, key: str) -> GateResult:
+def run_gate(repo: Path, gate_id: str, gate: Mapping[str, object], timeout: int, key: str, extra: Sequence[str] = ()) -> GateResult:
     if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
         raise VerificationError("gate timeout must be positive")
     started = time.monotonic()
     try:
         completed = subprocess.run(
-            _gate_argv(gate), cwd=_gate_cwd(repo, gate), stdin=subprocess.DEVNULL,
+            _gate_argv(gate, extra), cwd=_gate_cwd(repo, gate), stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout, check=False,
         )
     except subprocess.TimeoutExpired:
@@ -136,8 +134,8 @@ def _evidence_dir(repo: Path) -> Path:
     path = path if path.is_absolute() else repo / path
     path.mkdir(parents=True, exist_ok=True)
     return path
-def _argv_digest(gate: Mapping[str, object]) -> str:
-    return hashlib.sha256("\0".join(_gate_argv(gate)).encode()).hexdigest()
+def _argv_digest(gate: Mapping[str, object], extra: Sequence[str] = ()) -> str:
+    return hashlib.sha256("\0".join(_gate_argv(gate, extra)).encode()).hexdigest()
 def _green_evidence(
     path: Path, gate_id: str, tree_sha: str, card_sha: str, argv_digest: str
 ) -> bool:
@@ -185,16 +183,17 @@ def verify(
     results: list[GateResult] = []
     for gate_id in selected_gates(policy, card, paths, mode):
         gate = _mapping(gates[gate_id], f"gate {gate_id}")
+        extra = tuple(f"./{path[4:]}" for path in paths if gate_id == "web-focused" and path.startswith("web/"))
         key = evidence_key(tree_sha, card_sha, gate_id)
         evidence_path = evidence_dir / f"{key}.json"
-        argv_digest = _argv_digest(gate)
+        argv_digest = _argv_digest(gate, extra)
         if _green_evidence(evidence_path, gate_id, tree_sha, card_sha, argv_digest):
             results.append(GateResult(gate_id, key, "REUSED", 0, 0))
             continue
         if dry_run:
             results.append(GateResult(gate_id, key, "MISSING", 0, 0))
             continue
-        result = run_gate(repo, gate_id, gate, _timeout(policy, card, gate), key)
+        result = run_gate(repo, gate_id, gate, _timeout(policy, card, gate), key, extra)
         results.append(result)
         if result.status == "PASS":
             evidence_path.write_text(json.dumps({
