@@ -15,6 +15,7 @@ access, and the Moonbox entry portal are deferred until filing and a separate de
 - [OWNER/STAFF live acceptance and blank sign-off](docs/runbooks/m1-owner-acceptance.md)
 - [Kimi connector build, pair, submit, retry, and revoke](docs/runbooks/kimi-connector-installation.md)
 - [Pre-pilot PostgreSQL and object backup/restore](docs/runbooks/backup-before-m1-pilot.md)
+- [Development governance and remote-enforcement activation](docs/runbooks/development-governance.md)
 
 ## Local stack
 

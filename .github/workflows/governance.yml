@@ -1,0 +1,43 @@
+name: governance
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  governance:
+    runs-on: ubuntu-latest
+    env:
+      BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+      HEAD_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/cache@v4
+        with:
+          path: .git/governance-evidence
+          key: governance-evidence-${{ github.sha }}
+      - name: Install CI tooling
+        run: python -m pip install uv==0.12.3
+      - name: Run governance unit tests
+        run: uv run --project server pytest -q tests/unit/governance
+      - name: Check governance contract
+        run: uv run --project server python scripts/governance_check.py --repo . --base "$BASE_SHA" --head "$HEAD_SHA"
+      - name: Verify changed scope
+        run: >-
+          uv run --project server python scripts/verify_changed.py --repo . --base "$BASE_SHA" --head "$HEAD_SHA"
+          --mode ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft && 'candidate' || 'affected' }}

@@ -746,3 +746,42 @@ def test_each_direct_dependency_source_triggers_l3(tmp_path: Path, path: str, co
 
     assert result.returncode == 2
     assert _payload(result)["errors"] == ["L3_TRIGGER: dependency"]
+
+
+def test_prepared_governance_workflow_runs_contract_before_proportional_verification() -> None:
+    """A ready PR must use a candidate card only after its contract check succeeds."""
+    workflow = (REPO / ".github/workflows/governance.yml").read_text(encoding="utf-8")
+
+    assert "actions/checkout@v4" in workflow
+    assert "fetch-depth: 0" in workflow
+    assert "actions/setup-python@v5" in workflow
+    assert "python-version: '3.13'" in workflow
+    assert "actions/setup-node@v4" in workflow
+    assert "node-version: '24'" in workflow
+    assert "actions/cache@v4" in workflow
+    assert "path: .git/governance-evidence" in workflow
+    assert "cancel-in-progress: true" in workflow
+    assert "${{ github.workflow }}-${{ github.ref }}" in workflow
+    assert "uv==0.12.3" in workflow
+    assert "pytest -q tests/unit/governance" in workflow
+
+    governance_index = workflow.index("governance_check.py")
+    verification_index = workflow.index("verify_changed.py")
+    assert governance_index < verification_index
+    assert "--mode ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft && 'candidate' || 'affected' }}" in workflow
+    assert "--platform-owner-enforced" not in workflow
+
+
+def test_governance_runbook_keeps_remote_enforcement_unconfigured_without_identity() -> None:
+    """Unverified ownership cannot be represented by a placeholder CODEOWNERS file."""
+    runbook = (REPO / "docs/runbooks/development-governance.md").read_text(encoding="utf-8")
+
+    assert "REMOTE_ENFORCEMENT=NOT_CONFIGURED" in runbook
+    assert "git remote get-url origin" in runbook
+    assert "GOVERNANCE_OWNER_HANDLE" in runbook
+    assert 'gh api "users/$env:GOVERNANCE_OWNER_HANDLE" --silent' in runbook
+    assert "Do not create `.github/CODEOWNERS`" in runbook
+    assert ".governance/policy.json" in runbook
+    assert ".governance/baseline.json" in runbook
+    assert ".governance/approvals/" in runbook
+    assert ".github/workflows/governance.yml" in runbook
