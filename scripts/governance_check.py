@@ -229,7 +229,7 @@ def _validate_metadata(
             or not isinstance(gate_map["kind"], str)
             or not isinstance(gate_map["steps"], list)
             or not gate_map["steps"]
-            or not all(isinstance(step, str) for step in gate_map["steps"])
+            or not all(isinstance(step, str) and step for step in gate_map["steps"])
             or not isinstance(gate_map["timeout_seconds"], int)
             or isinstance(gate_map["timeout_seconds"], bool)
             or gate_map["timeout_seconds"] <= 0

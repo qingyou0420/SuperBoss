@@ -708,6 +708,7 @@ def test_rejects_exact_card_budget_shape(tmp_path: Path, budget: dict[str, objec
         ({"cwd": ".", "steps": ["true"], "timeout_seconds": 1, "kind": "focused", "extra": 1}, "INVALID_METADATA: gate focused"),
         ({"cwd": ".", "steps": ["true"], "kind": "focused"}, "INVALID_METADATA: gate focused"),
         ({"cwd": ".", "steps": [], "timeout_seconds": 1, "kind": "focused"}, "INVALID_METADATA: gate focused"),
+        ({"cwd": ".", "steps": [""], "timeout_seconds": 1, "kind": "focused"}, "INVALID_METADATA: gate focused"),
         ({"cwd": 1, "steps": ["true"], "timeout_seconds": 1, "kind": "focused"}, "INVALID_METADATA: gate focused"),
         ({"cwd": ".", "steps": ["true"], "timeout_seconds": 0, "kind": "focused"}, "INVALID_METADATA: gate focused"),
     ],
