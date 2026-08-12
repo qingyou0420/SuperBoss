@@ -772,6 +772,34 @@ def test_prepared_governance_workflow_runs_contract_before_proportional_verifica
     assert "--platform-owner-enforced" not in workflow
 
 
+def test_governance_workflow_runs_unit_suite_from_server_directory() -> None:
+    """The governance unit path is relative to the backend project, not the repository root."""
+    workflow = (REPO / ".github/workflows/governance.yml").read_text(encoding="utf-8")
+
+    unit_step = workflow[workflow.index("- name: Run governance unit tests"):]
+    assert "working-directory: server" in unit_step.split("\n      - name:", 1)[0]
+    assert "run: uv run pytest -q tests/unit/governance" in unit_step
+
+
+def test_governance_workflow_reads_base_from_the_active_task_card() -> None:
+    """Push verification cannot rely on GitHub's zero-valued new-branch before SHA."""
+    workflow = (REPO / ".github/workflows/governance.yml").read_text(encoding="utf-8")
+
+    assert "id: active_task" in workflow
+    assert 'print(f"base_sha={active[0][\'base_commit\']}")' in workflow
+    assert '>> "$GITHUB_OUTPUT"' in workflow
+    assert "github.event.before" not in workflow
+    assert workflow.count("${{ steps.active_task.outputs.base_sha }}") == 2
+
+
+def test_governance_workflow_uses_pr_head_not_synthetic_merge_sha() -> None:
+    """A pull request check must compare the task card against the contributor's actual head."""
+    workflow = (REPO / ".github/workflows/governance.yml").read_text(encoding="utf-8")
+
+    head = "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
+    assert workflow.count(head) == 2
+
+
 def test_governance_runbook_keeps_remote_enforcement_unconfigured_without_identity() -> None:
     """Unverified ownership cannot be represented by a placeholder CODEOWNERS file."""
     runbook = (REPO / "docs/runbooks/development-governance.md").read_text(encoding="utf-8")

@@ -14,9 +14,6 @@ concurrency:
 jobs:
   governance:
     runs-on: ubuntu-latest
-    env:
-      BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-      HEAD_SHA: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,10 +31,34 @@ jobs:
       - name: Install CI tooling
         run: python -m pip install uv==0.12.3
       - name: Run governance unit tests
-        run: uv run --project server pytest -q tests/unit/governance
+        working-directory: server
+        run: uv run pytest -q tests/unit/governance
+      - name: Read active task card base
+        id: active_task
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          from pathlib import Path
+
+          active = []
+          for path in Path(".governance/tasks").glob("*.json"):
+              card = json.loads(path.read_text(encoding="utf-8"))
+              if card.get("status") == "active":
+                  active.append(card)
+          if len(active) != 1 or not isinstance(active[0].get("base_commit"), str):
+              raise SystemExit("expected one active task card with a base_commit")
+          print(f"base_sha={active[0]['base_commit']}")
+          PY
       - name: Check governance contract
+        env:
+          BASE_SHA: ${{ steps.active_task.outputs.base_sha }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: uv run --project server python scripts/governance_check.py --repo . --base "$BASE_SHA" --head "$HEAD_SHA"
       - name: Verify changed scope
+        env:
+          BASE_SHA: ${{ steps.active_task.outputs.base_sha }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: >-
           uv run --project server python scripts/verify_changed.py --repo . --base "$BASE_SHA" --head "$HEAD_SHA"
           --mode ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft && 'candidate' || 'affected' }}
