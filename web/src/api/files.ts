@@ -1,4 +1,4 @@
-import { apiClient, type BrowserHttpClient } from './http'
+import { apiClient, type BrowserHttpClient, HttpClientError } from './http'
 
 const UUID =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -36,6 +36,19 @@ export class FileContractError extends Error {
     constructor() {
         super('Invalid file data')
         this.name = 'FileContractError'
+    }
+}
+
+export class FileDownloadUnavailableError extends Error {
+    readonly state: 'INFECTED' | 'FAILED'
+
+    constructor(state: 'INFECTED' | 'FAILED') {
+        super('File download is unavailable')
+        Object.defineProperty(this, 'name', {
+            value: 'FileDownloadUnavailableError',
+        })
+        this.state = state
+        Object.freeze(this)
     }
 }
 
@@ -186,6 +199,35 @@ function parseCompleted(value: unknown): FileUploadCompleted {
     }
 }
 
+function terminalDownloadState(
+    failure: unknown,
+): FileDownloadUnavailableError['state'] | undefined {
+    if (
+        !(failure instanceof HttpClientError) ||
+        failure.status !== 409 ||
+        !isRecord(failure.data) ||
+        !exactKeys(failure.data, ['error']) ||
+        !isRecord(failure.data.error) ||
+        !exactKeys(failure.data.error, ['code', 'message', 'request_id']) ||
+        !uuid(failure.data.error.request_id)
+    ) {
+        return undefined
+    }
+    if (
+        failure.data.error.code === 'FILE_INFECTED' &&
+        failure.data.error.message === 'File did not pass security scanning'
+    ) {
+        return 'INFECTED'
+    }
+    if (
+        failure.data.error.code === 'FILE_SCAN_FAILED' &&
+        failure.data.error.message === 'File scanning did not complete'
+    ) {
+        return 'FAILED'
+    }
+    return undefined
+}
+
 function parseUrl(value: unknown): string {
     if (!isRecord(value) || !exactKeys(value, ['url']))
         throw new FileContractError()
@@ -256,7 +298,14 @@ export function createFilesApi(client: BrowserHttpClient) {
         },
         async download(fileId: string): Promise<string> {
             if (!uuid(fileId)) throw new FileContractError()
-            const response = await client.get(`/files/${fileId}/download`)
+            let response
+            try {
+                response = await client.get(`/files/${fileId}/download`)
+            } catch (error) {
+                const state = terminalDownloadState(error)
+                if (state) throw new FileDownloadUnavailableError(state)
+                throw error
+            }
             if (response.status !== 200) throw new FileContractError()
             return parseUrl(response.data)
         },

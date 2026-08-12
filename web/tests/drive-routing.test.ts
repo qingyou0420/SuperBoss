@@ -12,12 +12,24 @@ const DRIVE_PATH = '../src/pages/owner/DrivePage.vue'
 const PROJECT_ID = '019f2b8e-18f0-7f31-9f42-3e6a76b9f810'
 const FILE_ID = '019f2b8e-18f0-7f31-9f42-3e6a76b9f811'
 
-const mocks = vi.hoisted(() => ({
-    filesApi: { download: vi.fn() },
-    projectsApi: { list: vi.fn() },
-}))
+const mocks = vi.hoisted(() => {
+    class FileDownloadUnavailableError extends Error {
+        readonly state: 'INFECTED' | 'FAILED'
+
+        constructor(state: 'INFECTED' | 'FAILED') {
+            super('File download is unavailable')
+            this.state = state
+        }
+    }
+    return {
+        FileDownloadUnavailableError,
+        filesApi: { download: vi.fn() },
+        projectsApi: { list: vi.fn() },
+    }
+})
 
 vi.mock('../src/api/files', () => ({
+    FileDownloadUnavailableError: mocks.FileDownloadUnavailableError,
     fileErrorMessage: () => '文件操作失败，请稍后重试。',
     filesApi: mocks.filesApi,
 }))
@@ -173,4 +185,92 @@ describe('Task13 OWNER navigation and Drive integration', () => {
         expect(consoleWrite).not.toHaveBeenCalled()
         expect(screen.queryByText(/历史文件|全部文件/)).not.toBeInTheDocument()
     })
+
+    test.each([
+        ['INFECTED', '检测到风险，文件不可下载'],
+        ['FAILED', '扫描失败，文件不可下载，请重新上传'],
+    ] as const)(
+        'renders direct terminal completion %s without a download action',
+        async (state, message) => {
+            const module = await import(/* @vite-ignore */ DRIVE_PATH)
+            const MultipartStub = defineComponent({
+                emits: ['completed'],
+                template:
+                    "<button @click=\"$emit('completed', { file_id: '" +
+                    FILE_ID +
+                    "', state: '" +
+                    state +
+                    '\' })">完成上传</button>',
+            })
+            render(module.default, {
+                props: { allowedObjectOrigin: 'https://objects.example' },
+                global: {
+                    plugins: [ElementPlus],
+                    stubs: { MultipartUploader: MultipartStub },
+                },
+            })
+            await screen.findByText('客户方案')
+            await fireEvent.click(
+                screen.getByRole('button', { name: '完成上传' }),
+            )
+
+            expect(screen.getByText(message)).toBeInTheDocument()
+            expect(
+                screen.queryByRole('button', {
+                    name: '检查并获取下载',
+                }),
+            ).not.toBeInTheDocument()
+            expect(
+                screen.queryByRole('link', { name: '下载本次文件' }),
+            ).not.toBeInTheDocument()
+        },
+    )
+
+    test.each([
+        ['INFECTED', '检测到风险，文件不可下载'],
+        ['FAILED', '扫描失败，文件不可下载，请重新上传'],
+    ] as const)(
+        'converges download probe to terminal state %s',
+        async (state, message) => {
+            const module = await import(/* @vite-ignore */ DRIVE_PATH)
+            mocks.filesApi.download.mockRejectedValueOnce(
+                new mocks.FileDownloadUnavailableError(state),
+            )
+            const MultipartStub = defineComponent({
+                emits: ['completed'],
+                template:
+                    "<button @click=\"$emit('completed', { file_id: '" +
+                    FILE_ID +
+                    "', state: 'QUARANTINED' })\">完成上传</button>",
+            })
+            render(module.default, {
+                props: { allowedObjectOrigin: 'https://objects.example' },
+                global: {
+                    plugins: [ElementPlus],
+                    stubs: { MultipartUploader: MultipartStub },
+                },
+            })
+            await screen.findByText('客户方案')
+            await fireEvent.click(
+                screen.getByRole('button', { name: '完成上传' }),
+            )
+            await fireEvent.click(
+                screen.getByRole('button', {
+                    name: '检查并获取下载',
+                }),
+            )
+
+            expect(await screen.findByText(message)).toBeInTheDocument()
+            expect(mocks.filesApi.download).toHaveBeenCalledOnce()
+            expect(mocks.filesApi.download).toHaveBeenCalledWith(FILE_ID)
+            expect(
+                screen.queryByRole('button', {
+                    name: '检查并获取下载',
+                }),
+            ).not.toBeInTheDocument()
+            expect(
+                screen.queryByRole('link', { name: '下载本次文件' }),
+            ).not.toBeInTheDocument()
+        },
+    )
 })

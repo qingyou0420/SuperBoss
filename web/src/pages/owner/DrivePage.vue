@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 
-import { filesApi, type FileUploadCompleted } from '../../api/files'
+import {
+    FileDownloadUnavailableError,
+    filesApi,
+    type FileUploadCompleted,
+} from '../../api/files'
 import { projectsApi, type Project } from '../../api/projects'
 import MultipartUploader from '../../components/files/MultipartUploader.vue'
 
@@ -15,6 +19,32 @@ const currentResult = ref<FileUploadCompleted>()
 const downloadUrl = ref('')
 const loading = ref(true)
 const errorMessage = ref('')
+
+const currentStatusMessage = computed(() => {
+    switch (currentResult.value?.state) {
+        case 'CLEAN':
+            return '处理完成'
+        case 'INFECTED':
+            return '检测到风险，文件不可下载'
+        case 'FAILED':
+            return '扫描失败，文件不可下载，请重新上传'
+        case 'QUARANTINED':
+        case 'SCANNING':
+            return '扫描中'
+        default:
+            return ''
+    }
+})
+
+const canCheckDownload = computed(() => {
+    const state = currentResult.value?.state
+    return Boolean(
+        state &&
+        !downloadUrl.value &&
+        state !== 'INFECTED' &&
+        state !== 'FAILED',
+    )
+})
 
 const validObjectOrigin = computed(() => {
     try {
@@ -61,7 +91,12 @@ async function prepareDownload(): Promise<void> {
     try {
         downloadUrl.value = await filesApi.download(result.file_id)
         currentResult.value = { ...result, state: 'CLEAN' }
-    } catch {
+    } catch (error) {
+        if (error instanceof FileDownloadUnavailableError) {
+            currentResult.value = { ...result, state: error.state }
+            downloadUrl.value = ''
+            return
+        }
         errorMessage.value = '文件仍在扫描中，请稍后重试。'
     }
 }
@@ -119,11 +154,9 @@ onMounted(loadProjects)
 
         <el-card v-if="currentResult" shadow="never" class="current-result">
             <h2>本次上传</h2>
-            <p>
-                {{ currentResult.state === 'CLEAN' ? '处理完成' : '扫描中' }}
-            </p>
+            <p>{{ currentStatusMessage }}</p>
             <p>{{ currentResult.file_id }}</p>
-            <el-button v-if="!downloadUrl" @click="prepareDownload">
+            <el-button v-if="canCheckDownload" @click="prepareDownload">
                 检查并获取下载
             </el-button>
             <a v-if="downloadUrl" :href="downloadUrl">下载本次文件</a>

@@ -698,9 +698,18 @@ async def test_owner_downloads_clean_file_with_audited_short_presign(file_client
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("state", ["UPLOADING", "QUARANTINED", "SCANNING", "INFECTED", "FAILED"])
+@pytest.mark.parametrize(
+    ("state", "expected_code"),
+    [
+        ("UPLOADING", "FILE_NOT_READY"),
+        ("QUARANTINED", "FILE_NOT_READY"),
+        ("SCANNING", "FILE_NOT_READY"),
+        ("INFECTED", "FILE_INFECTED"),
+        ("FAILED", "FILE_SCAN_FAILED"),
+    ],
+)
 async def test_download_rejects_non_clean_file_with_denied_audit(
-    file_client, db_session: AsyncSession, state: str
+    file_client, db_session: AsyncSession, state: str, expected_code: str
 ) -> None:
     from datetime import date
 
@@ -739,7 +748,7 @@ async def test_download_rejects_non_clean_file_with_denied_audit(
     )
 
     events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
-    assert response.status_code == 409 and response.json()["error"]["code"] == "FILE_NOT_READY"
+    assert response.status_code == 409 and response.json()["error"]["code"] == expected_code
     assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"] == request_id
     assert storage.expiries == [] and len(events) == 1
     event = events[0]

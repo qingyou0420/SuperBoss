@@ -45,6 +45,20 @@ class FileNotReadyError(ConflictError):
         self.message = "File is not available for download"
 
 
+class FileInfectedError(ConflictError):
+    def __init__(self) -> None:
+        super().__init__()
+        self.code = "FILE_INFECTED"
+        self.message = "File did not pass security scanning"
+
+
+class FileScanFailedError(ConflictError):
+    def __init__(self) -> None:
+        super().__init__()
+        self.code = "FILE_SCAN_FAILED"
+        self.message = "File scanning did not complete"
+
+
 class FileUploadConflictError(ConflictError):
     def __init__(self) -> None:
         DomainError.__init__(self, "FILE_UPLOAD_CONFLICT", "Upload metadata conflicts", 409)
@@ -156,6 +170,10 @@ class FileService:
         return self.storage
 
     async def ensure_downloadable(self, file: File) -> None:
+        if file.state == FileState.INFECTED:
+            raise FileInfectedError()
+        if file.state == FileState.FAILED:
+            raise FileScanFailedError()
         if file.state != FileState.CLEAN:
             raise FileNotReadyError()
 

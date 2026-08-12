@@ -1,5 +1,7 @@
 import { describe, expect, test, vi } from 'vitest'
 
+import { HttpClientError } from '../src/api/http'
+
 const MODULE_PATH = '../src/api/files'
 const PROJECT_ID = '019f2b8e-18f0-7f31-9f42-3e6a76b9f810'
 const UPLOAD_ID = '019f2b8e-18f0-7f31-9f42-3e6a76b9f811'
@@ -7,6 +9,9 @@ const FILE_ID = '019f2b8e-18f0-7f31-9f42-3e6a76b9f812'
 
 interface FilesModule {
     FileContractError: new () => Error
+    FileDownloadUnavailableError: new (
+        state: 'INFECTED' | 'FAILED',
+    ) => Error & { readonly state: 'INFECTED' | 'FAILED' }
     createFilesApi(client: unknown): {
         start(command: unknown, idempotencyKey: string): Promise<unknown>
         partUrl(uploadId: string, partNumber: number): Promise<string>
@@ -230,4 +235,81 @@ describe('strict browser file API', () => {
             'sentinel',
         )
     })
+
+    test.each([
+        ['FILE_INFECTED', 'File did not pass security scanning', 'INFECTED'],
+        ['FILE_SCAN_FAILED', 'File scanning did not complete', 'FAILED'],
+    ] as const)(
+        'maps exact terminal download error %s to fixed state %s',
+        async (code, message, state) => {
+            const mod = await filesModule()
+            const failure = new HttpClientError(409, {
+                error: {
+                    code,
+                    message,
+                    request_id: '019f2b8e-18f0-7f31-9f42-3e6a76b9f813',
+                },
+            })
+            const client = Object.freeze({
+                get: vi.fn().mockRejectedValue(failure),
+                post: vi.fn(),
+            })
+
+            const caught = await mod
+                .createFilesApi(client)
+                .download(FILE_ID)
+                .catch((error: unknown) => error)
+
+            expect(caught).toBeInstanceOf(mod.FileDownloadUnavailableError)
+            expect(caught).toMatchObject({ state })
+            expect(Object.keys(caught as object).sort()).toEqual(['state'])
+            expect(String(caught)).not.toContain(code)
+            expect(String(caught)).not.toContain('019f2b8e')
+        },
+    )
+
+    test.each([
+        new HttpClientError(400, {
+            error: {
+                code: 'FILE_INFECTED',
+                message: 'File did not pass security scanning',
+                request_id: '019f2b8e-18f0-7f31-9f42-3e6a76b9f813',
+            },
+        }),
+        new HttpClientError(409, {
+            error: {
+                code: 'FILE_INFECTED',
+                message: 'wrong message',
+                request_id: '019f2b8e-18f0-7f31-9f42-3e6a76b9f813',
+            },
+        }),
+        new HttpClientError(409, {
+            error: {
+                code: 'FILE_SCAN_FAILED',
+                message: 'File scanning did not complete',
+                request_id: 'not-a-uuid',
+            },
+        }),
+        new HttpClientError(409, {
+            error: {
+                code: 'FILE_INFECTED',
+                extra: 'sentinel',
+                message: 'File did not pass security scanning',
+                request_id: '019f2b8e-18f0-7f31-9f42-3e6a76b9f813',
+            },
+        }),
+    ])(
+        'does not trust malformed terminal error envelope %#',
+        async (failure) => {
+            const mod = await filesModule()
+            const client = Object.freeze({
+                get: vi.fn().mockRejectedValue(failure),
+                post: vi.fn(),
+            })
+
+            await expect(
+                mod.createFilesApi(client).download(FILE_ID),
+            ).rejects.toBe(failure)
+        },
+    )
 })
