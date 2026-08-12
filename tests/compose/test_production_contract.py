@@ -388,6 +388,15 @@ def test_object_preflight_reaches_allowlist_access_phase_before_local_response()
     assert "proxy_set_header Authorization" not in preflight
     assert "proxy_set_header Cookie" not in preflight
     assert "proxy_pass http://superboss_minio;" in proxy
+    for header in (
+        "Access-Control-Allow-Origin",
+        "Access-Control-Allow-Methods",
+        "Access-Control-Allow-Headers",
+        "Access-Control-Allow-Credentials",
+        "Access-Control-Expose-Headers",
+        "Vary",
+    ):
+        assert f"proxy_hide_header {header};" in proxy
 
 
 def test_nginx_reresolves_recreated_compose_upstreams() -> None:
