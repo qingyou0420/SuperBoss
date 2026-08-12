@@ -321,12 +321,16 @@ def _card(**overrides: object) -> dict[str, object]:
 def _policy() -> dict[str, object]:
     return {
         "schema_version": 1,
-        "levels": {"L1": {"budgets": _card()["budgets"]}, "L3": {"requires_approval": True}},
+        "levels": {
+            "L1": {"budgets": _card()["budgets"]},
+            "L2": {"budgets": _card()["budgets"]},
+            "L3": {"requires_approval": True},
+        },
         "path_classification": {
             "tests": ["server/tests/**"], "documentation": ["docs/**", "**/*.md"],
             "unknown": "production",
         },
-        "gates": {"focused": {"cwd": ".", "steps": ["true"], "kind": "focused"}},
+        "gates": {"focused": {"cwd": ".", "steps": ["true"], "timeout_seconds": 1, "kind": "focused"}},
         "limits": {
             "single_file_lines": 800, "test_to_production_ratio": 2,
             "max_review_round": 2, "max_active_tasks": 1,
@@ -676,3 +680,68 @@ def test_warns_only_for_excessive_test_ratio_and_narrow_approval_paths(tmp_path:
     assert result.returncode == 2
     assert "APPROVAL_MISMATCH: approval-1" in _payload(result)["errors"]
     assert "WARNING_TEST_RATIO: 3 > 2" in _payload(result)["warnings"]
+
+
+@pytest.mark.parametrize(
+    ("budget", "error"),
+    [
+        ({**_card()["budgets"], "unknown": 1}, "INVALID_METADATA: budgets"),
+        ({key: value for key, value in _card()["budgets"].items() if key != "files"}, "INVALID_METADATA: budgets"),
+        ({**_card()["budgets"], "files": "one"}, "INVALID_METADATA: budget files"),
+    ],
+)
+def test_rejects_exact_card_budget_shape(tmp_path: Path, budget: dict[str, object], error: str) -> None:
+    repo, base = _seed_repo(tmp_path)
+    _write_json(repo / ".governance/tasks/temporary-task.json", _card(
+        bootstrap=True, base_commit=base, budgets=budget
+    ))
+
+    result = _run_check(repo, base)
+
+    assert result.returncode == 3
+    assert _payload(result)["errors"] == [error]
+
+
+@pytest.mark.parametrize(
+    ("gate", "error"),
+    [
+        ({"cwd": ".", "steps": ["true"], "timeout_seconds": 1, "kind": "focused", "extra": 1}, "INVALID_METADATA: gate focused"),
+        ({"cwd": ".", "steps": ["true"], "kind": "focused"}, "INVALID_METADATA: gate focused"),
+        ({"cwd": ".", "steps": [], "timeout_seconds": 1, "kind": "focused"}, "INVALID_METADATA: gate focused"),
+        ({"cwd": 1, "steps": ["true"], "timeout_seconds": 1, "kind": "focused"}, "INVALID_METADATA: gate focused"),
+        ({"cwd": ".", "steps": ["true"], "timeout_seconds": 0, "kind": "focused"}, "INVALID_METADATA: gate focused"),
+    ],
+)
+def test_rejects_exact_policy_gate_shape(tmp_path: Path, gate: dict[str, object], error: str) -> None:
+    repo, base = _seed_repo(tmp_path)
+    policy = _policy()
+    policy["gates"] = {"focused": gate}
+    _write_json(repo / ".governance/policy.json", policy)
+
+    result = _run_check(repo, base)
+
+    assert result.returncode == 3
+    assert _payload(result)["errors"] == [error]
+
+
+@pytest.mark.parametrize(
+    ("path", "content"),
+    [
+        ("pyproject.toml", "[project]\ndependencies = [\"project-direct>=1\"]\n"),
+        ("pyproject.toml", "[project]\n[project.optional-dependencies]\ntest = [\"optional-direct>=1\"]\n"),
+        ("pyproject.toml", "[project]\n[dependency-groups]\ntest = [\"group-direct>=1\"]\n"),
+        ("package.json", '{"dependencies":{"npm-direct":"1"}}'),
+        ("package.json", '{"devDependencies":{"npm-dev-direct":"1"}}'),
+    ],
+)
+def test_each_direct_dependency_source_triggers_l3(tmp_path: Path, path: str, content: str) -> None:
+    repo, base = _seed_repo(tmp_path)
+    _write_json(repo / ".governance/tasks/temporary-task.json", _card(
+        bootstrap=True, base_commit=base, level="L2", allowed_paths=[".governance/**", path]
+    ))
+    _change(repo, path, content)
+
+    result = _run_check(repo, base)
+
+    assert result.returncode == 2
+    assert _payload(result)["errors"] == ["L3_TRIGGER: dependency"]

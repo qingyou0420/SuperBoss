@@ -223,7 +223,17 @@ def _validate_metadata(
             raise ConfigurationError(f"UNKNOWN_GATE: {gate_id}")
     for gate_id, gate in gates.items():
         gate_map = _mapping(gate, f"gate {gate_id}")
-        if set(gate_map) - {"cwd", "steps", "timeout_seconds", "kind"} or not isinstance(gate_map.get("cwd"), str) or not isinstance(gate_map.get("steps"), list) or not all(isinstance(step, str) for step in gate_map["steps"]):
+        if (
+            set(gate_map) != {"cwd", "steps", "timeout_seconds", "kind"}
+            or not isinstance(gate_map["cwd"], str)
+            or not isinstance(gate_map["kind"], str)
+            or not isinstance(gate_map["steps"], list)
+            or not gate_map["steps"]
+            or not all(isinstance(step, str) for step in gate_map["steps"])
+            or not isinstance(gate_map["timeout_seconds"], int)
+            or isinstance(gate_map["timeout_seconds"], bool)
+            or gate_map["timeout_seconds"] <= 0
+        ):
             raise ConfigurationError(f"INVALID_METADATA: gate {gate_id}")
     for level_id, level in levels.items():
         level_map = _mapping(level, f"level {level_id}")
@@ -233,7 +243,15 @@ def _validate_metadata(
             level_budgets = _mapping(level_map["budgets"], "level budgets")
             if not all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in level_budgets.values()):
                 raise ConfigurationError("INVALID_METADATA: level budgets")
-    for budget_name, budget in _mapping(card["budgets"], "budgets").items():
+    card_budgets = _mapping(card["budgets"], "budgets")
+    required_budgets = {
+        "files", "production_lines", "test_lines", "documentation_lines", "migrations",
+        "dependencies", "services", "containers", "routes", "auth_sources",
+        "persistent_state", "network_boundaries",
+    }
+    if set(card_budgets) != required_budgets:
+        raise ConfigurationError("INVALID_METADATA: budgets")
+    for budget_name, budget in card_budgets.items():
         if not isinstance(budget, int) or isinstance(budget, bool) or budget < 0:
             raise ConfigurationError(f"INVALID_METADATA: budget {budget_name}")
         ceiling = _mapping(_mapping(levels[card["level"]], "level").get("budgets", {}), "level budgets").get(budget_name, 0)
