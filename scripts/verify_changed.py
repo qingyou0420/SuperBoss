@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -112,8 +113,10 @@ def run_gate(repo: Path, gate_id: str, gate: Mapping[str, object], timeout: int,
         raise VerificationError("gate timeout must be positive")
     started = time.monotonic()
     try:
+        argv = list(_gate_argv(gate, extra))
+        argv[0] = shutil.which(argv[0]) or ""
         completed = subprocess.run(
-            _gate_argv(gate, extra), cwd=_gate_cwd(repo, gate), stdin=subprocess.DEVNULL,
+            argv, cwd=_gate_cwd(repo, gate), stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout, check=False,
         )
     except subprocess.TimeoutExpired:

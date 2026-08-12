@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -162,6 +163,27 @@ def test_web_focused_appends_only_git_derived_related_paths(tmp_path: Path) -> N
     result = module.verify(repo, policy, _card(), ("web/src/app.ts", "web/--help", "server/api.py"), "affected", "a" * 40, "b" * 64)
     assert result[0].status == "PASS"
     assert log.read_text() == "./src/app.ts|./--help"
+
+
+def test_run_gate_resolves_policy_executable_from_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    module = _module()
+    resolved = tmp_path / "npm.CMD"
+    executed: list[tuple[str, ...]] = []
+    monkeypatch.setattr(shutil, "which", lambda name: str(resolved) if name == "npm" else None)
+
+    def run(argv: list[str] | tuple[str, ...], **_kwargs: object) -> subprocess.CompletedProcess[object]:
+        if argv[0] != str(resolved):
+            raise FileNotFoundError(argv[0])
+        executed.append(tuple(argv))
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+    result = module.run_gate(tmp_path, "web", {"cwd": ".", "steps": ["npm", "--version"]}, 10, "key")
+
+    assert result.status == "PASS"
+    assert executed == [(str(resolved), "--version")]
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    assert module.run_gate(tmp_path, "web", {"cwd": ".", "steps": ["missing"]}, 10, "key").status == "INTERRUPTED"
 
 
 def test_rejects_card_commands_and_ineligible_candidate_runs(tmp_path: Path) -> None:
