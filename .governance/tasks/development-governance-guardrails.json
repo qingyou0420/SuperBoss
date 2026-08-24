@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "task_id": "development-governance-guardrails",
-  "status": "active",
+  "status": "complete",
   "base_commit": "23b659854bf7457972288a4c2fce57fde1aa1e54",
   "bootstrap": true,
   "candidate": true,

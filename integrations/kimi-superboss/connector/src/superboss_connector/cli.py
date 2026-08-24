@@ -11,6 +11,7 @@ from uuid import UUID
 
 import typer
 
+from . import __version__
 from .client import ApiClient, AttachmentResponse, JobResponse, SubmitResponse
 from .config import normalize_origin
 from .credentials import CredentialStore
@@ -32,8 +33,14 @@ from .outbox import (
     Phase,
     initial_entry,
 )
+from .updater import check_for_update, install_update, packaged_executable
 
-app = typer.Typer(add_completion=False, no_args_is_help=True, pretty_exceptions_enable=False)
+app = typer.Typer(
+    add_completion=False,
+    no_args_is_help=True,
+    invoke_without_command=True,
+    pretty_exceptions_enable=False,
+)
 
 
 def _safe_echo(message: object, *, err: bool = False) -> None:
@@ -433,6 +440,56 @@ def status(
         if result.result_code is not None:
             fields.append(result.result_code)
         _safe_echo(" ".join(fields))
+
+
+def _print_version(value: bool) -> None:
+    if value:
+        _safe_echo(__version__)
+        raise typer.Exit()
+
+
+def _apply_cloud_update(*, check: bool) -> None:
+    offer = check_for_update(__version__)
+    if not offer.available:
+        _safe_echo(f"Up to date ({offer.current_version}).")
+        return
+    _safe_echo(f"{offer.current_version} -> {offer.latest_version}")
+    _safe_echo(offer.html_url)
+    if check:
+        return
+    install_update(offer, packaged_executable())
+    _safe_echo(f"Updated to {offer.latest_version}.")
+
+
+@app.callback()
+def _root(
+    ctx: typer.Context,
+    version: Annotated[
+        bool,
+        typer.Option("--version", callback=_print_version, is_eager=True),
+    ] = False,
+    check_update: Annotated[bool, typer.Option("--check-update")] = False,
+    update: Annotated[bool, typer.Option("--update")] = False,
+) -> None:
+    del version
+    try:
+        if ctx.invoked_subcommand is not None:
+            if check_update or update:
+                raise ConnectorError(2, INVALID_INPUT)
+            return
+        if not check_update and not update:
+            return
+        if check_update and update:
+            raise ConnectorError(2, INVALID_INPUT)
+        _apply_cloud_update(check=check_update)
+    except ConnectorError as error:
+        try:
+            _safe_echo(error.message, err=True)
+        except ConnectorError:
+            pass
+        raise typer.Exit(error.exit_code) from None
+    if check_update or update:
+        raise typer.Exit()
 
 
 @app.command("retry")

@@ -1359,26 +1359,26 @@ The runbooks must contain exact commands for local startup, WeCom trusted-domain
 Run:
 
 ```powershell
-cd D:\SuperBoss\server
+cd D:\Grisia Studio\SuperBoss\server
 uv run alembic upgrade head
 uv run pytest -v
 uv run ruff check .
 uv run mypy src
 
-cd D:\SuperBoss\web
+cd D:\Grisia Studio\SuperBoss\web
 npm ci
 npm run test -- --run
 npm run typecheck
 npm run build
 
-cd D:\SuperBoss\integrations\kimi-superboss\connector
+cd D:\Grisia Studio\SuperBoss\integrations\kimi-superboss\connector
 uv run pytest -v
 
-cd D:\SuperBoss\tests\e2e
+cd D:\Grisia Studio\SuperBoss\tests\e2e
 npm ci
 npm run test
 
-cd D:\SuperBoss
+cd D:\Grisia Studio\SuperBoss
 docker compose config --quiet
 powershell -ExecutionPolicy Bypass -File tests\compose\smoke.ps1
 ```

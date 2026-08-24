@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "task_id": "connector-cloud-update",
+  "status": "active",
+  "base_commit": "54a07d3856e0876389eb8a7b563385bb7ec2c7cb",
+  "bootstrap": false,
+  "candidate": false,
+  "review_round": 1,
+  "level": "L2",
+  "problem": "The packaged Windows connector can only be replaced by copying a local file; operators cannot detect a published update package and apply it with one command.",
+  "non_goals": [
+    "Do not add server deploy.sh, OWNER web update buttons, or Docker image publishing.",
+    "Do not add a new authentication source, token store, or TLS bypass.",
+    "Do not change pairing, submit, status, or retry behavior."
+  ],
+  "threat_model": {
+    "assets": ["connector executable integrity", "operator workstation"],
+    "attackers": ["network attacker supplying a substitute download"],
+    "capabilities": ["serve a GitHub-shaped JSON document", "redirect a download"],
+    "entry_points": ["superboss update", "GitHub latest-release JSON", "release asset URLs"],
+    "excluded_capabilities": ["arbitrary same-origin JavaScript execution", "device credential theft via update"]
+  },
+  "budgets": {
+    "files": 20,
+    "production_lines": 700,
+    "test_lines": 1000,
+    "documentation_lines": 300,
+    "migrations": 0,
+    "dependencies": 0,
+    "services": 0,
+    "containers": 0,
+    "routes": 0,
+    "auth_sources": 0,
+    "persistent_state": 0,
+    "network_boundaries": 0
+  },
+  "allowed_paths": [
+    ".governance/tasks/development-governance-guardrails.json",
+    ".governance/tasks/connector-cloud-update.json",
+    ".github/workflows/connector-release.yml",
+    "integrations/kimi-superboss/connector/src/superboss_connector/cli.py",
+    "integrations/kimi-superboss/connector/src/superboss_connector/updater.py",
+    "integrations/kimi-superboss/connector/tests/test_updater.py",
+    "docs/runbooks/kimi-connector-installation.md",
+    "docs/01-需求定稿.md",
+    "docs/superpowers/plans/2026-08-09-m1-foundation-implementation.md",
+    "README.md"
+  ],
+  "conditional_allowed_paths": [],
+  "gate_ids": ["governance", "governance-static", "connector", "connector-full"],
+  "historical_debts": [
+    {
+      "id": "HD-5",
+      "disposition": "maintain",
+      "rationale": "cli.py gains an update command; pairing exactly-once markers stay unchanged."
+    }
+  ],
+  "approval_ids": [],
+  "success_criteria": [
+    {"id": "SC-1", "description": "superboss --check-update reports a newer GitHub Release without downloading."},
+    {"id": "SC-2", "description": "superboss --update downloads superboss.exe, verifies SHA-256, and replaces the packaged executable."},
+    {"id": "SC-3", "description": "Downloads refuse non-HTTPS or non-GitHub hosts, missing assets, and digest mismatches."}
+  ],
+  "stop_conditions": ["All success criteria pass.", "Connector tests pass.", "No unresolved Critical or Important finding remains."]
+}

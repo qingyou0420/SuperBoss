@@ -8,12 +8,16 @@ The current supported acceptance target is private single-owner testing on the o
 computer at `https://app.localhost`. Public domains, Tencent Cloud, company-network multi-user
 access, and the Moonbox entry portal are deferred until filing and a separate deployment review.
 
+Packaged Windows connector updates come from GitHub Releases (`qingyou0420/SuperBoss`), not from a
+local file copy. Installed clients run `superboss --check-update` to detect a newer `superboss.exe`
+and `superboss --update` to download, verify the published SHA-256, and replace the executable.
+
 ## Operator map
 
 - [Local account bootstrap and recovery](docs/runbooks/local-auth-setup.md)
 - [Local start, migrate, verify, logs, and stop](docs/runbooks/m1-local-development.md)
 - [OWNER/STAFF live acceptance and blank sign-off](docs/runbooks/m1-owner-acceptance.md)
-- [Kimi connector build, pair, submit, retry, and revoke](docs/runbooks/kimi-connector-installation.md)
+- [Kimi connector build, pair, submit, retry, cloud update, and revoke](docs/runbooks/kimi-connector-installation.md)
 - [Pre-pilot PostgreSQL and object backup/restore](docs/runbooks/backup-before-m1-pilot.md)
 - [Development governance and remote-enforcement activation](docs/runbooks/development-governance.md)
 

@@ -16,9 +16,22 @@ powershell -ExecutionPolicy Bypass -File integrations/kimi-superboss/scripts/bui
 & 'integrations/kimi-superboss/connector/dist/superboss.exe' --help
 ```
 
-Copy the verified executable and `integrations/kimi-superboss/SKILL.md` to the OWNER workstation by
-the approved internal distribution channel. Record the build commit and checksum; do not send a
-pre-paired executable or credential store.
+The public GitHub repository publishes the connector as a Release asset. On an already installed
+workstation, detect and apply that package without copying files by hand:
+
+```powershell
+superboss --version
+superboss --check-update
+superboss --update
+```
+
+`--check-update` only reads `https://api.github.com/repos/qingyou0420/SuperBoss/releases/latest`.
+`--update` then downloads `superboss.exe`, verifies the published SHA-256 sidecar, and replaces the
+packaged executable. Refuse a substitute host, a missing asset, or a digest mismatch.
+
+For the first install on a new workstation, download `superboss.exe` from the latest GitHub Release
+and copy `integrations/kimi-superboss/SKILL.md` beside it. Record the release tag and checksum; do
+not send a pre-paired executable or credential store.
 
 ## Pair and submit
 
