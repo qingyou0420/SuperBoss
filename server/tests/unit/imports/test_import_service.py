@@ -21,7 +21,7 @@ from superboss.modules.devices.models import (
     DeviceProjectGrant,
     DeviceScopeGrant,
 )
-from superboss.modules.files.models import File, FileState, Upload
+from superboss.modules.files.models import File, FileState
 from superboss.modules.files.service import FileService
 from superboss.modules.files.storage import CompletedPart
 from superboss.modules.projects.models import Project
@@ -313,7 +313,7 @@ async def test_same_key_and_semantically_equivalent_manifest_reuse_every_stable_
         assert await session.scalar(select(func.count()).select_from(models.ImportJob)) == 1
         assert await session.scalar(select(func.count()).select_from(models.ImportAttachment)) == 2
         assert await session.scalar(select(func.count()).select_from(File)) == 2
-        assert await session.scalar(select(func.count()).select_from(Upload)) == 2
+        assert await session.scalar(select(func.count()).select_from(File)) == 2
         jobs = list(await session.scalars(select(models.ImportJob)))
         audits = list(
             await session.scalars(
@@ -416,7 +416,7 @@ async def test_concurrent_same_manifest_has_one_job_attachment_file_and_upload_s
             await session.scalar(select(func.count()).select_from(models.ImportJob)),
             await session.scalar(select(func.count()).select_from(models.ImportAttachment)),
             await session.scalar(select(func.count()).select_from(File)),
-            await session.scalar(select(func.count()).select_from(Upload)),
+            await session.scalar(select(func.count()).select_from(File)),
             await session.scalar(
                 select(func.count()).select_from(AuditLog).where(
                     AuditLog.action == "import.create"
@@ -526,7 +526,7 @@ async def test_concurrent_changed_manifest_has_no_losing_upload_set(
         jobs = list(await session.scalars(select(models.ImportJob)))
         attachments = list(await session.scalars(select(models.ImportAttachment)))
         files = list(await session.scalars(select(File)))
-        uploads = list(await session.scalars(select(Upload)))
+        uploads = list(await session.scalars(select(File)))
         audits = list(
             await session.scalars(
                 select(AuditLog).where(AuditLog.action == "import.create")
@@ -566,7 +566,7 @@ async def test_distinct_keys_do_not_starve_two_connection_pool_at_child_boundary
         child_actor: Actor,
         child_command: Any,
         child_key: str,
-    ) -> Upload:
+    ) -> File:
         await child_boundary.wait()
         return await original_start(
             file_service,
@@ -606,7 +606,7 @@ async def test_distinct_keys_do_not_starve_two_connection_pool_at_child_boundary
             await session.scalar(select(func.count()).select_from(models.ImportJob)),
             await session.scalar(select(func.count()).select_from(models.ImportAttachment)),
             await session.scalar(select(func.count()).select_from(File)),
-            await session.scalar(select(func.count()).select_from(Upload)),
+            await session.scalar(select(func.count()).select_from(File)),
         )
     assert counts == (2, 2, 2, 2)
     assert storage.create_calls == 2 and len(storage.active) == 2
@@ -639,7 +639,7 @@ async def test_identical_same_key_waiter_does_not_starve_winners_child_connectio
         child_actor: Actor,
         child_command: Any,
         child_key: str,
-    ) -> Upload:
+    ) -> File:
         nonlocal child_calls
         child_calls += 1
         if child_calls == 1:
@@ -843,7 +843,7 @@ async def test_failed_create_releases_small_pool_and_lock_ownership_for_retry(
             await session.scalar(select(func.count()).select_from(models.ImportJob)),
             await session.scalar(select(func.count()).select_from(models.ImportAttachment)),
             await session.scalar(select(func.count()).select_from(File)),
-            await session.scalar(select(func.count()).select_from(Upload)),
+            await session.scalar(select(func.count()).select_from(File)),
             await session.scalar(
                 select(func.count()).select_from(AuditLog).where(
                     AuditLog.action == "import.create"
@@ -887,7 +887,7 @@ async def test_partial_provider_failure_reuses_deterministic_child_uploads_on_re
     assert pending.value.status_code == 503
     assert "secret" not in str(pending.value).lower()
     async with session_factory() as session:
-        before_uploads = list((await session.scalars(select(Upload).order_by(Upload.id))).all())
+        before_uploads = list((await session.scalars(select(File).order_by(File.id))).all())
         before_files = list((await session.scalars(select(File).order_by(File.id))).all())
         assert await session.scalar(select(func.count()).select_from(models.ImportJob)) == 0
         assert await session.scalar(select(func.count()).select_from(AuditLog).where(
@@ -900,7 +900,7 @@ async def test_partial_provider_failure_reuses_deterministic_child_uploads_on_re
     created = await service.create(actor, command, "partial-key", request_id=uuid4())
 
     async with session_factory() as session:
-        after_uploads = list((await session.scalars(select(Upload))).all())
+        after_uploads = list((await session.scalars(select(File))).all())
         jobs = list((await session.scalars(select(models.ImportJob))).all())
         attachments = list((await session.scalars(select(models.ImportAttachment))).all())
     assert {(row.id, row.file_id) for row in after_uploads} == before_ids
@@ -939,7 +939,7 @@ async def test_creation_audit_failure_rolls_back_job_but_preserves_reusable_uplo
     async with session_factory() as session:
         assert await session.scalar(select(func.count()).select_from(models.ImportJob)) == 0
         assert await session.scalar(select(func.count()).select_from(models.ImportAttachment)) == 0
-        uploads_before = list((await session.scalars(select(Upload))).all())
+        uploads_before = list((await session.scalars(select(File))).all())
         assert len(uploads_before) == 2
     stable_ids = {(row.id, row.file_id) for row in uploads_before}
     assert storage.create_calls == 2 and len(storage.active) == 2
@@ -947,7 +947,7 @@ async def test_creation_audit_failure_rolls_back_job_but_preserves_reusable_uplo
     created = await service.create(actor, command, "audit-key", request_id=uuid4())
 
     async with session_factory() as session:
-        uploads_after = list((await session.scalars(select(Upload))).all())
+        uploads_after = list((await session.scalars(select(File))).all())
         create_audits = list(
             await session.scalars(select(AuditLog).where(AuditLog.action == "import.create"))
         )
@@ -1023,7 +1023,7 @@ async def test_oversized_canonical_manifest_returns_422_before_any_side_effect(
     async with session_factory() as session:
         assert await session.scalar(select(func.count()).select_from(models.ImportJob)) == 0
         assert await session.scalar(select(func.count()).select_from(File)) == 0
-        assert await session.scalar(select(func.count()).select_from(Upload)) == 0
+        assert await session.scalar(select(func.count()).select_from(File)) == 0
         assert await session.scalar(select(func.count()).select_from(AuditLog)) == 0
     assert storage.create_calls == storage.complete_calls == 0
     assert storage.active == {} and storage.expiries == []
@@ -1183,7 +1183,7 @@ async def test_create_project_denial_is_uniform_and_uses_only_resolved_audit_fk(
         assert await session.scalar(select(func.count()).select_from(models.ImportJob)) == 0
         assert await session.scalar(select(func.count()).select_from(models.ImportAttachment)) == 0
         assert await session.scalar(select(func.count()).select_from(File)) == 0
-        assert await session.scalar(select(func.count()).select_from(Upload)) == 0
+        assert await session.scalar(select(func.count()).select_from(File)) == 0
         audits = list(
             await session.scalars(
                 select(AuditLog).where(
@@ -1546,7 +1546,7 @@ async def test_attachment_completion_quarantines_audits_and_enqueues_once(
                 )
             )
         )
-        upload = await session.get(Upload, attachment.upload_id)
+        upload = await session.get(File, attachment.upload_id)
     assert file is not None and file.state == FileState.QUARANTINED
     assert upload is not None and upload.multipart_id is not None
     assert len(audits) == 1

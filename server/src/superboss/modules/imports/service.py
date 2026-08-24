@@ -16,7 +16,7 @@ from superboss.core.errors import DomainError, ForbiddenError, OwnerRequiredErro
 from superboss.modules.audit.models import AuditLog
 from superboss.modules.audit.schemas import AuditEventInput
 from superboss.modules.audit.service import AuditService
-from superboss.modules.files.models import File, FileState, Upload
+from superboss.modules.files.models import File, FileState
 from superboss.modules.files.schemas import UploadStart
 from superboss.modules.files.service import FileService, FileUploadConflictError
 from superboss.modules.files.storage import CompletedPart, ObjectStorage
@@ -181,7 +181,7 @@ class ImportService:
             if existing is not None:
                 return existing
 
-        uploads: list[Upload] = []
+        uploads: list[File] = []
         for declaration in command.attachments:
             upload_command = UploadStart(
                 project_id=command.project_id,
@@ -515,14 +515,7 @@ class ImportService:
                         and_(
                             File.id == ImportAttachment.file_id,
                             File.project_id == ImportAttachment.project_id,
-                        ),
-                    )
-                    .join(
-                        Upload,
-                        and_(
-                            Upload.id == ImportAttachment.upload_id,
-                            Upload.file_id == ImportAttachment.file_id,
-                            Upload.project_id == ImportAttachment.project_id,
+                            File.id == ImportAttachment.upload_id,
                         ),
                     )
                     .where(
@@ -1071,7 +1064,7 @@ class ImportService:
         idempotency_key: str,
         canonical_manifest: dict[str, object],
         manifest_fingerprint: str,
-        uploads: list[Upload],
+        uploads: list[File],
         request_id: UUID,
     ) -> ImportJobResult:
         existing = await session.scalar(
@@ -1121,7 +1114,7 @@ class ImportService:
             ImportAttachment(
                 job_id=job.id,
                 project_id=job.project_id,
-                file_id=upload.file_id,
+                file_id=upload.id,
                 upload_id=upload.id,
                 kind=declaration.kind,
             )

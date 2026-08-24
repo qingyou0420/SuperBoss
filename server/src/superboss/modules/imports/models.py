@@ -152,9 +152,9 @@ class ImportAttachment(Base):
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
-            ["upload_id", "file_id", "project_id"],
-            ["uploads.id", "uploads.file_id", "uploads.project_id"],
-            name="fk_import_attachments_upload_file_project",
+            ["upload_id"],
+            ["files.id"],
+            name="fk_import_attachments_upload_file",
             ondelete="RESTRICT",
         ),
         UniqueConstraint("job_id", "kind", name="uq_import_attachments_job_kind"),
@@ -163,6 +163,10 @@ class ImportAttachment(Base):
         CheckConstraint(
             "kind IN ('ORIGINAL','REVISED','K3_RAW')",
             name="ck_import_attachments_kind",
+        ),
+        CheckConstraint(
+            "upload_id = file_id",
+            name="ck_import_attachments_upload_matches_file",
         ),
         Index("ix_import_attachments_project", "project_id"),
     )

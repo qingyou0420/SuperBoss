@@ -8,7 +8,7 @@ from superboss.core.actors import Actor, get_actor
 from superboss.core.errors import DomainError
 from superboss.modules.audit.schemas import AuditEventInput
 from superboss.modules.audit.service import AuditService
-from superboss.modules.files.models import File, Upload
+from superboss.modules.files.models import File
 from superboss.modules.files.schemas import UploadComplete, UploadStart
 from superboss.modules.files.service import FileService
 from superboss.modules.files.storage import CompletedPart
@@ -102,8 +102,8 @@ async def _record_upload_denial_audit(
 
 
 async def _upload_project_id(session: AsyncSession, upload_id: UUID) -> UUID | None:
-    upload = await session.get(Upload, upload_id)
-    return upload.project_id if upload is not None else None
+    file = await session.get(File, upload_id)
+    return file.project_id if file is not None else None
 
 
 @router.post("/uploads", status_code=status.HTTP_201_CREATED)
@@ -115,7 +115,7 @@ async def start(
     service: FileService = Depends(get_service),
 ) -> dict[str, str]:
     try:
-        upload = await service.start_upload(actor, command, idempotency_key)
+        file = await service.start_upload(actor, command, idempotency_key)
     except DomainError as error:
         await _record_upload_denial_audit(
             request,
@@ -127,7 +127,7 @@ async def start(
             error=error,
         )
         raise
-    return {"upload_id": str(upload.id), "file_id": str(upload.file_id)}
+    return {"upload_id": str(file.id), "file_id": str(file.id)}
 
 
 @router.post("/uploads/{upload_id}/complete")

@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core.db import Base
 from superboss.modules.devices.models import DeviceConnection
-from superboss.modules.files.models import File, FileState, Upload
+from superboss.modules.files.models import File, FileState
 from superboss.modules.projects.models import Project
 from superboss.modules.users.models import User
 
@@ -139,15 +139,6 @@ async def test_database_rejects_import_attachment_from_a_different_file_project(
     )
     db_session.add(foreign_file)
     await db_session.flush()
-    foreign_upload = Upload(
-        file_id=foreign_file.id,
-        project_id=project_b.id,
-        uploader_id=device.id,
-        uploader_kind="device",
-        idempotency_key="import-schema-child",
-        metadata_fingerprint="c" * 64,
-        multipart_id="multipart-import-schema",
-    )
     job = models.ImportJob(
         device_id=device.id,
         project_id=project_a.id,
@@ -161,14 +152,14 @@ async def test_database_rejects_import_attachment_from_a_different_file_project(
         result_code=None,
         submitted_at=None,
     )
-    db_session.add_all([foreign_upload, job])
+    db_session.add(job)
     await db_session.flush()
     db_session.add(
         models.ImportAttachment(
             job_id=job.id,
             project_id=project_a.id,
             file_id=foreign_file.id,
-            upload_id=foreign_upload.id,
+            upload_id=foreign_file.id,
             kind=models.AttachmentKind.K3_RAW,
         )
     )
@@ -183,7 +174,7 @@ async def test_database_rejects_same_project_file_and_upload_pair_splicing(
     db_session: AsyncSession,
     active_owner: User,
 ) -> None:
-    """A valid Upload B may not be paired with File A merely because projects match."""
+    """An attachment cannot name a different file as its upload id."""
     models = import_models()
     project, device = await _seed_import_parent(
         db_session, active_owner, name="Same-project attachment pairing"
@@ -206,18 +197,6 @@ async def test_database_rejects_same_project_file_and_upload_pair_splicing(
     ]
     db_session.add_all(files)
     await db_session.flush()
-    uploads = [
-        Upload(
-            file_id=file.id,
-            project_id=project.id,
-            uploader_id=device.id,
-            uploader_kind="device",
-            idempotency_key=f"pair-{index}",
-            metadata_fingerprint=str(index) * 64,
-            multipart_id=f"multipart-{index}",
-        )
-        for index, file in enumerate(files, start=1)
-    ]
     job = models.ImportJob(
         device_id=device.id,
         project_id=project.id,
@@ -231,7 +210,7 @@ async def test_database_rejects_same_project_file_and_upload_pair_splicing(
         result_code=None,
         submitted_at=None,
     )
-    db_session.add_all([*uploads, job])
+    db_session.add(job)
     await db_session.commit()
 
     with pytest.raises(IntegrityError) as mismatch:
@@ -241,21 +220,21 @@ async def test_database_rejects_same_project_file_and_upload_pair_splicing(
                     job_id=job.id,
                     project_id=project.id,
                     file_id=files[0].id,
-                    upload_id=uploads[1].id,
+                    upload_id=files[1].id,
                     kind=models.AttachmentKind.K3_RAW,
                 )
             )
             await db_session.flush()
 
     assert _constraint_name(mismatch.value) == (
-        "fk_import_attachments_upload_file_project"
+        "ck_import_attachments_upload_matches_file"
     )
     db_session.add(
         models.ImportAttachment(
             job_id=job.id,
             project_id=project.id,
             file_id=files[0].id,
-            upload_id=uploads[0].id,
+            upload_id=files[0].id,
             kind=models.AttachmentKind.K3_RAW,
         )
     )

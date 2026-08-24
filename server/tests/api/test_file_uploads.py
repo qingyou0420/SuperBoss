@@ -163,12 +163,11 @@ def test_start_rejects_unsafe_category(file_client, category: str) -> None:
 async def test_start_rejects_invalid_idempotency_key(file_client, db_session: AsyncSession, key: str) -> None:
     from sqlalchemy import func, select
 
-    from superboss.modules.files.models import File, Upload
+    from superboss.modules.files.models import File
     client, storage = file_client; _login(client)
     response = client.post("/api/v1/files/uploads", json={"project_id": "00000000-0000-0000-0000-000000000001", "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": key})
     assert response.status_code == 422 and response.json()["error"]["code"] == "VALIDATION_ERROR" and storage.active == {}
     assert await db_session.scalar(select(func.count()).select_from(File)) == 0
-    assert await db_session.scalar(select(func.count()).select_from(Upload)) == 0
 
 
 def test_start_requires_idempotency_key(file_client) -> None:
@@ -181,13 +180,13 @@ def test_start_requires_idempotency_key(file_client) -> None:
 async def test_start_replays_identical_idempotency_key(file_client, db_session: AsyncSession) -> None:
     from sqlalchemy import func, select
 
-    from superboss.modules.files.models import File, Upload
+    from superboss.modules.files.models import File
     client, storage = file_client; project = Project(name="Replay"); db_session.add(project); await db_session.commit(); _login(client)
     body = {"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}
     headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "replay"}
     first, second = client.post("/api/v1/files/uploads", json=body, headers=headers), client.post("/api/v1/files/uploads", json=body, headers=headers)
     assert first.status_code == second.status_code == 201 and first.json() == second.json() and len(storage.active) == 1
-    assert await db_session.scalar(select(func.count()).select_from(File)) == 1 and await db_session.scalar(select(func.count()).select_from(Upload)) == 1
+    assert await db_session.scalar(select(func.count()).select_from(File)) == 1
 
 
 @pytest.mark.asyncio
@@ -195,37 +194,37 @@ async def test_start_replays_identical_idempotency_key(file_client, db_session: 
 async def test_start_rejects_changed_metadata_for_same_key(file_client, db_session: AsyncSession, change: dict[str, object]) -> None:
     from sqlalchemy import func, select
 
-    from superboss.modules.files.models import File, Upload
+    from superboss.modules.files.models import File
     client, storage = file_client; project = Project(name="HTTP conflict"); db_session.add(project); await db_session.commit(); _login(client)
     body = {"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09", "content_type": "application/pdf"}; headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "conflict"}
     assert client.post("/api/v1/files/uploads", json=body, headers=headers).status_code == 201
     body.update(change); response = client.post("/api/v1/files/uploads", json=body, headers=headers)
     assert response.status_code == 409 and response.json()["error"]["code"] == "FILE_UPLOAD_CONFLICT" and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and len(storage.active) == 1
-    assert await db_session.scalar(select(func.count()).select_from(File)) == 1 and await db_session.scalar(select(func.count()).select_from(Upload)) == 1
+    assert await db_session.scalar(select(func.count()).select_from(File)) == 1
 
 
 @pytest.mark.asyncio
 async def test_owner_presigns_first_upload_part(file_client, db_session: AsyncSession) -> None:
-    from superboss.modules.files.models import File, Upload
+    from superboss.modules.files.models import File
     client, storage = file_client; project = Project(name="Part HTTP"); db_session.add(project); await db_session.commit(); _login(client)
     headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "part"}
     started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers)
-    upload_id = started.json()["upload_id"]; upload = await db_session.get(Upload, upload_id); assert upload is not None
+    upload_id = started.json()["upload_id"]; upload = await db_session.get(File, upload_id); assert upload is not None
     response = client.post(f"/api/v1/files/uploads/{upload_id}/parts/1", headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))})
-    file = await db_session.get(File, upload.file_id)
+    file = await db_session.get(File, upload.id)
     assert response.status_code == 200 and response.json() == {"url": f"memory://part/{upload.multipart_id}/1"} and storage.expiries[-1] == 900 and file is not None and file.state.value == "UPLOADING"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("part_number", [0, 10_001])
 async def test_part_rejects_out_of_range_number(file_client, db_session: AsyncSession, part_number: int) -> None:
-    from superboss.modules.files.models import File, Upload
+    from superboss.modules.files.models import File
     client, storage = file_client; project = Project(name=f"Part {part_number}"); db_session.add(project); await db_session.commit(); _login(client)
     headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": f"part-{part_number}"}
     started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers)
-    upload = await db_session.get(Upload, started.json()["upload_id"]); assert upload is not None
+    upload = await db_session.get(File, started.json()["upload_id"]); assert upload is not None
     before = list(storage.expiries); response = client.post(f"/api/v1/files/uploads/{upload.id}/parts/{part_number}", headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))})
-    file = await db_session.get(File, upload.file_id)
+    file = await db_session.get(File, upload.id)
     assert response.status_code == 422 and response.json()["error"]["code"] == "VALIDATION_ERROR" and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and storage.expiries == before and file is not None and file.state.value == "UPLOADING"
 
 
@@ -238,25 +237,25 @@ def test_part_missing_upload_returns_not_found(file_client) -> None:
 
 @pytest.mark.asyncio
 async def test_part_rejects_quarantined_file(file_client, db_session: AsyncSession) -> None:
-    from superboss.modules.files.models import File, FileState, Upload
+    from superboss.modules.files.models import File, FileState
     client, storage = file_client; project = Project(name="Part state"); db_session.add(project); await db_session.commit(); _login(client)
     headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "part-state"}
     started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers)
-    upload = await db_session.get(Upload, started.json()["upload_id"]); assert upload is not None
-    file = await db_session.get(File, upload.file_id); assert file is not None; file.state = FileState.QUARANTINED; await db_session.commit()
+    upload = await db_session.get(File, started.json()["upload_id"]); assert upload is not None
+    file = await db_session.get(File, upload.id); assert file is not None; file.state = FileState.QUARANTINED; await db_session.commit()
     before = list(storage.expiries); response = client.post(f"/api/v1/files/uploads/{upload.id}/parts/1", headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))})
     assert response.status_code == 409 and response.json()["error"]["code"] == "FILE_UPLOAD_NOT_ACTIVE" and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and storage.expiries == before
 
 
 @pytest.mark.asyncio
 async def test_foreign_staff_cannot_presign_upload_part(file_client, db_session: AsyncSession) -> None:
-    from superboss.modules.files.models import File, Upload
+    from superboss.modules.files.models import File
     client, storage = file_client; target, assigned = Project(name="Part target"), Project(name="Part assigned"); staff = local_user("staff-1", display_name="Staff")
     db_session.add_all([target, assigned, staff]); await db_session.flush(); db_session.add(ProjectMember(project_id=assigned.id, user_id=staff.id)); await db_session.commit(); _login(client)
     headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "foreign-part"}
-    started = client.post("/api/v1/files/uploads", json={"project_id": str(target.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers); upload = await db_session.get(Upload, started.json()["upload_id"]); assert upload is not None
+    started = client.post("/api/v1/files/uploads", json={"project_id": str(target.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers); upload = await db_session.get(File, started.json()["upload_id"]); assert upload is not None
     client.cookies.clear(); _login(client, "staff-1")
-    before = list(storage.expiries); response = client.post(f"/api/v1/files/uploads/{upload.id}/parts/1", headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); file = await db_session.get(File, upload.file_id)
+    before = list(storage.expiries); response = client.post(f"/api/v1/files/uploads/{upload.id}/parts/1", headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); file = await db_session.get(File, upload.id)
     assert response.status_code == 403 and response.json()["error"]["code"] == "PROJECT_FORBIDDEN" and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and storage.expiries == before and file is not None and file.state.value == "UPLOADING"
 
 
@@ -281,7 +280,7 @@ async def test_complete_dispatches_after_quarantine_commit(file_client, db_sessi
     from sqlalchemy import select
 
     from superboss.modules.audit.models import AuditLog
-    from superboss.modules.files.models import File, Upload
+    from superboss.modules.files.models import File
     client, storage = file_client; app = client.app; project = Project(name="Complete dispatch"); db_session.add(project); await db_session.commit(); _login(client)
     observed: list[tuple[UUID, str]] = []
     async def dispatch(file_id: UUID, _delivery_key: UUID) -> None:
@@ -289,13 +288,13 @@ async def test_complete_dispatches_after_quarantine_commit(file_client, db_sessi
             file = await session.get(File, file_id); assert file is not None; observed.append((file_id, file.state.value))
     app.state.enqueue_file_scan = dispatch; storage.complete_size = 2
     headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "complete-dispatch"}
-    started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 2, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers); upload = await db_session.get(Upload, started.json()["upload_id"]); assert upload is not None
+    started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 2, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers); upload = await db_session.get(File, started.json()["upload_id"]); assert upload is not None
     request_id = "bba39a39-47ba-4ac5-9250-ccdba1d7f25e"
     response = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json={"parts": [{"part_number": 2, "etag": "b"}, {"part_number": 1, "etag": "a"}]}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "X-Request-ID": request_id})
-    file = await db_session.get(File, upload.file_id)
-    assert response.status_code == 200 and response.json() == {"file_id": str(upload.file_id), "state": "QUARANTINED"} and file is not None and file.state.value == "QUARANTINED" and storage.completed[upload.multipart_id][0].part_number == 1 and upload.multipart_id not in storage.active and observed == [(upload.file_id, "QUARANTINED")]
+    file = await db_session.get(File, upload.id)
+    assert response.status_code == 200 and response.json() == {"file_id": str(upload.id), "state": "QUARANTINED"} and file is not None and file.state.value == "QUARANTINED" and storage.completed[upload.multipart_id][0].part_number == 1 and upload.multipart_id not in storage.active and observed == [(upload.id, "QUARANTINED")]
     events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
-    assert len(events) == 1 and events[0].action == "file.upload.complete" and events[0].outcome == "SUCCESS" and events[0].object_type == "file" and events[0].object_id == upload.file_id and events[0].project_id == project.id and str(events[0].request_id) == request_id and events[0].actor_kind == "user" and events[0].metadata_json["state"] == "QUARANTINED" and events[0].metadata_json["size_bytes"] == 2 and events[0].metadata_json["actor_role"] == "OWNER"
+    assert len(events) == 1 and events[0].action == "file.upload.complete" and events[0].outcome == "SUCCESS" and events[0].object_type == "file" and events[0].object_id == upload.id and events[0].project_id == project.id and str(events[0].request_id) == request_id and events[0].actor_kind == "user" and events[0].metadata_json["state"] == "QUARANTINED" and events[0].metadata_json["size_bytes"] == 2 and events[0].metadata_json["actor_role"] == "OWNER"
 
 
 @pytest.mark.asyncio
@@ -305,13 +304,13 @@ async def test_complete_size_mismatch_persists_failed_without_dispatch(file_clie
     from sqlalchemy import select
 
     from superboss.modules.audit.models import AuditLog
-    from superboss.modules.files.models import File, Upload
+    from superboss.modules.files.models import File
     client, storage = file_client; app = client.app; project = Project(name="Complete mismatch"); db_session.add(project); await db_session.commit(); _login(client)
     dispatched: list[UUID] = []
     app.state.enqueue_file_scan = lambda file_id, _delivery_key: dispatched.append(file_id); storage.complete_size = 1
     headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "mismatch"}
-    started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 2, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers); upload = await db_session.get(Upload, started.json()["upload_id"]); assert upload is not None
-    response = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json={"parts": [{"part_number": 1, "etag": "secret-etag"}]}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); file = await db_session.get(File, upload.file_id)
+    started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 2, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers); upload = await db_session.get(File, started.json()["upload_id"]); assert upload is not None
+    response = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json={"parts": [{"part_number": 1, "etag": "secret-etag"}]}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); file = await db_session.get(File, upload.id)
     events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
     assert response.status_code == 409 and response.json()["error"]["code"] == "FILE_UPLOAD_SIZE_MISMATCH" and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and file is not None and file.state.value == "FAILED" and dispatched == [] and file.object_key in storage.deleted and upload.multipart_id not in storage.active and "secret-etag" not in response.text and file.object_key not in response.text and not [event for event in events if event.action == "file.upload.complete" and event.outcome == "SUCCESS"]
 
@@ -323,12 +322,12 @@ async def test_complete_storage_error_persists_safe_pending_state(file_client, d
     from sqlalchemy import select
 
     from superboss.modules.audit.models import AuditLog
-    from superboss.modules.files.models import File, Upload
+    from superboss.modules.files.models import File
     client, storage = file_client; app = client.app; project = Project(name="Complete storage error"); db_session.add(project); await db_session.commit(); _login(client)
     dispatched: list[UUID] = []; app.state.enqueue_file_scan = lambda file_id, _delivery_key: dispatched.append(file_id); storage.complete_error = RuntimeError("S3 secret")
     headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "storage-error"}
-    started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers); upload = await db_session.get(Upload, started.json()["upload_id"]); assert upload is not None
-    response = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json={"parts": [{"part_number": 1, "etag": "secret-etag"}]}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); file = await db_session.get(File, upload.file_id); events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
+    started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers); upload = await db_session.get(File, started.json()["upload_id"]); assert upload is not None
+    response = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json={"parts": [{"part_number": 1, "etag": "secret-etag"}]}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); file = await db_session.get(File, upload.id); events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
     assert response.status_code == 503 and response.json()["error"]["code"] == "FILE_COMPLETION_PENDING" and file is not None and file.state.value == "UPLOADING" and dispatched == [] and upload.multipart_id in storage.active and "S3 secret" not in response.text and "secret-etag" not in response.text and file.object_key not in response.text and not [event for event in events if event.action == "file.upload.complete" and event.outcome == "SUCCESS"]
 
 
@@ -338,11 +337,11 @@ async def test_complete_rejects_invalid_parts_before_side_effects(file_client, d
     from sqlalchemy import select
 
     from superboss.modules.audit.models import AuditLog
-    from superboss.modules.files.models import File, Upload
+    from superboss.modules.files.models import File
     client, storage = file_client; app = client.app; project = Project(name="Complete validation"); db_session.add(project); await db_session.commit(); _login(client)
     dispatched: list[object] = []; app.state.enqueue_file_scan = lambda file_id, _delivery_key: dispatched.append(file_id)
-    headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "complete-validation"}; started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers); upload = await db_session.get(Upload, started.json()["upload_id"]); assert upload is not None
-    response = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json={"parts": parts}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); file = await db_session.get(File, upload.file_id); events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
+    headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "complete-validation"}; started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers); upload = await db_session.get(File, started.json()["upload_id"]); assert upload is not None
+    response = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json={"parts": parts}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); file = await db_session.get(File, upload.id); events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
     assert response.status_code == 422 and response.json()["error"]["code"] == "VALIDATION_ERROR" and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and file is not None and file.state.value == "UPLOADING" and upload.multipart_id in storage.active and storage.completed == {} and dispatched == [] and events == []
 
 
@@ -353,11 +352,11 @@ async def test_repeat_complete_is_rejected_without_redelivery(file_client, db_se
     from sqlalchemy import select
 
     from superboss.modules.audit.models import AuditLog
-    from superboss.modules.files.models import File, Upload
+    from superboss.modules.files.models import File
     client, storage = file_client; app = client.app; project = Project(name="Repeat complete"); db_session.add(project); await db_session.commit(); _login(client)
     dispatched: list[UUID] = []; app.state.enqueue_file_scan = lambda file_id, _delivery_key: dispatched.append(file_id)
-    headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "repeat-complete"}; started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers); upload = await db_session.get(Upload, started.json()["upload_id"]); assert upload is not None
-    body = {"parts": [{"part_number": 1, "etag": "e"}]}; first = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json=body, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); second = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json=body, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); file = await db_session.get(File, upload.file_id)
+    headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "repeat-complete"}; started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers); upload = await db_session.get(File, started.json()["upload_id"]); assert upload is not None
+    body = {"parts": [{"part_number": 1, "etag": "e"}]}; first = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json=body, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); second = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json=body, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); file = await db_session.get(File, upload.id)
     events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
     assert first.status_code == 200 and second.status_code == 200 and file is not None and file.state.value == "QUARANTINED" and len(storage.completed) == 1 and len(dispatched) == 1 and len([event for event in events if event.action == "file.upload.complete" and event.outcome == "SUCCESS"]) == 1
 
@@ -377,7 +376,7 @@ async def test_exact_complete_replay_returns_current_terminal_state_without_rede
     from sqlalchemy import select
 
     from superboss.modules.audit.models import AuditLog
-    from superboss.modules.files.models import File, FileState, Upload
+    from superboss.modules.files.models import File, FileState
 
     client, storage = file_client
     app = client.app
@@ -405,7 +404,7 @@ async def test_exact_complete_replay_returns_current_terminal_state_without_rede
             "Idempotency-Key": f"terminal-{terminal_state.lower()}",
         },
     )
-    upload = await db_session.get(Upload, started.json()["upload_id"])
+    upload = await db_session.get(File, started.json()["upload_id"])
     assert upload is not None
     body = {"parts": [{"part_number": 1, "etag": "stable-etag"}]}
     first = client.post(
@@ -413,7 +412,7 @@ async def test_exact_complete_replay_returns_current_terminal_state_without_rede
         json=body,
         headers={"X-CSRF-Token": csrf},
     )
-    file = await db_session.get(File, upload.file_id)
+    file = await db_session.get(File, upload.id)
     assert first.status_code == 200 and file is not None
     file.state = FileState(terminal_state)
     await db_session.commit()
@@ -436,12 +435,12 @@ async def test_exact_complete_replay_returns_current_terminal_state_without_rede
     )
     assert replay.status_code == 200
     assert replay.json() == {
-        "file_id": str(upload.file_id),
+        "file_id": str(upload.id),
         "state": terminal_state,
     }
     assert storage.complete_calls == 1
     assert len(storage.completed) == 1
-    assert dispatched == [upload.file_id]
+    assert dispatched == [upload.id]
     assert [event.id for event in completion_events_after] == [
         event.id for event in completion_events_before
     ]
@@ -453,11 +452,11 @@ async def test_exact_complete_replay_returns_current_terminal_state_without_rede
     )
     assert different_parts.status_code == 200
     assert different_parts.json() == {
-        "file_id": str(upload.file_id),
+        "file_id": str(upload.id),
         "state": terminal_state,
     }
     assert storage.complete_calls == 1
-    assert dispatched == [upload.file_id]
+    assert dispatched == [upload.id]
 
 
 @pytest.mark.asyncio
@@ -544,7 +543,7 @@ async def test_foreign_staff_cannot_complete_upload(file_client, db_session: Asy
     from sqlalchemy import select
 
     from superboss.modules.audit.models import AuditLog
-    from superboss.modules.files.models import File, Upload
+    from superboss.modules.files.models import File
 
     client, storage = file_client
     app = client.app
@@ -563,7 +562,7 @@ async def test_foreign_staff_cannot_complete_upload(file_client, db_session: Asy
         json={"project_id": str(target.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "璧勬枡", "file_date": "2026-08-09"},
         headers=start_headers,
     )
-    upload = await db_session.get(Upload, started.json()["upload_id"])
+    upload = await db_session.get(File, started.json()["upload_id"])
     assert started.status_code == 201 and upload is not None
 
     dispatched: list[object] = []
@@ -576,7 +575,7 @@ async def test_foreign_staff_cannot_complete_upload(file_client, db_session: Asy
         headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))},
     )
 
-    file = await db_session.get(File, upload.file_id)
+    file = await db_session.get(File, upload.id)
     events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
     assert response.status_code == 403 and response.json()["error"]["code"] == "PROJECT_FORBIDDEN"
     assert file is not None and file.state.value == "UPLOADING"
@@ -1000,7 +999,7 @@ async def test_start_enforces_content_type_database_length_boundary(
 ) -> None:
     from sqlalchemy import func, select
 
-    from superboss.modules.files.models import File, Upload
+    from superboss.modules.files.models import File
 
     client, storage = file_client
     project = Project(name=f"Content type {len(content_type)}")
@@ -1022,7 +1021,7 @@ async def test_start_enforces_content_type_database_length_boundary(
     )
 
     file_count = await db_session.scalar(select(func.count()).select_from(File))
-    upload_count = await db_session.scalar(select(func.count()).select_from(Upload))
+    upload_count = await db_session.scalar(select(func.count()).select_from(File))
     assert response.status_code == status_code
     assert file_count == upload_count == (0 if status_code == 422 else 1)
     assert len(storage.active) == (0 if status_code == 422 else 1)
@@ -1044,7 +1043,7 @@ async def test_authenticated_upload_denials_are_safely_audited(file_client, db_s
     from sqlalchemy import select
 
     from superboss.modules.audit.models import AuditLog
-    from superboss.modules.files.models import File, FileState, Upload
+    from superboss.modules.files.models import File, FileState
 
     client, storage = file_client
     target, assigned = Project(name="I3 target"), Project(name="I3 assigned")
@@ -1053,8 +1052,8 @@ async def test_authenticated_upload_denials_are_safely_audited(file_client, db_s
     db_session.add(ProjectMember(project_id=assigned.id, user_id=staff.id)); await db_session.commit()
     _login(client); csrf = str(client.cookies.get("XSRF-TOKEN"))
     started = client.post("/api/v1/files/uploads", json=_i3_body(target.id), headers={"X-CSRF-Token": csrf, "Idempotency-Key": "i3-existing"})
-    upload = await db_session.get(Upload, started.json()["upload_id"]); assert started.status_code == 201 and upload is not None
-    file = await db_session.get(File, upload.file_id); assert file is not None; file.state = FileState.QUARANTINED; await db_session.commit()
+    upload = await db_session.get(File, started.json()["upload_id"]); assert started.status_code == 201 and upload is not None
+    file = await db_session.get(File, upload.id); assert file is not None; file.state = FileState.QUARANTINED; await db_session.commit()
     missing_id = uuid4()
     inactive_part = client.post(f"/api/v1/files/uploads/{upload.id}/parts/1", headers={"X-CSRF-Token": csrf, "X-Request-ID": "00000000-0000-4000-8000-000000000001"})
     inactive_complete = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json={"parts": [{"part_number": 1, "etag": "unsafe-etag"}]}, headers={"X-CSRF-Token": csrf, "X-Request-ID": "00000000-0000-4000-8000-000000000002"})
@@ -1110,7 +1109,7 @@ async def test_upload_pre_authentication_and_authorized_paths_do_not_audit_denie
 async def test_upload_denied_audit_failure_preserves_domain_responses(file_client, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> None:
     from uuid import uuid4
 
-    from superboss.modules.files.models import File, FileState, Upload
+    from superboss.modules.files.models import File, FileState
 
     class FailingAuditService:
         def __init__(self, _session_factory: object) -> None: pass
@@ -1118,8 +1117,8 @@ async def test_upload_denied_audit_failure_preserves_domain_responses(file_clien
 
     client, storage = file_client; project = Project(name="I3 audit unavailable"); db_session.add(project); await db_session.commit(); _login(client)
     csrf = str(client.cookies.get("XSRF-TOKEN")); started = client.post("/api/v1/files/uploads", json=_i3_body(project.id), headers={"X-CSRF-Token": csrf, "Idempotency-Key": "i3-audit"})
-    upload = await db_session.get(Upload, started.json()["upload_id"]); assert started.status_code == 201 and upload is not None
-    file = await db_session.get(File, upload.file_id); assert file is not None; file.state = FileState.QUARANTINED
+    upload = await db_session.get(File, started.json()["upload_id"]); assert started.status_code == 201 and upload is not None
+    file = await db_session.get(File, upload.id); assert file is not None; file.state = FileState.QUARANTINED
     assigned = Project(name="I3 audit assigned"); staff = local_user("staff-1", display_name="Staff")
     db_session.add_all([assigned, staff]); await db_session.flush(); db_session.add(ProjectMember(project_id=assigned.id, user_id=staff.id)); await db_session.commit()
     monkeypatch.setattr("superboss.modules.files.router.AuditService", FailingAuditService)
@@ -1136,7 +1135,7 @@ async def test_start_provisioning_failure_is_safe_and_durable(file_client, db_se
     """An S3 create response failure must retain recoverable provisioning state and return 503."""
     from sqlalchemy import select
 
-    from superboss.modules.files.models import File, Upload
+    from superboss.modules.files.models import File
 
     client, storage = file_client
     project = Project(name="HTTP provisioning pending")
@@ -1152,7 +1151,7 @@ async def test_start_provisioning_failure_is_safe_and_durable(file_client, db_se
     )
 
     file = await db_session.scalar(select(File))
-    upload = await db_session.scalar(select(Upload))
+    upload = await db_session.scalar(select(File))
     assert response.status_code == 503 and response.json()["error"]["code"] == "FILE_PROVISIONING_PENDING"
     assert response.headers["X-Request-ID"] == response.json()["error"]["request_id"] == request_id
     assert "provider create secret" not in response.text

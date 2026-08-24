@@ -451,7 +451,7 @@ async def test_size_mismatch_aborts_and_persists_failed(db_session, active_owner
         await service.complete_upload(actor, upload.id, [CompletedPart(1, "e")])
     from superboss.modules.files.models import File
 
-    file = await db_session.get(File, upload.file_id)
+    file = await db_session.get(File, upload.id)
     assert file is not None
     assert file.state.value == "FAILED" and file.scan_result == "SIZE_MISMATCH"
     assert file.object_key in storage.deleted
@@ -523,7 +523,7 @@ async def test_part_rejects_every_non_uploading_state(db_session, active_owner, 
         f"{state}-key",
     )
     file = await db_session.get(
-        __import__("superboss.modules.files.models", fromlist=["File"]).File, upload.file_id
+        __import__("superboss.modules.files.models", fromlist=["File"]).File, upload.id
     )
     assert file is not None
     file.state = FileState(state)
@@ -603,7 +603,7 @@ async def test_storage_error_is_safe_and_leaves_uploading_file(
     with pytest.raises(FileCompletionPendingError) as error:
         await service.complete_upload(actor, upload.id, [CompletedPart(1, "e")])
     assert "secret" not in str(error.value).lower()
-    file = await db_session.get(File, upload.file_id)
+    file = await db_session.get(File, upload.id)
     assert file is not None and file.state == FileState.UPLOADING
     assert upload.multipart_id in storage.active and upload.multipart_id not in storage.aborted
 
@@ -637,7 +637,7 @@ async def test_deleted_file_cascades_upload_and_operations_fail_closed(
         "cascade",
     )
     upload_id = upload.id
-    file = await db_session.get(File, upload.file_id)
+    file = await db_session.get(File, upload.id)
     assert file is not None
     await db_session.delete(file)
     await db_session.commit()
@@ -837,7 +837,7 @@ async def test_concurrent_same_metadata_reuses_winner_without_loser_multipart(
     from sqlalchemy import func, select
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
-    from superboss.modules.files.models import File, Upload
+    from superboss.modules.files.models import File
     from superboss.modules.files.schemas import UploadStart
     from superboss.modules.files.service import FileService
 
@@ -864,7 +864,7 @@ async def test_concurrent_same_metadata_reuses_winner_without_loser_multipart(
                 actor, command, f"race-{round_number}"
             )
             await session.commit()
-            return upload.id, upload.file_id
+            return upload.id, upload.id
 
     first, second = await asyncio.wait_for(asyncio.gather(create(), create()), timeout=10)
     assert (
@@ -873,7 +873,7 @@ async def test_concurrent_same_metadata_reuses_winner_without_loser_multipart(
         and storage.create_calls == 1
         and storage.aborted == set()
     )
-    assert await db_session.scalar(select(func.count()).select_from(Upload)) == 1
+    assert await db_session.scalar(select(func.count()).select_from(File)) == 1
     assert await db_session.scalar(select(func.count()).select_from(File)) == 1
 
 
@@ -888,7 +888,7 @@ async def test_concurrent_different_metadata_conflicts_without_loser_multipart(
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from superboss.core.errors import ConflictError
-    from superboss.modules.files.models import Upload
+    from superboss.modules.files.models import File
     from superboss.modules.files.schemas import UploadStart
     from superboss.modules.files.service import FileService
 
@@ -930,7 +930,7 @@ async def test_concurrent_different_metadata_conflicts_without_loser_multipart(
         and storage.create_calls == 1
         and storage.aborted == set()
     )
-    saved = await db_session.get(Upload, winner.id)
+    saved = await db_session.get(File, winner.id)
     assert (
-        saved is not None and await db_session.scalar(select(func.count()).select_from(Upload)) == 1
+        saved is not None and await db_session.scalar(select(func.count()).select_from(File)) == 1
     )

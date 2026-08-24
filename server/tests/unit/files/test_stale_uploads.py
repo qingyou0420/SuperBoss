@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from superboss.modules.files.models import File, FileState, Upload
+from superboss.modules.files.models import File, FileState
 from superboss.modules.projects.models import Project
 from tests.files.storage import InMemoryObjectStorage
 
@@ -31,7 +31,6 @@ async def seed_upload(
     multipart_id: str | None = "multipart-known",
 ) -> tuple[UUID, UUID, str]:
     file_id = uuid4()
-    upload_id = uuid4()
     project_id = uuid4()
     project = Project(id=project_id, name=f"Stale {file_id}")
     session.add(project)
@@ -53,21 +52,13 @@ async def seed_upload(
         content_type="application/pdf",
         created_at=created_at,
         updated_at=created_at,
-    )
-    upload = Upload(
-        id=upload_id,
-        file_id=file_id,
-        project_id=project_id,
-        uploader_id=project_id,
-        uploader_kind="system",
         metadata_fingerprint="0" * 64,
         idempotency_key=f"stale-{file_id}",
         multipart_id=multipart_id,
-        created_at=created_at,
     )
-    session.add_all([file, upload])
+    session.add(file)
     await session.commit()
-    return file_id, upload_id, object_key
+    return file_id, file_id, object_key
 
 
 @pytest.mark.asyncio

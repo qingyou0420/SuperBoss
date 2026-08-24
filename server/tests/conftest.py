@@ -25,7 +25,6 @@ from superboss.modules.devices.models import (
 )
 from superboss.modules.files.models import (
     File,
-    Upload,
 )
 from superboss.modules.projects.models import Project, ProjectMember
 from superboss.modules.users.models import Role, User
@@ -78,7 +77,6 @@ async def db_session(postgres_database: str) -> AsyncIterator[AsyncSession]:
             await connection.execute(delete(DeviceConnection))
             await connection.execute(delete(DevicePairingProject))
             await connection.execute(delete(DevicePairingCode))
-            await connection.execute(delete(Upload))
             await connection.execute(delete(File))
             await connection.execute(delete(ProjectMember))
             await connection.execute(delete(Project))

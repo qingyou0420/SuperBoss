@@ -6,7 +6,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -23,7 +23,7 @@ from superboss.core.errors import (
 )
 from superboss.infrastructure.clamav import Scanner, ScanStatus
 from superboss.modules.audit.models import AuditLog
-from superboss.modules.files.models import File, FileState, Upload
+from superboss.modules.files.models import File, FileState
 from superboss.modules.files.schemas import UploadStart
 from superboss.modules.files.storage import CompletedPart, ObjectStorage
 
@@ -196,13 +196,13 @@ class FileService:
 
     async def start_upload(
         self, actor: Actor, command: UploadStart, idempotency_key: str
-    ) -> Upload:
+    ) -> File:
         require_project_access(actor, command.project_id)
         return await self._start_upload(actor, command, idempotency_key)
 
     async def start_import_upload(
         self, actor: Actor, command: UploadStart, idempotency_key: str
-    ) -> Upload:
+    ) -> File:
         if (
             actor.kind != "device"
             or actor.role is not None
@@ -214,24 +214,23 @@ class FileService:
 
     async def _start_upload(
         self, actor: Actor, command: UploadStart, idempotency_key: str
-    ) -> Upload:
+    ) -> File:
         if not re.fullmatch(r"[!-~]{1,255}", idempotency_key):
             raise ValueError("invalid Idempotency-Key")
+        fingerprint = self._fingerprint(command)
         existing = await self.session.scalar(
-            select(Upload).where(
-                Upload.project_id == command.project_id,
-                Upload.uploader_kind == actor.kind,
-                Upload.uploader_id == actor.subject_id,
-                Upload.idempotency_key == idempotency_key,
+            select(File).where(
+                File.project_id == command.project_id,
+                File.uploader_kind == actor.kind,
+                File.uploader_id == actor.subject_id,
+                File.idempotency_key == idempotency_key,
             )
         )
         if existing is not None:
-            file = await self.session.get(File, existing.file_id)
-            if file is None or existing.metadata_fingerprint != self._fingerprint(command):
+            if existing.metadata_fingerprint != fingerprint:
                 raise FileUploadConflictError()
-            return await self._provision_upload(existing, file)
+            return await self._provision_upload(existing)
         file_id = uuid4()
-        upload_id = uuid4()
         category = self._segment(command.category, "uncategorized")
         name = self._segment(command.filename, "file")
         key = (
@@ -250,18 +249,11 @@ class FileService:
             uploader_id=actor.subject_id,
             uploader_kind=actor.kind,
             content_type=command.content_type,
-        )
-        upload = Upload(
-            id=upload_id,
-            file_id=file_id,
-            project_id=command.project_id,
-            uploader_id=actor.subject_id,
-            uploader_kind=actor.kind,
-            metadata_fingerprint=self._fingerprint(command),
+            metadata_fingerprint=fingerprint,
             idempotency_key=idempotency_key,
             multipart_id=None,
         )
-        self.session.add_all([file, upload])
+        self.session.add(file)
         try:
             await self.session.flush()
         except IntegrityError as error:
@@ -270,41 +262,31 @@ class FileService:
             if not is_idempotency:
                 raise
             winner = await self.session.scalar(
-                select(Upload).where(
-                    Upload.project_id == command.project_id,
-                    Upload.uploader_kind == actor.kind,
-                    Upload.uploader_id == actor.subject_id,
-                    Upload.idempotency_key == idempotency_key,
+                select(File).where(
+                    File.project_id == command.project_id,
+                    File.uploader_kind == actor.kind,
+                    File.uploader_id == actor.subject_id,
+                    File.idempotency_key == idempotency_key,
                 )
             )
-            if winner is not None and winner.metadata_fingerprint == self._fingerprint(command):
-                winner_file = await self.session.get(File, winner.file_id)
-                if winner_file is not None:
-                    return await self._provision_upload(winner, winner_file)
+            if winner is not None and winner.metadata_fingerprint == fingerprint:
+                return await self._provision_upload(winner)
             raise FileUploadConflictError() from error
         await self.session.commit()
-        return await self._provision_upload(upload, file)
+        return await self._provision_upload(file)
 
-    async def _provision_upload(self, upload: Upload, file: File) -> Upload:
+    async def _provision_upload(self, file: File) -> File:
         fresh_file = await self.session.scalar(
             select(File)
-            .where(File.id == upload.file_id)
+            .where(File.id == file.id)
             .with_for_update()
             .execution_options(populate_existing=True)
         )
-        if (
-            fresh_file is None
-            or fresh_file.state != FileState.UPLOADING
-            or fresh_file.project_id != upload.project_id
-        ):
+        if fresh_file is None or fresh_file.state != FileState.UPLOADING:
             await self.session.rollback()
             raise FileProvisioningPendingError()
-        fresh_upload = await self.session.get(Upload, upload.id, populate_existing=True)
-        if fresh_upload is None or fresh_upload.file_id != fresh_file.id:
-            await self.session.rollback()
-            raise FileProvisioningPendingError()
-        if fresh_upload.multipart_id is not None:
-            return fresh_upload
+        if fresh_file.multipart_id is not None:
+            return fresh_file
         try:
             existing = await asyncio.wait_for(
                 self._storage().list_multipart_uploads(fresh_file.object_key),
@@ -314,9 +296,9 @@ class FileService:
             await self.session.rollback()
             raise FileProvisioningPendingError() from error
         if len(existing) == 1:
-            fresh_upload.multipart_id = existing[0]
+            fresh_file.multipart_id = existing[0]
             await self.session.commit()
-            return fresh_upload
+            return fresh_file
         for leftover in existing:
             try:
                 await self._storage().abort_multipart(fresh_file.object_key, leftover)
@@ -332,14 +314,14 @@ class FileService:
         except Exception as error:
             await self.session.rollback()
             raise FileProvisioningPendingError() from error
-        fresh_upload.multipart_id = multipart_id
+        fresh_file.multipart_id = multipart_id
         await self.session.commit()
-        return fresh_upload
+        return fresh_file
 
     @staticmethod
     def _is_idempotency_conflict(error: IntegrityError) -> bool:
         cause = getattr(error.orig, "__cause__", None)
-        return getattr(cause, "constraint_name", None) == "uq_upload_idempotency"
+        return getattr(cause, "constraint_name", None) == "uq_files_upload_idempotency"
 
     @staticmethod
     def _fingerprint(command: UploadStart) -> str:
@@ -381,21 +363,18 @@ class FileService:
     ) -> str:
         if not 1 <= part_number <= 10000:
             raise ValueError("invalid part number")
-        upload = await self.session.scalar(
-            select(Upload).where(Upload.id == upload_id).with_for_update()
+        file = await self.session.scalar(
+            select(File).where(File.id == upload_id).with_for_update()
         )
-        if upload is None:
+        if file is None:
             raise FileUploadNotFoundError()
-        file = await self.session.get(File, upload.file_id)
-        if file is not None and file.project_id != upload.project_id:
-            raise FileUploadProjectMismatchError()
-        if file is None or file.state != FileState.UPLOADING:
+        if file.state != FileState.UPLOADING:
             raise FileUploadNotActiveError()
         self._authorize_upload_operation(actor, file.project_id, import_device=import_device)
-        if upload.multipart_id is None:
+        if file.multipart_id is None:
             raise FileUploadNotActiveError()
         return await self._storage().presign_upload_part(
-            file.object_key, upload.multipart_id, part_number, 900
+            file.object_key, file.multipart_id, part_number, 900
         )
 
     async def complete_upload(
@@ -429,23 +408,18 @@ class FileService:
         *,
         import_device: bool,
     ) -> File:
-        upload = await self.session.get(Upload, upload_id)
-        if upload is None:
-            raise FileUploadNotFoundError()
         file = await self.session.scalar(
             select(File)
-            .where(File.id == upload.file_id)
+            .where(File.id == upload_id)
             .with_for_update()
             .execution_options(populate_existing=True)
         )
         if file is None:
-            raise FileUploadNotActiveError()
-        if file.project_id != upload.project_id:
-            raise FileUploadProjectMismatchError()
+            raise FileUploadNotFoundError()
         self._authorize_upload_operation(actor, file.project_id, import_device=import_device)
         if file.state != FileState.UPLOADING:
             return file
-        if upload.multipart_id is None:
+        if file.multipart_id is None:
             raise FileUploadNotActiveError()
         if len({part.part_number for part in parts}) != len(parts):
             raise ValueError("duplicate part number")
@@ -453,7 +427,7 @@ class FileService:
         try:
             metadata = await asyncio.wait_for(
                 self._storage().complete_multipart(
-                    file.object_key, upload.multipart_id, canonical
+                    file.object_key, file.multipart_id, canonical
                 ),
                 timeout=self._STORAGE_TIMEOUT_SECONDS,
             )
@@ -548,13 +522,9 @@ class StaleUploadService:
         async with self.session_factory() as session:
             candidate_ids = list(
                 await session.scalars(
-                    select(Upload.file_id)
-                    .join(
-                        File,
-                        and_(File.id == Upload.file_id, File.project_id == Upload.project_id),
-                    )
-                    .where(File.state == FileState.UPLOADING, Upload.created_at < cutoff)
-                    .order_by(Upload.created_at, Upload.id)
+                    select(File.id)
+                    .where(File.state == FileState.UPLOADING, File.created_at < cutoff)
+                    .order_by(File.created_at, File.id)
                     .limit(limit)
                 )
             )
@@ -573,13 +543,12 @@ class StaleUploadService:
             )
             if file is None or file.state != FileState.UPLOADING:
                 return False
-            upload = await session.scalar(select(Upload).where(Upload.file_id == file.id))
-            if upload is None or upload.created_at >= cutoff:
+            if file.created_at >= cutoff:
                 return False
             file.state = FileState.FAILED
             file.scan_result = "UPLOAD_EXPIRED"
             object_key = file.object_key
-            multipart_id = upload.multipart_id
+            multipart_id = file.multipart_id
         if self.storage is not None:
             if multipart_id is not None:
                 try:

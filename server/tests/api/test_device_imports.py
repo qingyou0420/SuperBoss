@@ -25,7 +25,7 @@ from superboss.modules.devices.models import (
     DeviceSession,
 )
 from superboss.modules.devices.service import DeviceService, DeviceTokenPair
-from superboss.modules.files.models import File, FileState, Upload
+from superboss.modules.files.models import File, FileState
 from superboss.modules.files.storage import ObjectMetadata
 from superboss.modules.imports.models import ImportJob, ImportStatus
 from superboss.modules.imports.schemas import ImportJobCreate
@@ -413,7 +413,7 @@ async def test_device_bearer_completes_the_import_flow_with_exact_safe_responses
 
     db_session.expire_all()
     file = await db_session.get(File, UUID(attachment["file_id"]))
-    upload = await db_session.get(Upload, UUID(attachment["upload_id"]))
+    upload = await db_session.get(File, UUID(attachment["upload_id"]))
     assert file is not None and upload is not None
     serialized_create = created.text
     assert file.object_key not in serialized_create
@@ -535,7 +535,7 @@ async def test_create_unknown_project_matches_existing_ungranted_denial(
     assert _storage_calls(import_api.storage) == before
     assert not await db_session.scalar(select(ImportJob.id))
     assert not await db_session.scalar(select(File.id))
-    assert not await db_session.scalar(select(Upload.id))
+    assert not await db_session.scalar(select(File.id))
     audits = list(
         await db_session.scalars(
             select(AuditLog).where(
@@ -590,7 +590,7 @@ async def test_unknown_project_denial_audit_failure_is_safe_and_fail_closed(
     assert _storage_calls(import_api.storage) == before
     assert not await db_session.scalar(select(ImportJob.id))
     assert not await db_session.scalar(select(File.id))
-    assert not await db_session.scalar(select(Upload.id))
+    assert not await db_session.scalar(select(File.id))
     assert not await db_session.scalar(
         select(AuditLog.id).where(
             AuditLog.request_id == request_id,
@@ -1697,7 +1697,7 @@ async def test_owner_list_is_bounded_newest_first_and_uses_safe_summary_models(
     assert pair.access_token not in response.text
     for item in seeded:
         file = await db_session.get(File, item.file_id)
-        upload = await db_session.get(Upload, item.upload_id)
+        upload = await db_session.get(File, item.upload_id)
         assert file is not None and upload is not None and upload.multipart_id is not None
         assert file.object_key not in response.text
         assert upload.multipart_id not in response.text
