@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "task_id": "connector-cloud-update",
-  "status": "active",
+  "status": "complete",
   "base_commit": "54a07d3856e0876389eb8a7b563385bb7ec2c7cb",
   "bootstrap": false,
   "candidate": false,
