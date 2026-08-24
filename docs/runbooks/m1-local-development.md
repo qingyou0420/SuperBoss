@@ -22,6 +22,11 @@ hosts, cookies, or tokens to a command transcript.
 docker compose --env-file .env -f docker-compose.dev.yml up -d --build
 docker compose --env-file .env -f docker-compose.dev.yml ps
 docker compose --env-file .env -f docker-compose.dev.yml exec -T api alembic upgrade head
+
+If this checkout replaced the old 18-revision chain with `0001_baseline` and your
+Postgres volume already has `alembic_version` from a previous schema, recreate
+the volume (`docker compose ... down -v`) then start and migrate again. A
+single-owner local database is rebuilt, not upgraded across that cut.
 ```
 
 Bootstrap or recover the unique OWNER by following `local-auth-setup.md`. The interactive prompt is

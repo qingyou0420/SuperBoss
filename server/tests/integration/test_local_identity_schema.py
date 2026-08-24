@@ -110,64 +110,6 @@ def test_orm_exposes_only_local_identity_columns() -> None:
     assert "wecom_userid" not in User.__table__.columns
 
 
-def test_empty_0017_round_trip_replaces_only_identity_schema(postgres_database: str) -> None:
-    async def operation(database_url: str) -> None:
-        assert _alembic(database_url, "upgrade", "0017_import_jobs").returncode == 0
-        baseline = await _catalog(database_url)
-
-        upgraded = _alembic(database_url, "upgrade", "head")
-        assert upgraded.returncode == 0, upgraded.stderr
-        columns, constraints, tables = await _catalog(database_url)
-        assert set(columns) == LOCAL_COLUMNS
-        assert "oauth_states" not in tables
-        assert {
-            "ck_users_failed_login_count",
-            "ck_users_password_hash",
-            "ck_users_username",
-            "uq_users_username",
-        } <= set(constraints)
-
-        downgraded = _alembic(database_url, "downgrade", "0017_import_jobs")
-        assert downgraded.returncode == 0, downgraded.stderr
-        assert await _catalog(database_url) == baseline
-
-    asyncio.run(_with_temporary_database(postgres_database, operation))
-
-
-@pytest.mark.parametrize("occupied", ["users", "oauth_states"])
-def test_upgrade_refuses_nonempty_identity_before_catalog_mutation(
-    postgres_database: str, occupied: str
-) -> None:
-    async def operation(database_url: str) -> None:
-        assert _alembic(database_url, "upgrade", "0017_import_jobs").returncode == 0
-        connection = await asyncpg.connect(_asyncpg_url(database_url))
-        try:
-            if occupied == "users":
-                await connection.execute(
-                    "INSERT INTO users(id,wecom_userid,display_name,role,status) "
-                    "VALUES($1,$2,'','STAFF','ACTIVE')",
-                    uuid4(),
-                    "legacy-user",
-                )
-            else:
-                await connection.execute(
-                    "INSERT INTO oauth_states(id,nonce_hash,expires_at) VALUES($1,$2,now())",
-                    uuid4(),
-                    uuid4().hex,
-                )
-        finally:
-            await connection.close()
-        baseline = await _catalog(database_url)
-
-        result = _alembic(database_url, "upgrade", "head")
-
-        assert result.returncode != 0
-        assert "SUPERBOSS_LOCAL_IDENTITY_MIGRATION_BLOCKED" in result.stderr
-        assert await _catalog(database_url) == baseline
-
-    asyncio.run(_with_temporary_database(postgres_database, operation))
-
-
 @pytest.mark.parametrize(
     ("column", "value"),
     [

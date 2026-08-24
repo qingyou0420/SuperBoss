@@ -39,6 +39,11 @@ deny all;
 Copy-Item .env.example .env
 docker compose --env-file .env -f docker-compose.dev.yml up -d --build
 docker compose --env-file .env -f docker-compose.dev.yml exec -T api alembic upgrade head
+
+If `alembic upgrade head` fails because `alembic_version` still names a retired
+revision, recreate the local volume (`docker compose ... down -v`) and start
+again. The current schema is a single `0001_baseline` and is not a linear
+upgrade from the old 18-revision chain.
 ```
 
 浏览器打开 `https://app.localhost/login`。OWNER 账号按 [local-auth-setup.md](local-auth-setup.md) 交互式创建，不要把密码写进 `.env` 或命令行。
