@@ -19,7 +19,8 @@ and `superboss --update` to download, verify the published SHA-256, and replace 
 - [OWNER/STAFF live acceptance and blank sign-off](docs/runbooks/m1-owner-acceptance.md)
 - [Kimi connector build, pair, submit, retry, cloud update, and revoke](docs/runbooks/kimi-connector-installation.md)
 - [Pre-pilot PostgreSQL and object backup/restore](docs/runbooks/backup-before-m1-pilot.md)
-- [Development governance and remote-enforcement activation](docs/runbooks/development-governance.md)
+- [Iteration plan (slim and repair)](docs/迭代方案.md)
+- [Frozen technical baseline (archived)](docs/archive/superpowers/specs/2026-08-09-technical-foundation-design.md)
 
 ## Local stack
 
