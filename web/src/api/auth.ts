@@ -33,16 +33,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function hasExactKeys(
+function hasRequiredKeys(
     value: Record<string, unknown>,
-    expected: string[],
+    required: readonly string[],
 ): boolean {
-    const actual = Object.keys(value).sort()
-    const sortedExpected = [...expected].sort()
-    return (
-        actual.length === sortedExpected.length &&
-        actual.every((key, index) => key === sortedExpected[index])
-    )
+    return required.every((key) => key in value)
 }
 
 function hasUnsafeText(value: string): boolean {
@@ -94,7 +89,7 @@ function validatePasswordChange(value: PasswordChangeCommand): void {
 function parseUser(data: unknown): AuthUser {
     if (
         !isRecord(data) ||
-        !hasExactKeys(data, [
+        !hasRequiredKeys(data, [
             'display_name',
             'must_change_password',
             'role',

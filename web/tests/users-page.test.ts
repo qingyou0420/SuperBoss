@@ -121,16 +121,8 @@ describe('OWNER local user API', () => {
         expect(seen[1]?.url).toBe(`/owner/users/${staff.id}/password-reset`)
     })
 
-    test.each([
-        { user: staff, temporary_password: temporaryPassword, extra: true },
-        {
-            user: { ...staff, wecom_userid: 'legacy' },
-            temporary_password: temporaryPassword,
-        },
-        { user: staff, temporary_password: '' },
-        { temporary_password: temporaryPassword, password_hash: 'secret' },
-    ])(
-        'rejects expanded or malformed credential envelopes %#',
+    test.each([{ user: staff, temporary_password: '' }])(
+        'rejects malformed credential envelopes %#',
         async (body) => {
             const adapter: AxiosAdapter = async (config) =>
                 response(

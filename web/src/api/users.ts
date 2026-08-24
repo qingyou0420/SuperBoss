@@ -59,12 +59,11 @@ function record(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function exact(value: Record<string, unknown>, keys: string[]): boolean {
-    const actual = Object.keys(value).sort()
-    return (
-        actual.length === keys.length &&
-        actual.every((key, index) => key === keys[index])
-    )
+function hasRequiredKeys(
+    value: Record<string, unknown>,
+    required: readonly string[],
+): boolean {
+    return required.every((key) => key in value)
 }
 
 function text(value: unknown, max = 255): value is string {
@@ -96,7 +95,7 @@ function temporaryPassword(value: unknown): value is string {
 function project(value: unknown): UserProject {
     if (
         !record(value) ||
-        !exact(value, ['id', 'name']) ||
+        !hasRequiredKeys(value, ['id', 'name']) ||
         typeof value.id !== 'string' ||
         !UUID.test(value.id) ||
         !text(value.name)
@@ -108,7 +107,7 @@ function project(value: unknown): UserProject {
 function user(value: unknown): OwnerUser {
     if (
         !record(value) ||
-        !exact(value, [
+        !hasRequiredKeys(value, [
             'display_name',
             'id',
             'last_login_at',
@@ -157,7 +156,7 @@ function ids(value: unknown): string[] {
 function createCommand(value: StaffCreate): StaffCreate {
     if (
         !record(value) ||
-        !exact(value, ['display_name', 'project_ids', 'username']) ||
+        !hasRequiredKeys(value, ['display_name', 'project_ids', 'username']) ||
         !username(value.username) ||
         !text(value.display_name)
     )
@@ -170,7 +169,10 @@ function createCommand(value: StaffCreate): StaffCreate {
 }
 
 function createResult(value: unknown): StaffCreateResult {
-    if (!record(value) || !exact(value, ['temporary_password', 'user']))
+    if (
+        !record(value) ||
+        !hasRequiredKeys(value, ['temporary_password', 'user'])
+    )
         throw new UserContractError()
     if (!temporaryPassword(value.temporary_password))
         throw new UserContractError()
@@ -181,7 +183,7 @@ function createResult(value: unknown): StaffCreateResult {
 }
 
 function passwordResetResult(value: unknown): PasswordResetResult {
-    if (!record(value) || !exact(value, ['temporary_password']))
+    if (!record(value) || !hasRequiredKeys(value, ['temporary_password']))
         throw new UserContractError()
     if (!temporaryPassword(value.temporary_password))
         throw new UserContractError()

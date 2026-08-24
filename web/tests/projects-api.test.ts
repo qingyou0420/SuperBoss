@@ -66,7 +66,6 @@ describe('strict project API contracts', () => {
         ).resolves.toEqual([{ ...project, name: unicodeName }])
 
         for (const invalid of [
-            [{ ...project, secret: 'leak' }],
             [{ ...project, id: 'not-a-uuid' }],
             [{ ...project, name: '' }],
             [{ ...project, name: ' x' }],

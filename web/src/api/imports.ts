@@ -62,15 +62,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
     return prototype === Object.prototype || prototype === null
 }
 
-function exactKeys(
+function hasRequiredKeys(
     value: Record<string, unknown>,
-    expected: string[],
+    required: readonly string[],
 ): boolean {
-    const actual = Object.keys(value).sort()
-    return (
-        actual.length === expected.length &&
-        actual.every((key, index) => key === expected[index])
-    )
+    return required.every((key) => key in value)
 }
 
 function uuid(value: unknown): value is string {
@@ -112,7 +108,7 @@ function nullableTimestamp(value: unknown): string | null {
 function parseAttachment(value: unknown): OwnerImportAttachment {
     if (
         !isRecord(value) ||
-        !exactKeys(value, [
+        !hasRequiredKeys(value, [
             'file_id',
             'file_state',
             'id',
@@ -151,7 +147,7 @@ function validStateSemantics(
 function parseSummary(value: unknown): OwnerImportSummary {
     if (
         !isRecord(value) ||
-        !exactKeys(value, [
+        !hasRequiredKeys(value, [
             'attachments',
             'created_at',
             'external_document_reference',

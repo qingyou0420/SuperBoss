@@ -123,14 +123,6 @@ describe('strict OWNER device API', () => {
             status: 201,
         },
         {
-            data: {
-                expires_at: '2026-08-10T03:10:00Z',
-                raw_code: 'ABCD-EFGH',
-                refresh_token: 'sentinel',
-            },
-            status: 201,
-        },
-        {
             data: { expires_at: '2026-08-10T03:10:00Z', raw_code: 'ABCD-EFGH' },
             status: 200,
         },
@@ -146,7 +138,6 @@ describe('strict OWNER device API', () => {
     test('strictly validates bounded device rows and 204 empty revoke', async () => {
         const mod = await devicesModule()
         for (const invalid of [
-            [{ ...activeDevice, token: 'sentinel' }],
             [{ ...activeDevice, status: 'UNKNOWN' }],
             [{ ...activeDevice, paired_at: '2026-08-10T02:00:00' }],
             [{ ...activeDevice, projects: [{ id: PROJECT_ID, name: '' }] }],

@@ -132,11 +132,27 @@ describe('strict browser file API', () => {
         ])
     })
 
+    test('accepts extra fields on a valid upload start response', async () => {
+        const mod = await filesModule()
+        const api = mod.createFilesApi(
+            clientWith([
+                {
+                    data: {
+                        upload_id: UPLOAD_ID,
+                        file_id: FILE_ID,
+                        token: 'sentinel',
+                    },
+                    status: 201,
+                },
+            ]).client,
+        )
+        await expect(api.start(startCommand, idempotencyKey)).resolves.toEqual({
+            file_id: FILE_ID,
+            upload_id: UPLOAD_ID,
+        })
+    })
+
     test.each([
-        {
-            data: { upload_id: UPLOAD_ID, file_id: FILE_ID, token: 'sentinel' },
-            status: 201,
-        },
         { data: { upload_id: 'bad', file_id: FILE_ID }, status: 201 },
         { data: { upload_id: UPLOAD_ID, file_id: FILE_ID }, status: 200 },
     ])('rejects malformed or wrong-status upload start %#', async (reply) => {
@@ -197,10 +213,6 @@ describe('strict browser file API', () => {
                 data: { url: `https://objects.example/${'x'.repeat(4097)}` },
                 status: 200,
             },
-            {
-                data: { url: 'https://objects.example/u', extra: true },
-                status: 200,
-            },
         ]) {
             await expect(
                 mod
@@ -209,12 +221,24 @@ describe('strict browser file API', () => {
             ).rejects.toBeInstanceOf(mod.FileContractError)
         }
 
+        await expect(
+            mod
+                .createFilesApi(
+                    clientWith([
+                        {
+                            data: {
+                                url: 'https://objects.example/u',
+                                extra: true,
+                            },
+                            status: 200,
+                        },
+                    ]).client,
+                )
+                .partUrl(UPLOAD_ID, 1),
+        ).resolves.toBe('https://objects.example/u')
+
         for (const reply of [
             { data: { file_id: FILE_ID, state: 'UPLOADING' }, status: 200 },
-            {
-                data: { file_id: FILE_ID, state: 'CLEAN', extra: true },
-                status: 200,
-            },
             { data: { file_id: FILE_ID, state: 'SCANNING' }, status: 201 },
         ]) {
             await expect(
@@ -225,7 +249,7 @@ describe('strict browser file API', () => {
         }
     })
 
-    test('maps every transport/provider failure to one fixed safe message', async () => {
+    test('maps transport failures to a safe message with status and request id', async () => {
         const mod = await filesModule()
         const detail = 's3://secret@internal provider traceback sentinel'
         expect(mod.fileErrorMessage(new Error(detail))).toBe(
@@ -234,6 +258,20 @@ describe('strict browser file API', () => {
         expect(mod.fileErrorMessage(new Error(detail))).not.toContain(
             'sentinel',
         )
+        expect(
+            mod.fileErrorMessage(
+                new HttpClientError(503, {
+                    error: {
+                        code: 'FILE_COMPLETION_PENDING',
+                        message: detail,
+                        request_id: 'bba39a39-47ba-4ac5-9250-ccdba1d7f25e',
+                    },
+                }),
+            ),
+        ).toBe('文件操作失败（503，bba39a39-47ba-4ac5-9250-ccdba1d7f25e）')
+        expect(
+            mod.fileErrorMessage(new HttpClientError(502, { error: {} })),
+        ).toBe('文件操作失败（502）')
     })
 
     test.each([

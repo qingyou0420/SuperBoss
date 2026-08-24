@@ -29,12 +29,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function exactKeys(value: Record<string, unknown>, keys: string[]): boolean {
-    const actual = Object.keys(value).sort()
-    return (
-        actual.length === keys.length &&
-        actual.every((key, index) => key === keys[index])
-    )
+function hasRequiredKeys(
+    value: Record<string, unknown>,
+    required: readonly string[],
+): boolean {
+    return required.every((key) => key in value)
 }
 
 function hasUnsafeText(value: string): boolean {
@@ -68,7 +67,7 @@ function canonicalName(value: unknown): string {
 function parseProject(value: unknown): Project {
     if (
         !isRecord(value) ||
-        !exactKeys(value, ['id', 'is_test', 'name', 'status'])
+        !hasRequiredKeys(value, ['id', 'is_test', 'name', 'status'])
     ) {
         throw new ProjectContractError()
     }
@@ -93,7 +92,7 @@ function parseProjectList(value: unknown): Project[] {
 }
 
 function validatedCreate(value: unknown): ProjectCreate {
-    if (!isRecord(value) || !exactKeys(value, ['is_test', 'name'])) {
+    if (!isRecord(value) || !hasRequiredKeys(value, ['is_test', 'name'])) {
         throw new ProjectContractError()
     }
     if (typeof value.is_test !== 'boolean') throw new ProjectContractError()
@@ -109,7 +108,7 @@ export function projectErrorMessage(error: unknown): string {
         return '项目操作失败，请稍后重试。'
     }
     const body = error.data
-    if (!exactKeys(body, ['error']) || !isRecord(body.error)) {
+    if (!isRecord(body.error)) {
         return '项目操作失败，请稍后重试。'
     }
     const detail = body.error

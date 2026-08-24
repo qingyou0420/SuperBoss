@@ -39,15 +39,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
     return prototype === Object.prototype || prototype === null
 }
 
-function exactKeys(
+function hasRequiredKeys(
     value: Record<string, unknown>,
-    expected: string[],
+    required: readonly string[],
 ): boolean {
-    const actual = Object.keys(value).sort()
-    return (
-        actual.length === expected.length &&
-        actual.every((key, index) => key === expected[index])
-    )
+    return required.every((key) => key in value)
 }
 
 function uuid(value: unknown): value is string {
@@ -93,7 +89,7 @@ function canonicalProjects(value: unknown): DeviceProject[] {
     return value.map((project): DeviceProject => {
         if (
             !isRecord(project) ||
-            !exactKeys(project, ['id', 'name']) ||
+            !hasRequiredKeys(project, ['id', 'name']) ||
             !uuid(project.id) ||
             !safeText(project.name, 255) ||
             ids.has(project.id)
@@ -108,7 +104,7 @@ function canonicalProjects(value: unknown): DeviceProject[] {
 function parsePairingCode(value: unknown): PairingCode {
     if (
         !isRecord(value) ||
-        !exactKeys(value, ['expires_at', 'raw_code']) ||
+        !hasRequiredKeys(value, ['expires_at', 'raw_code']) ||
         !safeText(value.raw_code, 255)
     ) {
         throw new DeviceContractError()
@@ -119,7 +115,7 @@ function parsePairingCode(value: unknown): PairingCode {
 function parseDevice(value: unknown): OwnerDevice {
     if (
         !isRecord(value) ||
-        !exactKeys(value, [
+        !hasRequiredKeys(value, [
             'id',
             'last_used_at',
             'name',
@@ -157,7 +153,7 @@ function parseDevice(value: unknown): OwnerDevice {
 }
 
 function canonicalPairingRequest(value: unknown): { project_ids: string[] } {
-    if (!isRecord(value) || !exactKeys(value, ['project_ids']))
+    if (!isRecord(value) || !hasRequiredKeys(value, ['project_ids']))
         throw new DeviceContractError()
     if (!Array.isArray(value.project_ids) || value.project_ids.length < 1)
         throw new DeviceContractError()

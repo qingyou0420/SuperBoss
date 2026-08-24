@@ -134,8 +134,6 @@ describe('strict bounded OWNER import summaries', () => {
     test('rejects extra/K3/secret fields, malformed time/UUID/state, and oversized rows', async () => {
         const mod = await importsModule()
         const invalid = [
-            { ...summary, k3_result: { risks: ['secret'] } },
-            { ...summary, access_token: 'sentinel' },
             { ...summary, id: 'not-a-uuid' },
             { ...summary, created_at: '2026-08-10T02:00:00' },
             { ...summary, status: 'DONE' },

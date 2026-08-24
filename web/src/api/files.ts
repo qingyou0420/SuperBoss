@@ -59,15 +59,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
     return prototype === Object.prototype || prototype === null
 }
 
-function exactKeys(
+function hasRequiredKeys(
     value: Record<string, unknown>,
-    expected: string[],
+    required: readonly string[],
 ): boolean {
-    const actual = Object.keys(value).sort()
-    return (
-        actual.length === expected.length &&
-        actual.every((key, index) => key === expected[index])
-    )
+    return required.every((key) => key in value)
 }
 
 function safeText(value: unknown, maximum: number): value is string {
@@ -110,7 +106,7 @@ function calendarDate(value: string): boolean {
 function canonicalStart(value: unknown): FileUploadStart {
     if (
         !isRecord(value) ||
-        !exactKeys(value, [
+        !hasRequiredKeys(value, [
             'category',
             'content_type',
             'file_date',
@@ -149,7 +145,7 @@ function canonicalStart(value: unknown): FileUploadStart {
 function parseStarted(value: unknown): FileUploadStarted {
     if (
         !isRecord(value) ||
-        !exactKeys(value, ['file_id', 'upload_id']) ||
+        !hasRequiredKeys(value, ['file_id', 'upload_id']) ||
         !uuid(value.file_id) ||
         !uuid(value.upload_id)
     ) {
@@ -165,7 +161,7 @@ function canonicalParts(value: unknown): FilePart[] {
     const parts = value.map((part): FilePart => {
         if (
             !isRecord(part) ||
-            !exactKeys(part, ['etag', 'part_number']) ||
+            !hasRequiredKeys(part, ['etag', 'part_number']) ||
             !Number.isInteger(part.part_number) ||
             (part.part_number as number) < 1 ||
             (part.part_number as number) > 10_000 ||
@@ -185,7 +181,7 @@ function canonicalParts(value: unknown): FilePart[] {
 function parseCompleted(value: unknown): FileUploadCompleted {
     if (
         !isRecord(value) ||
-        !exactKeys(value, ['file_id', 'state']) ||
+        !hasRequiredKeys(value, ['file_id', 'state']) ||
         !uuid(value.file_id) ||
         !['QUARANTINED', 'SCANNING', 'CLEAN', 'INFECTED', 'FAILED'].includes(
             String(value.state),
@@ -216,7 +212,7 @@ function terminalDownloadState(
 }
 
 function parseUrl(value: unknown): string {
-    if (!isRecord(value) || !exactKeys(value, ['url']))
+    if (!isRecord(value) || !hasRequiredKeys(value, ['url']))
         throw new FileContractError()
     if (!safeText(value.url, 4096)) throw new FileContractError()
     try {
@@ -236,9 +232,29 @@ function parseUrl(value: unknown): string {
     return value.url
 }
 
-export function fileErrorMessage(_error: unknown): string {
-    void _error
-    return '\u6587\u4ef6\u64cd\u4f5c\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002'
+function errorRequestId(error: unknown): string | undefined {
+    if (!(error instanceof HttpClientError) || !isRecord(error.data)) {
+        return undefined
+    }
+    if (!isRecord(error.data.error)) return undefined
+    const requestId = error.data.error.request_id
+    return typeof requestId === 'string' &&
+        requestId.length >= 1 &&
+        requestId.length <= 128 &&
+        !/[^\u0020-\u007e]/.test(requestId)
+        ? requestId
+        : undefined
+}
+
+export function fileErrorMessage(error: unknown): string {
+    if (error instanceof HttpClientError && error.status) {
+        const requestId = errorRequestId(error)
+        if (requestId) {
+            return `文件操作失败（${error.status}，${requestId}）`
+        }
+        return `文件操作失败（${error.status}）`
+    }
+    return '文件操作失败，请稍后重试。'
 }
 
 export function createFilesApi(client: BrowserHttpClient) {

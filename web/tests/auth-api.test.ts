@@ -80,12 +80,18 @@ describe('local auth API', () => {
         expect(http.get).toHaveBeenCalledWith('/auth/me')
     })
 
+    test('accepts extra /me fields without using them', async () => {
+        const http = client()
+        vi.mocked(http.get).mockResolvedValue(
+            response(200, { ...owner, userid: 'legacy-wecom' }),
+        )
+        await expect(createAuthApi(http).me()).resolves.toEqual(owner)
+    })
+
     test.each([
-        { ...owner, userid: 'legacy-wecom' },
         { ...owner, must_change_password: 'false' },
-        { ...owner, password_hash: 'secret' },
         { username: 'owner', role: 'OWNER' },
-    ])('rejects malformed or expanded /me data %#', async (body) => {
+    ])('rejects malformed /me data %#', async (body) => {
         const http = client()
         vi.mocked(http.get).mockResolvedValue(response(200, body))
         await expect(createAuthApi(http).me()).rejects.toBeInstanceOf(

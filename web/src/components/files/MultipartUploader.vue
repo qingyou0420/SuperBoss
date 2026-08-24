@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref } from 'vue'
 
-import { filesApi, type FileUploadCompleted } from '../../api/files'
 import {
-    createIndexedDbProgressStore,
+    fileErrorMessage,
+    filesApi,
+    type FileUploadCompleted,
+} from '../../api/files'
+import {
     createMultipartUploader,
     createPresignedUploadTransport,
-    createWorkerHasher,
     UploadUserError,
 } from '../../uploads/multipart'
 
@@ -25,6 +27,8 @@ const fileDate = ref(new Date().toISOString().slice(0, 10))
 const pending = ref(false)
 const status = ref('')
 const errorMessage = ref('')
+const uploadedBytes = ref(0)
+const totalBytes = ref(0)
 let activeUploader: ReturnType<typeof createMultipartUploader> | undefined
 
 function selectFile(event: globalThis.Event): void {
@@ -32,6 +36,14 @@ function selectFile(event: globalThis.Event): void {
     file.value = input.files?.[0]
     errorMessage.value = ''
     status.value = ''
+    uploadedBytes.value = 0
+    totalBytes.value = 0
+}
+
+function userErrorText(error: UploadUserError): string {
+    if (error.code === 'TOO_LARGE') return '文件超过 100MB 上限。'
+    if (error.code === 'EMPTY') return '请选择非空文件。'
+    return '不支持的文件类型。'
 }
 
 async function submit(): Promise<void> {
@@ -39,14 +51,21 @@ async function submit(): Promise<void> {
     pending.value = true
     status.value = ''
     errorMessage.value = ''
+    uploadedBytes.value = 0
+    totalBytes.value = file.value.size
     try {
         const transport = createPresignedUploadTransport({
             allowedObjectOrigin: props.allowedObjectOrigin,
         })
         activeUploader = createMultipartUploader({
             filesApi,
-            hasher: createWorkerHasher(),
-            progressStore: createIndexedDbProgressStore(),
+            onProgress(done, total) {
+                uploadedBytes.value = done
+                totalBytes.value = total
+                const percent =
+                    total === 0 ? 0 : Math.round((done / total) * 100)
+                status.value = `上传中 ${percent}%`
+            },
             uploadPart: transport.put,
         })
         const result = await activeUploader.upload({
@@ -58,16 +77,12 @@ async function submit(): Promise<void> {
         status.value = '\u626b\u63cf\u4e2d'
         emit('completed', result)
     } catch (error) {
-        if (error instanceof UploadUserError && error.code === 'TOO_LARGE') {
-            errorMessage.value = '文件超过 100MB 上限。'
-        } else if (error instanceof UploadUserError && error.code === 'EMPTY') {
-            errorMessage.value = '请选择非空文件。'
-        } else if (error instanceof UploadUserError && error.code === 'BAD_TYPE') {
-            errorMessage.value = '不支持的文件类型。'
+        if (error instanceof UploadUserError) {
+            errorMessage.value = userErrorText(error)
         } else {
-            errorMessage.value =
-                '\u6587\u4ef6\u4e0a\u4f20\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002'
+            errorMessage.value = fileErrorMessage(error)
         }
+        status.value = ''
     } finally {
         pending.value = false
         activeUploader = undefined
@@ -102,6 +117,11 @@ onBeforeUnmount(cancel)
             </button>
             <button v-if="pending" type="button" @click="cancel">取消</button>
         </div>
+        <progress
+            v-if="pending && totalBytes > 0"
+            :max="totalBytes"
+            :value="uploadedBytes"
+        />
         <p v-if="status" role="status">{{ status }}</p>
         <p v-if="errorMessage" role="alert">{{ errorMessage }}</p>
     </section>
@@ -121,5 +141,9 @@ onBeforeUnmount(cancel)
 .multipart-uploader__actions {
     display: flex;
     gap: 0.75rem;
+}
+
+progress {
+    width: 100%;
 }
 </style>
