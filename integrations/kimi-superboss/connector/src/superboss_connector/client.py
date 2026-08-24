@@ -33,7 +33,6 @@ from .config import (
 from .credentials import CredentialStore
 from .errors import CREDENTIAL_ERROR, SERVER_REJECTED, TEMPORARY_FAILURE, ConnectorError
 from .manifest import AttachmentKind, K3Result, ServerManifest, server_payload
-from .pinned import PinnedHTTPTransport
 
 _STRICT = ConfigDict(extra="forbid", hide_input_in_errors=True)
 ResultCode = Annotated[str, Field(pattern=r"^[A-Z][A-Z0-9_]{0,63}$")]
@@ -424,15 +423,13 @@ class ApiClient:
         return host, tuple(addresses)
 
     def put_part(self, url: str, content: bytes) -> str:
-        host, addresses = self._validate_upload_destination(url)
+        self._validate_upload_destination(url)
         try:
-            transport = PinnedHTTPTransport(host, addresses)
             with (
                 httpx.Client(
                     follow_redirects=False,
                     trust_env=False,
                     timeout=httpx.Timeout(HTTP_TIMEOUT_SECONDS),
-                    transport=transport,
                 ) as upload_client,
                 upload_client.stream("PUT", url, content=content) as response,
             ):
