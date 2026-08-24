@@ -6,7 +6,6 @@ from fastapi import APIRouter, Depends, Header, Path, Query, Request, status
 
 from superboss.core.actors import Actor, get_actor
 from superboss.modules.files.schemas import UploadComplete
-from superboss.modules.files.service import FileLifecycleService
 from superboss.modules.files.storage import CompletedPart
 from superboss.modules.imports.schemas import (
     ImportAttachmentRead,
@@ -25,6 +24,7 @@ def get_service(request: Request) -> ImportService:
     return ImportService(
         request.app.state.session_factory,
         request.app.state.object_storage,
+        request.app.state.enqueue_file_scan,
     )
 
 
@@ -94,12 +94,6 @@ async def complete_import_attachment(
         [CompletedPart(part.part_number, part.etag) for part in command.parts],
         request_id=_request_id(request),
     )
-    attachment = await service.view_attachment(job_id, attachment_id)
-    await FileLifecycleService(
-        request.app.state.session_factory,
-        request.app.state.object_storage,
-        request.app.state.enqueue_file_scan,
-    ).deliver_completion(attachment.upload_id)
     return ImportAttachmentRead.model_validate(
         await service.view_attachment(job_id, attachment_id)
     )

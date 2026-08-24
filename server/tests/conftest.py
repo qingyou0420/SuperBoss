@@ -25,9 +25,6 @@ from superboss.modules.devices.models import (
 )
 from superboss.modules.files.models import (
     File,
-    FileLifecycleOutbox,
-    FileStorageCleanup,
-    FileUploadLifecycle,
     Upload,
 )
 from superboss.modules.projects.models import Project, ProjectMember
@@ -75,18 +72,12 @@ async def db_session(postgres_database: str) -> AsyncIterator[AsyncSession]:
             else:
                 await connection.execute(delete(import_models.ImportAttachment))
                 await connection.execute(delete(import_models.ImportJob))
-                claim_model = getattr(import_models, "ImportIdempotencyClaim", None)
-                if claim_model is not None:
-                    await connection.execute(delete(claim_model))
             await connection.execute(delete(DeviceScopeGrant))
             await connection.execute(delete(DeviceProjectGrant))
             await connection.execute(delete(DeviceSession))
             await connection.execute(delete(DeviceConnection))
             await connection.execute(delete(DevicePairingProject))
             await connection.execute(delete(DevicePairingCode))
-            await connection.execute(delete(FileLifecycleOutbox))
-            await connection.execute(delete(FileStorageCleanup))
-            await connection.execute(delete(FileUploadLifecycle))
             await connection.execute(delete(Upload))
             await connection.execute(delete(File))
             await connection.execute(delete(ProjectMember))

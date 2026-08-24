@@ -45,7 +45,8 @@ def test_lifespan_reconciles_retries_and_disposes_engine(monkeypatch) -> None:
         def __init__(self, *_args, **_kwargs) -> None:
             pass
 
-        async def reconcile(self, _limit: int) -> int:
+        async def recover_stale_uploads(self, *, limit: int = 100) -> int:
+            del limit
             nonlocal calls
             calls += 1
             (first if calls == 1 else second).set()
@@ -53,7 +54,7 @@ def test_lifespan_reconciles_retries_and_disposes_engine(monkeypatch) -> None:
                 raise RuntimeError("provider secret")
             return 0
 
-    monkeypatch.setattr(main, "FileLifecycleService", RecordingLifecycle)
+    monkeypatch.setattr(main, "StaleUploadService", RecordingLifecycle)
     settings = _settings(
         lifecycle_reconcile_interval_seconds=0.01,
         lifecycle_reconcile_batch_size=1,

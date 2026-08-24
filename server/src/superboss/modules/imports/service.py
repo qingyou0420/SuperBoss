@@ -1,14 +1,13 @@
 """Creation and idempotent provisioning of normalized K3 import jobs."""
 
 import hashlib
-import hmac
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from sqlalchemy import and_, select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -24,7 +23,6 @@ from superboss.modules.files.storage import CompletedPart, ObjectStorage
 from superboss.modules.imports.models import (
     AttachmentKind,
     ImportAttachment,
-    ImportIdempotencyClaim,
     ImportJob,
     ImportStatus,
 )
@@ -150,9 +148,11 @@ class ImportService:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         storage: ObjectStorage,
+        enqueue_scan: Callable[[UUID, UUID], Awaitable[None] | None] | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.storage = storage
+        self.enqueue_scan = enqueue_scan
 
     async def create(
         self,
@@ -171,11 +171,6 @@ class ImportService:
         manifest_bytes = canonical_manifest_bytes(command)
         manifest_fingerprint = hashlib.sha256(manifest_bytes).hexdigest()
         canonical_manifest = command.model_dump(mode="json")
-        await self._bind_claim(
-            actor.subject_id,
-            idempotency_key,
-            manifest_fingerprint,
-        )
         async with self.session_factory() as existing_session:
             existing = await self._existing_result(
                 existing_session,
@@ -267,7 +262,9 @@ class ImportService:
             request_id=request_id,
         )
         async with self.session_factory() as file_session:
-            return await FileService(file_session, self.storage).complete_import_upload(
+            return await FileService(
+                file_session, self.storage, self.enqueue_scan
+            ).complete_import_upload(
                 actor,
                 target.upload_id,
                 parts,
@@ -1065,39 +1062,6 @@ class ImportService:
         if existing is None:
             return None
         return await self._matching_result(session, existing, manifest_fingerprint)
-
-    async def _bind_claim(
-        self,
-        device_id: UUID,
-        idempotency_key: str,
-        manifest_fingerprint: str,
-    ) -> None:
-        """Commit the permanent parent fingerprint before provisioning any child."""
-        async with self.session_factory() as session, session.begin():
-            await session.execute(
-                pg_insert(ImportIdempotencyClaim)
-                .values(
-                    device_id=device_id,
-                    idempotency_key=idempotency_key,
-                    manifest_fingerprint=manifest_fingerprint,
-                )
-                .on_conflict_do_nothing(
-                    index_elements=[
-                        ImportIdempotencyClaim.device_id,
-                        ImportIdempotencyClaim.idempotency_key,
-                    ]
-                )
-            )
-            claimed_fingerprint = await session.scalar(
-                select(ImportIdempotencyClaim.manifest_fingerprint).where(
-                    ImportIdempotencyClaim.device_id == device_id,
-                    ImportIdempotencyClaim.idempotency_key == idempotency_key,
-                )
-            )
-            if claimed_fingerprint is None:
-                raise RuntimeError("import idempotency claim disappeared")
-            if not hmac.compare_digest(claimed_fingerprint, manifest_fingerprint):
-                raise ImportIdempotencyConflictError()
 
     async def _persist_job(
         self,

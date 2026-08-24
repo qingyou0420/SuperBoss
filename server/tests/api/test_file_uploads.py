@@ -313,7 +313,7 @@ async def test_complete_size_mismatch_persists_failed_without_dispatch(file_clie
     started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 2, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers); upload = await db_session.get(Upload, started.json()["upload_id"]); assert upload is not None
     response = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json={"parts": [{"part_number": 1, "etag": "secret-etag"}]}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); file = await db_session.get(File, upload.file_id)
     events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
-    assert response.status_code == 409 and response.json()["error"]["code"] == "FILE_UPLOAD_SIZE_MISMATCH" and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and file is not None and file.state.value == "FAILED" and dispatched == [] and upload.multipart_id in storage.aborted and upload.multipart_id not in storage.active and "secret-etag" not in response.text and file.object_key not in response.text and not [event for event in events if event.action == "file.upload.complete" and event.outcome == "SUCCESS"]
+    assert response.status_code == 409 and response.json()["error"]["code"] == "FILE_UPLOAD_SIZE_MISMATCH" and response.json()["error"]["request_id"] == response.headers["X-Request-ID"] and file is not None and file.state.value == "FAILED" and dispatched == [] and file.object_key in storage.deleted and upload.multipart_id not in storage.active and "secret-etag" not in response.text and file.object_key not in response.text and not [event for event in events if event.action == "file.upload.complete" and event.outcome == "SUCCESS"]
 
 
 @pytest.mark.asyncio
@@ -323,13 +323,13 @@ async def test_complete_storage_error_persists_safe_pending_state(file_client, d
     from sqlalchemy import select
 
     from superboss.modules.audit.models import AuditLog
-    from superboss.modules.files.models import File, FileStorageCleanup, FileUploadLifecycle, Upload
+    from superboss.modules.files.models import File, Upload
     client, storage = file_client; app = client.app; project = Project(name="Complete storage error"); db_session.add(project); await db_session.commit(); _login(client)
     dispatched: list[UUID] = []; app.state.enqueue_file_scan = lambda file_id, _delivery_key: dispatched.append(file_id); storage.complete_error = RuntimeError("S3 secret")
     headers = {"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN")), "Idempotency-Key": "storage-error"}
     started = client.post("/api/v1/files/uploads", json={"project_id": str(project.id), "filename": "x.pdf", "size_bytes": 1, "sha256": "0" * 64, "category": "资料", "file_date": "2026-08-09"}, headers=headers); upload = await db_session.get(Upload, started.json()["upload_id"]); assert upload is not None
-    response = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json={"parts": [{"part_number": 1, "etag": "secret-etag"}]}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); file = await db_session.get(File, upload.file_id); lifecycle = await db_session.get(FileUploadLifecycle, upload.id); events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
-    assert response.status_code == 503 and response.json()["error"]["code"] == "FILE_COMPLETION_PENDING" and file is not None and file.state.value == "UPLOADING" and lifecycle is not None and lifecycle.completion_state == "PREPARED" and lifecycle.completion_last_error_code == "COMPLETION_AMBIGUOUS" and dispatched == [] and upload.multipart_id in storage.active and not list(await db_session.scalars(select(FileStorageCleanup))) and "S3 secret" not in response.text and "secret-etag" not in response.text and file.object_key not in response.text and not [event for event in events if event.action == "file.upload.complete" and event.outcome == "SUCCESS"]
+    response = client.post(f"/api/v1/files/uploads/{upload.id}/complete", json={"parts": [{"part_number": 1, "etag": "secret-etag"}]}, headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))}); file = await db_session.get(File, upload.file_id); events = list((await db_session.scalars(select(AuditLog).where(AuditLog.action != "auth.login"))).all())
+    assert response.status_code == 503 and response.json()["error"]["code"] == "FILE_COMPLETION_PENDING" and file is not None and file.state.value == "UPLOADING" and dispatched == [] and upload.multipart_id in storage.active and "S3 secret" not in response.text and "secret-etag" not in response.text and file.object_key not in response.text and not [event for event in events if event.action == "file.upload.complete" and event.outcome == "SUCCESS"]
 
 
 @pytest.mark.asyncio
@@ -377,13 +377,7 @@ async def test_exact_complete_replay_returns_current_terminal_state_without_rede
     from sqlalchemy import select
 
     from superboss.modules.audit.models import AuditLog
-    from superboss.modules.files.models import (
-        File,
-        FileLifecycleOutbox,
-        FileState,
-        FileStorageCleanup,
-        Upload,
-    )
+    from superboss.modules.files.models import File, FileState, Upload
 
     client, storage = file_client
     app = client.app
@@ -428,8 +422,6 @@ async def test_exact_complete_replay_returns_current_terminal_state_without_rede
             select(AuditLog).where(AuditLog.action == "file.upload.complete")
         )
     )
-    outbox_before = list(await db_session.scalars(select(FileLifecycleOutbox)))
-    cleanup_before = list(await db_session.scalars(select(FileStorageCleanup)))
 
     replay = client.post(
         f"/api/v1/files/uploads/{upload.id}/complete",
@@ -442,8 +434,6 @@ async def test_exact_complete_replay_returns_current_terminal_state_without_rede
             select(AuditLog).where(AuditLog.action == "file.upload.complete")
         )
     )
-    outbox_after = list(await db_session.scalars(select(FileLifecycleOutbox)))
-    cleanup_after = list(await db_session.scalars(select(FileStorageCleanup)))
     assert replay.status_code == 200
     assert replay.json() == {
         "file_id": str(upload.file_id),
@@ -455,20 +445,17 @@ async def test_exact_complete_replay_returns_current_terminal_state_without_rede
     assert [event.id for event in completion_events_after] == [
         event.id for event in completion_events_before
     ]
-    assert [entry.id for entry in outbox_after] == [
-        entry.id for entry in outbox_before
-    ]
-    assert [entry.id for entry in cleanup_after] == [
-        entry.id for entry in cleanup_before
-    ]
 
-    conflict = client.post(
+    different_parts = client.post(
         f"/api/v1/files/uploads/{upload.id}/complete",
         json={"parts": [{"part_number": 1, "etag": "different-etag"}]},
         headers={"X-CSRF-Token": csrf},
     )
-    assert conflict.status_code == 409
-    assert conflict.json()["error"]["code"] == "FILE_UPLOAD_CONFLICT"
+    assert different_parts.status_code == 200
+    assert different_parts.json() == {
+        "file_id": str(upload.file_id),
+        "state": terminal_state,
+    }
     assert storage.complete_calls == 1
     assert dispatched == [upload.file_id]
 
@@ -1149,7 +1136,7 @@ async def test_start_provisioning_failure_is_safe_and_durable(file_client, db_se
     """An S3 create response failure must retain recoverable provisioning state and return 503."""
     from sqlalchemy import select
 
-    from superboss.modules.files.models import File, FileUploadLifecycle, Upload
+    from superboss.modules.files.models import File, Upload
 
     client, storage = file_client
     project = Project(name="HTTP provisioning pending")
@@ -1166,9 +1153,8 @@ async def test_start_provisioning_failure_is_safe_and_durable(file_client, db_se
 
     file = await db_session.scalar(select(File))
     upload = await db_session.scalar(select(Upload))
-    lifecycle = await db_session.scalar(select(FileUploadLifecycle))
     assert response.status_code == 503 and response.json()["error"]["code"] == "FILE_PROVISIONING_PENDING"
     assert response.headers["X-Request-ID"] == response.json()["error"]["request_id"] == request_id
     assert "provider create secret" not in response.text
-    assert file is not None and upload is not None and lifecycle is not None
-    assert upload.multipart_id is None and lifecycle.provision_state == "PROVISIONING" and len(storage.active) == 1
+    assert file is not None and upload is not None
+    assert upload.multipart_id is None and len(storage.active) == 1

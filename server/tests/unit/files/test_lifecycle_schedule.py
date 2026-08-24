@@ -1,4 +1,4 @@
-"""Production scheduling contract for durable file lifecycle reconciliation."""
+"""Hourly stale-upload recovery schedule and production runner wiring."""
 
 import importlib
 import socket
@@ -15,24 +15,24 @@ def _contract() -> tuple[Any, Any]:
     return schedules, celery_module.celery_app
 
 
-def test_lifecycle_reconcile_task_has_minute_schedule_and_delivery_safety() -> None:
+def test_stale_recovery_task_has_hourly_schedule_and_delivery_safety() -> None:
     schedules, app = _contract()
-    task = schedules.reconcile_file_lifecycle_task
-    entry = app.conf.beat_schedule["reconcile-file-lifecycle-every-minute"]
+    task = schedules.recover_stale_uploads_task
+    entry = app.conf.beat_schedule["recover-stale-uploads-hourly"]
 
-    assert task.name == "superboss.files.reconcile_lifecycle"
+    assert task.name == "superboss.files.recover_stale_uploads"
     assert task.acks_late is True and task.reject_on_worker_lost is True
     assert task.max_retries == 3 and task.retry_backoff is True
     assert 0 < task.soft_time_limit < task.time_limit
     assert entry == {
         "task": task.name,
-        "schedule": 60.0,
+        "schedule": 3600.0,
         "options": {"queue": "file-maintenance"},
     }
     assert app.conf.task_routes[task.name]["queue"] == "file-maintenance"
 
 
-def test_lifecycle_reconcile_task_drives_async_execution(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_stale_recovery_task_drives_async_execution(monkeypatch: pytest.MonkeyPatch) -> None:
     schedules, _app = _contract()
     seen: list[bool] = []
 
@@ -40,46 +40,45 @@ def test_lifecycle_reconcile_task_drives_async_execution(monkeypatch: pytest.Mon
         seen.append(True)
         return 11
 
-    monkeypatch.setattr(schedules, "_run_lifecycle_reconcile", execute)
+    monkeypatch.setattr(schedules, "_run_stale_upload_recovery", execute)
 
-    assert schedules.reconcile_file_lifecycle_task.run() == 11
+    assert schedules.recover_stale_uploads_task.run() == 11
     assert seen == [True]
 
 
 @pytest.mark.asyncio
-async def test_execution_layer_awaits_full_lifecycle_reconcile(
+async def test_execution_layer_awaits_stale_recovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     schedules, _app = _contract()
     factory = object()
     storage = object()
-    dispatcher = object()
-    seen: list[tuple[object, object, object, int]] = []
+    seen: list[tuple[object, object, object]] = []
 
-    class FakeLifecycleService:
+    class FakeStaleUploadService:
         def __init__(
             self,
             received_factory: object,
             received_storage: object,
             received_dispatcher: object,
         ) -> None:
-            seen.append((received_factory, received_storage, received_dispatcher, -1))
+            seen.append((received_factory, received_storage, received_dispatcher))
 
-        async def reconcile(self, limit: int) -> int:
-            seen[-1] = (*seen[-1][:3], limit)
+        async def recover_stale_uploads(
+            self, *, now: object = None, limit: int = 100
+        ) -> int:
+            del now, limit
             return 13
 
-    monkeypatch.setattr(schedules, "FileLifecycleService", FakeLifecycleService)
+    monkeypatch.setattr(schedules, "StaleUploadService", FakeStaleUploadService)
 
-    result = await schedules.execute_lifecycle_reconcile(
+    result = await schedules.execute_stale_upload_recovery(
         session_factory=factory,
         storage=storage,
-        enqueue_scan=dispatcher,
-        limit=100,
     )
 
     assert result == 13
-    assert seen == [(factory, storage, dispatcher, 100)]
+    assert seen == [(factory, storage, schedules.enqueue_file_scan)]
 
 
 @pytest.mark.asyncio
@@ -131,13 +130,13 @@ async def test_production_runner_constructs_dependencies_and_always_disposes_eng
     monkeypatch.setattr(schedules, "create_async_engine", build_engine)
     monkeypatch.setattr(schedules, "async_sessionmaker", build_factory)
     monkeypatch.setattr(schedules, "Boto3ObjectStorage", build_storage)
-    monkeypatch.setattr(schedules, "execute_lifecycle_reconcile", execute)
+    monkeypatch.setattr(schedules, "execute_stale_upload_recovery", execute)
 
     if provider_fails:
         with pytest.raises(RuntimeError, match="provider failed"):
-            await schedules._run_lifecycle_reconcile()
+            await schedules._run_stale_upload_recovery()
     else:
-        assert await schedules._run_lifecycle_reconcile() == 17
+        assert await schedules._run_stale_upload_recovery() == 17
 
     assert created == {
         "engine": (settings.database_url, True),
@@ -154,8 +153,6 @@ async def test_production_runner_constructs_dependencies_and_always_disposes_eng
         "execute": {
             "session_factory": factory,
             "storage": storage,
-            "enqueue_scan": schedules.enqueue_file_scan,
-            "limit": 100,
         },
     }
     assert engine.disposed is True

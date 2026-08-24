@@ -15,11 +15,6 @@ celery_app = Celery(
 celery_app.conf.update(
     accept_content=["json"],
     beat_schedule={
-        "reconcile-file-lifecycle-every-minute": {
-            "task": "superboss.files.reconcile_lifecycle",
-            "schedule": 60.0,
-            "options": {"queue": "file-maintenance"},
-        },
         "recover-stale-uploads-hourly": {
             "task": "superboss.files.recover_stale_uploads",
             "schedule": 3600.0,
@@ -32,7 +27,6 @@ celery_app.conf.update(
     task_default_queue="file-scan",
     task_reject_on_worker_lost=True,
     task_routes={
-        "superboss.files.reconcile_lifecycle": {"queue": "file-maintenance"},
         "superboss.files.recover_stale_uploads": {"queue": "file-maintenance"},
         "superboss.files.scan": {"queue": "file-scan"},
     },

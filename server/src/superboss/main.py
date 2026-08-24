@@ -17,7 +17,7 @@ from superboss.core.actors import get_actor
 from superboss.core.config import Settings, get_settings
 from superboss.core.errors import DomainError, UnauthenticatedError
 from superboss.infrastructure.s3 import Boto3ObjectStorage
-from superboss.modules.files.service import FileLifecycleService
+from superboss.modules.files.service import StaleUploadService
 from superboss.modules.files.storage import ObjectStorage
 from superboss.modules.files.tasks import enqueue_file_scan as celery_enqueue_file_scan
 
@@ -39,7 +39,13 @@ def create_app(
             async def maintain() -> None:
                 while not stop.is_set():
                     try:
-                        await FileLifecycleService(app.state.session_factory, app.state.object_storage, app.state.enqueue_file_scan).reconcile(active_settings.lifecycle_reconcile_batch_size)
+                        await StaleUploadService(
+                            app.state.session_factory,
+                            app.state.object_storage,
+                            app.state.enqueue_file_scan,
+                        ).recover_stale_uploads(
+                            limit=active_settings.lifecycle_reconcile_batch_size
+                        )
                     except Exception as error:  # noqa: BLE001
                         logger.warning("file lifecycle maintenance failed: %s", type(error).__name__)
                     try:

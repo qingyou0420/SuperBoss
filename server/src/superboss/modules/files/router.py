@@ -10,7 +10,7 @@ from superboss.modules.audit.schemas import AuditEventInput
 from superboss.modules.audit.service import AuditService
 from superboss.modules.files.models import File, Upload
 from superboss.modules.files.schemas import UploadComplete, UploadStart
-from superboss.modules.files.service import FileLifecycleService, FileService
+from superboss.modules.files.service import FileService
 from superboss.modules.files.storage import CompletedPart
 
 router = APIRouter(prefix="/files", tags=["files"])
@@ -157,11 +157,6 @@ async def complete(
         )
         raise
     await service.session.commit()
-    await FileLifecycleService(
-        request.app.state.session_factory,
-        request.app.state.object_storage,
-        request.app.state.enqueue_file_scan,
-    ).deliver_completion(upload_id)
     return {"file_id": str(file.id), "state": file.state}
 
 

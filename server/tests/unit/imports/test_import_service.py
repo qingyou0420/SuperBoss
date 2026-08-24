@@ -3,7 +3,7 @@
 import asyncio
 import importlib
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from types import ModuleType
 from typing import Any
 from uuid import UUID, uuid4
@@ -21,14 +21,8 @@ from superboss.modules.devices.models import (
     DeviceProjectGrant,
     DeviceScopeGrant,
 )
-from superboss.modules.files.models import (
-    File,
-    FileLifecycleOutbox,
-    FileState,
-    FileUploadLifecycle,
-    Upload,
-)
-from superboss.modules.files.service import FileLifecycleService, FileService
+from superboss.modules.files.models import File, FileState, Upload
+from superboss.modules.files.service import FileService
 from superboss.modules.files.storage import CompletedPart
 from superboss.modules.projects.models import Project
 from superboss.modules.users.models import Role
@@ -267,10 +261,12 @@ def command_for(project_id: UUID, *, two_attachments: bool = False) -> Any:
 
 
 def service_for(
-    session_factory: async_sessionmaker[AsyncSession], storage: InMemoryObjectStorage
+    session_factory: async_sessionmaker[AsyncSession],
+    storage: InMemoryObjectStorage,
+    enqueue_scan: Any | None = None,
 ) -> Any:
     _models, _schemas, service = import_contract()
-    return service.ImportService(session_factory, storage)
+    return service.ImportService(session_factory, storage, enqueue_scan)
 
 
 def returned_attachment_ids(result: Any) -> tuple[tuple[UUID, UUID, UUID], ...]:
@@ -531,7 +527,6 @@ async def test_concurrent_changed_manifest_has_no_losing_upload_set(
         attachments = list(await session.scalars(select(models.ImportAttachment)))
         files = list(await session.scalars(select(File)))
         uploads = list(await session.scalars(select(Upload)))
-        lifecycles = list(await session.scalars(select(FileUploadLifecycle)))
         audits = list(
             await session.scalars(
                 select(AuditLog).where(AuditLog.action == "import.create")
@@ -540,175 +535,9 @@ async def test_concurrent_changed_manifest_has_no_losing_upload_set(
 
     assert len(jobs) == len(audits) == 1
     assert jobs[0].id == winner.id
-    assert len(attachments) == len(files) == len(uploads) == len(lifecycles) == (
-        expected_children
-    )
+    assert len(attachments) == len(files) == len(uploads) == expected_children
     assert {row.file_id for row in attachments} == {row.id for row in files}
     assert {row.upload_id for row in attachments} == {row.id for row in uploads}
-    assert {row.multipart_id for row in uploads} == set(storage.active)
-    assert storage.create_calls == expected_children
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("failure_mode", ("cancel", "exception"))
-@pytest.mark.parametrize(
-    "variant",
-    ("different_projects", "same_project_different_kinds"),
-)
-async def test_changed_manifest_cannot_take_key_after_provider_before_parent_failure(
-    db_session: AsyncSession,
-    active_owner: Any,
-    session_factory: async_sessionmaker[AsyncSession],
-    monkeypatch: pytest.MonkeyPatch,
-    variant: str,
-    failure_mode: str,
-) -> None:
-    """A durable fingerprint must survive cancellation/crash after child provisioning."""
-    models, _schemas, _service = import_contract()
-    first_project, device, actor = await seed_device_actor(
-        db_session,
-        active_owner,
-        name=f"Durable claim {variant} {failure_mode}",
-    )
-    if variant == "different_projects":
-        changed_project = Project(name=f"Durable claim changed {failure_mode}")
-        db_session.add(changed_project)
-        await db_session.flush()
-        db_session.add(
-            DeviceProjectGrant(device_id=device.id, project_id=changed_project.id)
-        )
-        await db_session.commit()
-        actor = Actor(
-            "device",
-            device.id,
-            None,
-            frozenset({first_project.id, changed_project.id}),
-            ALL_IMPORT_SCOPES,
-        )
-        original_command = command_for(first_project.id)
-        changed_command = command_for(changed_project.id)
-    else:
-        original_command = command_for(first_project.id, two_attachments=True)
-        changed_command = command_for(first_project.id)
-
-    storage = InMemoryObjectStorage()
-    first_service = service_for(session_factory, storage)
-    original_persist = first_service._persist_job
-    before_parent = asyncio.Event()
-    release_parent = asyncio.Event()
-
-    async def pause_before_parent(*args: Any, **kwargs: Any) -> Any:
-        before_parent.set()
-        await release_parent.wait()
-        if failure_mode == "exception":
-            raise RuntimeError("post-provider pre-parent failure")
-        return await original_persist(*args, **kwargs)
-
-    monkeypatch.setattr(first_service, "_persist_job", pause_before_parent)
-    key = f"durable-claim-{variant}-{failure_mode}"
-    first_task = asyncio.create_task(
-        first_service.create(actor, original_command, key, request_id=uuid4())
-    )
-    changed_task: asyncio.Task[Any] | None = None
-    advisory_contender: asyncio.Task[None] | None = None
-    try:
-        await asyncio.wait_for(before_parent.wait(), timeout=5)
-        expected_children = len(original_command.attachments)
-        async with session_factory() as session:
-            assert await session.scalar(select(func.count()).select_from(models.ImportJob)) == 0
-            assert await session.scalar(
-                select(func.count()).select_from(models.ImportAttachment)
-            ) == 0
-            assert await session.scalar(select(func.count()).select_from(File)) == expected_children
-            assert await session.scalar(select(func.count()).select_from(Upload)) == expected_children
-            assert await session.scalar(
-                select(func.count()).select_from(FileUploadLifecycle)
-            ) == expected_children
-            claims = list(
-                await session.scalars(select(models.ImportIdempotencyClaim))
-            )
-            assert len(claims) == 1
-            assert claims[0].device_id == device.id
-            assert claims[0].idempotency_key == key
-        assert storage.create_calls == expected_children
-
-        changed_task = asyncio.create_task(
-            service_for(session_factory, storage).create(
-                actor,
-                changed_command,
-                key,
-                request_id=uuid4(),
-            )
-        )
-        advisory_contender = asyncio.create_task(
-            wait_for_advisory_lock_contender(session_factory)
-        )
-        ready, _pending = await asyncio.wait(
-            {changed_task, advisory_contender},
-            timeout=5,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        assert ready, "changed create neither rejected a durable claim nor reached the old lock"
-
-        if failure_mode == "cancel":
-            first_task.cancel()
-        else:
-            release_parent.set()
-        first_result = (await asyncio.gather(first_task, return_exceptions=True))[0]
-        changed_result = (
-            await asyncio.wait_for(
-                asyncio.gather(changed_task, return_exceptions=True),
-                timeout=5,
-            )
-        )[0]
-    finally:
-        release_parent.set()
-        if not first_task.done():
-            first_task.cancel()
-        if changed_task is not None and not changed_task.done():
-            changed_task.cancel()
-        if advisory_contender is not None:
-            advisory_contender.cancel()
-        await asyncio.gather(
-            *(task for task in (first_task, changed_task, advisory_contender) if task is not None),
-            return_exceptions=True,
-        )
-
-    if failure_mode == "cancel":
-        assert isinstance(first_result, asyncio.CancelledError)
-    else:
-        assert isinstance(first_result, RuntimeError)
-        assert str(first_result) == "post-provider pre-parent failure"
-    assert isinstance(changed_result, DomainError)
-    assert changed_result.status_code == 409
-    assert changed_result.code == "IMPORT_IDEMPOTENCY_CONFLICT"
-
-    identical = await service_for(session_factory, storage).create(
-        actor,
-        original_command,
-        key,
-        request_id=uuid4(),
-    )
-    expected_children = len(original_command.attachments)
-    async with session_factory() as session:
-        jobs = list(await session.scalars(select(models.ImportJob)))
-        attachments = list(await session.scalars(select(models.ImportAttachment)))
-        files = list(await session.scalars(select(File)))
-        uploads = list(await session.scalars(select(Upload)))
-        lifecycles = list(await session.scalars(select(FileUploadLifecycle)))
-        audits = list(
-            await session.scalars(
-                select(AuditLog).where(AuditLog.action == "import.create")
-            )
-        )
-        claims = list(await session.scalars(select(models.ImportIdempotencyClaim)))
-    assert len(jobs) == len(audits) == 1 and jobs[0].id == identical.id
-    assert len(claims) == 1 and claims[0].idempotency_key == key
-    assert len(attachments) == len(identical.attachments) == expected_children
-    assert len(files) == len(uploads) == len(lifecycles) == expected_children
-    assert {row.file_id for row in attachments} == {row.id for row in files}
-    assert {row.upload_id for row in attachments} == {row.id for row in uploads}
-    assert {row.project_id for row in files} == {first_project.id}
     assert {row.multipart_id for row in uploads} == set(storage.active)
     assert storage.create_calls == expected_children
 
@@ -778,9 +607,8 @@ async def test_distinct_keys_do_not_starve_two_connection_pool_at_child_boundary
             await session.scalar(select(func.count()).select_from(models.ImportAttachment)),
             await session.scalar(select(func.count()).select_from(File)),
             await session.scalar(select(func.count()).select_from(Upload)),
-            await session.scalar(select(func.count()).select_from(FileUploadLifecycle)),
         )
-    assert counts == (2, 2, 2, 2, 2)
+    assert counts == (2, 2, 2, 2)
     assert storage.create_calls == 2 and len(storage.active) == 2
 
 
@@ -987,11 +815,6 @@ async def test_failed_create_releases_small_pool_and_lock_ownership_for_retry(
 
         assert limited_engine.pool.checkedout() == 0
         assert await advisory_lock_count(session_factory) == 0
-        async with session_factory() as session:
-            claims_after_failure = await session.scalar(
-                select(func.count()).select_from(models.ImportIdempotencyClaim)
-            )
-        assert claims_after_failure == 1
         if failure_mode == "cancel":
             assert isinstance(first_result, asyncio.CancelledError)
         elif failure_mode == "provider":
@@ -1021,18 +844,14 @@ async def test_failed_create_releases_small_pool_and_lock_ownership_for_retry(
             await session.scalar(select(func.count()).select_from(models.ImportAttachment)),
             await session.scalar(select(func.count()).select_from(File)),
             await session.scalar(select(func.count()).select_from(Upload)),
-            await session.scalar(select(func.count()).select_from(FileUploadLifecycle)),
             await session.scalar(
                 select(func.count()).select_from(AuditLog).where(
                     AuditLog.action == "import.create"
                 )
             ),
-            await session.scalar(
-                select(func.count()).select_from(models.ImportIdempotencyClaim)
-            ),
         )
     assert recovered.id is not None
-    assert counts == (1, 1, 1, 1, 1, 1, 1)
+    assert counts == (1, 1, 1, 1, 1)
     assert storage.create_calls == 1 and len(storage.active) == 1
 
 
@@ -1070,14 +889,11 @@ async def test_partial_provider_failure_reuses_deterministic_child_uploads_on_re
     async with session_factory() as session:
         before_uploads = list((await session.scalars(select(Upload).order_by(Upload.id))).all())
         before_files = list((await session.scalars(select(File).order_by(File.id))).all())
-        before_lifecycles = list(
-            (await session.scalars(select(FileUploadLifecycle))).all()
-        )
         assert await session.scalar(select(func.count()).select_from(models.ImportJob)) == 0
         assert await session.scalar(select(func.count()).select_from(AuditLog).where(
             AuditLog.action == "import.create"
         )) == 0
-    assert len(before_uploads) == len(before_files) == len(before_lifecycles) == 2
+    assert len(before_uploads) == len(before_files) == 2
     before_ids = {(row.id, row.file_id) for row in before_uploads}
     assert storage.create_calls == 2 and len(storage.active) == 2
 
@@ -1368,7 +1184,6 @@ async def test_create_project_denial_is_uniform_and_uses_only_resolved_audit_fk(
         assert await session.scalar(select(func.count()).select_from(models.ImportAttachment)) == 0
         assert await session.scalar(select(func.count()).select_from(File)) == 0
         assert await session.scalar(select(func.count()).select_from(Upload)) == 0
-        assert await session.scalar(select(func.count()).select_from(FileUploadLifecycle)) == 0
         audits = list(
             await session.scalars(
                 select(AuditLog).where(
@@ -1676,17 +1491,22 @@ async def test_attachment_denial_audit_failure_propagates_before_storage(
 
 
 @pytest.mark.asyncio
-async def test_attachment_completion_reuses_quarantine_outbox_audit_and_replay(
+async def test_attachment_completion_quarantines_audits_and_enqueues_once(
     db_session: AsyncSession,
     active_owner: Any,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """One Task 7 completion yields stable quarantine, outbox, audit, and scan evidence."""
+    """One completion yields quarantine, audit, and a single scan enqueue."""
     project, device, creator = await seed_device_actor(
         db_session, active_owner, name="Import attachment completion"
     )
     storage = ProbeTrackingStorage(complete_size=128)
-    service = service_for(session_factory, storage)
+    dispatched: list[tuple[UUID, UUID]] = []
+    service = service_for(
+        session_factory,
+        storage,
+        lambda file_id, event_key: dispatched.append((file_id, event_key)),
+    )
     job = await service.create(
         creator,
         command_for(project.id),
@@ -1715,62 +1535,9 @@ async def test_attachment_completion_reuses_quarantine_outbox_audit_and_replay(
     assert first.id == second.id == attachment.file_id
     assert first.state == second.state == FileState.QUARANTINED
     assert storage.complete_calls == 1 and storage.probe_calls == storage_checkpoint
+    assert dispatched == [(attachment.file_id, attachment.file_id)]
     async with session_factory() as session:
-        lifecycle = await session.get(FileUploadLifecycle, attachment.upload_id)
-        outboxes = list(
-            await session.scalars(
-                select(FileLifecycleOutbox)
-                .where(FileLifecycleOutbox.file_id == attachment.file_id)
-                .order_by(FileLifecycleOutbox.kind)
-            )
-        )
-    assert lifecycle is not None
-    assert lifecycle.multipart_id is not None
-    assert lifecycle.canonical_parts_json == [
-        {"part_number": 1, "etag": "private-etag-1"},
-        {"part_number": 2, "etag": "private-etag-2"},
-    ]
-    assert [(row.kind, row.state) for row in outboxes] == [
-        ("completion_audit", "PENDING"),
-        ("scan_dispatch", "PENDING"),
-    ]
-
-    def fail_success_audit(_mapper: object, _connection: object, target: AuditLog) -> None:
-        if target.action == "file.upload.complete" and target.outcome == "SUCCESS":
-            raise RuntimeError("audit unavailable")
-
-    dispatched: list[tuple[UUID, UUID]] = []
-    lifecycle_service = FileLifecycleService(
-        session_factory,
-        storage,
-        lambda file_id, event_key: dispatched.append((file_id, event_key)),
-    )
-    event.listen(AuditLog, "before_insert", fail_success_audit)
-    try:
-        assert not await lifecycle_service.deliver_completion(attachment.upload_id)
-    finally:
-        event.remove(AuditLog, "before_insert", fail_success_audit)
-
-    assert storage.probe_calls == storage_checkpoint and dispatched == []
-    async with session_factory() as session, session.begin():
         file = await session.get(File, attachment.file_id)
-        completion_outbox = await session.scalar(
-            select(FileLifecycleOutbox).where(
-                FileLifecycleOutbox.file_id == attachment.file_id,
-                FileLifecycleOutbox.kind == "completion_audit",
-            )
-        )
-        assert file is not None and file.state == FileState.QUARANTINED
-        assert completion_outbox is not None
-        assert completion_outbox.state == "PENDING"
-        assert completion_outbox.last_error_code == "AUDIT_FAILED"
-        completion_outbox.next_attempt_at = datetime.now(UTC) - timedelta(seconds=1)
-
-    assert await lifecycle_service.deliver_completion(attachment.upload_id)
-    assert await lifecycle_service.deliver_completion(attachment.upload_id)
-    assert storage.probe_calls == storage_checkpoint
-    assert len(dispatched) == 1 and dispatched[0][0] == attachment.file_id
-    async with session_factory() as session:
         audits = list(
             await session.scalars(
                 select(AuditLog).where(
@@ -1779,13 +1546,9 @@ async def test_attachment_completion_reuses_quarantine_outbox_audit_and_replay(
                 )
             )
         )
-        delivered_outboxes = list(
-            await session.scalars(
-                select(FileLifecycleOutbox).where(
-                    FileLifecycleOutbox.file_id == attachment.file_id
-                )
-            )
-        )
+        upload = await session.get(Upload, attachment.upload_id)
+    assert file is not None and file.state == FileState.QUARANTINED
+    assert upload is not None and upload.multipart_id is not None
     assert len(audits) == 1
     assert audits[0].actor_kind == "device" and audits[0].actor_id == device.id
     assert audits[0].metadata_json == {
@@ -1793,11 +1556,10 @@ async def test_attachment_completion_reuses_quarantine_outbox_audit_and_replay(
         "state": "QUARANTINED",
         "size_bytes": 128,
     }
-    assert {row.state for row in delivered_outboxes} == {"DELIVERED"}
     serialized_audit = json.dumps(audits[0].metadata_json, ensure_ascii=False)
     assert "private-etag" not in serialized_audit
-    assert lifecycle.object_key not in serialized_audit
-    assert lifecycle.multipart_id not in serialized_audit
+    assert file.object_key not in serialized_audit
+    assert upload.multipart_id not in serialized_audit
 
 
 async def set_attachment_states(
@@ -1820,12 +1582,9 @@ async def set_attachment_states(
         for attachment in attachments:
             kind = attachment.kind.value
             file = await session.get(File, attachment.file_id)
-            lifecycle = await session.get(FileUploadLifecycle, attachment.upload_id)
-            assert file is not None and lifecycle is not None
+            assert file is not None
             file_ids[kind] = file.id
             file.state = states_by_kind[kind]
-            if states_by_kind[kind] != "UPLOADING":
-                lifecycle.completion_state = "QUARANTINED"
             if scan_results is not None and kind in scan_results:
                 file.scan_result = scan_results[kind]
     return file_ids

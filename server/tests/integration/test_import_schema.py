@@ -113,7 +113,8 @@ def test_import_models_are_registered_and_alembic_has_no_metadata_drift(
 ) -> None:
     """Forgetting migrations/env.py registration would make alembic check propose destructive drift."""
     import_models()
-    assert IMPORT_TABLES <= set(Base.metadata.tables)
+    assert {"import_jobs", "import_attachments"} <= set(Base.metadata.tables)
+    assert "import_idempotency_claims" not in Base.metadata.tables
     environment = os.environ.copy()
     environment["SUPERBOSS_DATABASE_URL"] = postgres_database
 
@@ -128,115 +129,6 @@ def test_import_models_are_registered_and_alembic_has_no_metadata_drift(
 
     assert check.returncode == 0, check.stdout + check.stderr
     assert "No new upgrade operations detected" in check.stdout + check.stderr
-
-
-@pytest.mark.asyncio
-async def test_import_claim_model_and_database_accept_only_bounded_device_keys(
-    db_session: AsyncSession,
-    active_owner: User,
-) -> None:
-    """The durable pre-I/O claim stores only one printable key/fingerprint per device."""
-    models = import_models()
-    _project, device = await _seed_import_parent(
-        db_session,
-        active_owner,
-        name="Import claim contract",
-    )
-    claim_table = models.ImportIdempotencyClaim.__table__
-    assert list(claim_table.primary_key.columns.keys()) == [
-        "device_id",
-        "idempotency_key",
-    ]
-    assert claim_table.primary_key.name == "pk_import_idempotency_claims"
-    assert set(claim_table.columns.keys()) == {
-        "device_id",
-        "idempotency_key",
-        "manifest_fingerprint",
-        "created_at",
-    }
-
-    await db_session.execute(
-        _IMPORT_CLAIM_INSERT,
-        {
-            "device_id": device.id,
-            "idempotency_key": "Printable-claim_key!",
-            "manifest_fingerprint": "a" * 64,
-        },
-    )
-    await db_session.commit()
-    saved = await db_session.get(
-        models.ImportIdempotencyClaim,
-        (device.id, "Printable-claim_key!"),
-    )
-    assert saved is not None
-    assert saved.manifest_fingerprint == "a" * 64
-    assert saved.created_at.tzinfo is not None
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("idempotency_key", "manifest_fingerprint", "constraint_name"),
-    (
-        ("", "a" * 64, "ck_import_idempotency_claims_key"),
-        (" ", "a" * 64, "ck_import_idempotency_claims_key"),
-        ("line\nbreak", "a" * 64, "ck_import_idempotency_claims_key"),
-        ("delete\x7f", "a" * 64, "ck_import_idempotency_claims_key"),
-        ("x" * 256, "a" * 64, None),
-        ("valid-key", "A" * 64, "ck_import_idempotency_claims_fingerprint"),
-        ("valid-key", "a" * 63, "ck_import_idempotency_claims_fingerprint"),
-        ("valid-key", "g" * 64, "ck_import_idempotency_claims_fingerprint"),
-    ),
-)
-async def test_database_rejects_invalid_import_claim_key_or_fingerprint(
-    db_session: AsyncSession,
-    active_owner: User,
-    idempotency_key: str,
-    manifest_fingerprint: str,
-    constraint_name: str | None,
-) -> None:
-    """Direct writers cannot bypass the printable key and lowercase SHA-256 grammar."""
-    _models = import_models()
-    _project, device = await _seed_import_parent(
-        db_session,
-        active_owner,
-        name=f"Invalid import claim {uuid4().hex}",
-    )
-
-    with pytest.raises(DBAPIError) as rejected:
-        await db_session.execute(
-            _IMPORT_CLAIM_INSERT,
-            {
-                "device_id": device.id,
-                "idempotency_key": idempotency_key,
-                "manifest_fingerprint": manifest_fingerprint,
-            },
-        )
-        await db_session.commit()
-    if constraint_name is not None:
-        assert _constraint_name(rejected.value) == constraint_name
-    else:
-        assert getattr(rejected.value.orig, "sqlstate", None) == "22001"
-    await db_session.rollback()
-
-
-@pytest.mark.asyncio
-async def test_database_rejects_import_claim_for_unknown_device(
-    db_session: AsyncSession,
-) -> None:
-    """A durable claim cannot outlive or invent its owning device identity."""
-    import_models()
-    with pytest.raises(IntegrityError) as rejected:
-        await db_session.execute(
-            _IMPORT_CLAIM_INSERT,
-            {
-                "device_id": uuid4(),
-                "idempotency_key": "unknown-device",
-                "manifest_fingerprint": "a" * 64,
-            },
-        )
-        await db_session.commit()
-    assert _constraint_name(rejected.value) == "fk_import_idempotency_claims_device"
-    await db_session.rollback()
 
 
 @pytest.mark.asyncio
