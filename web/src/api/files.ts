@@ -206,25 +206,12 @@ function terminalDownloadState(
         !(failure instanceof HttpClientError) ||
         failure.status !== 409 ||
         !isRecord(failure.data) ||
-        !exactKeys(failure.data, ['error']) ||
-        !isRecord(failure.data.error) ||
-        !exactKeys(failure.data.error, ['code', 'message', 'request_id']) ||
-        !uuid(failure.data.error.request_id)
+        !isRecord(failure.data.error)
     ) {
         return undefined
     }
-    if (
-        failure.data.error.code === 'FILE_INFECTED' &&
-        failure.data.error.message === 'File did not pass security scanning'
-    ) {
-        return 'INFECTED'
-    }
-    if (
-        failure.data.error.code === 'FILE_SCAN_FAILED' &&
-        failure.data.error.message === 'File scanning did not complete'
-    ) {
-        return 'FAILED'
-    }
+    if (failure.data.error.code === 'FILE_INFECTED') return 'INFECTED'
+    if (failure.data.error.code === 'FILE_SCAN_FAILED') return 'FAILED'
     return undefined
 }
 

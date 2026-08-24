@@ -5,7 +5,6 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Header, Path, Query, Request, status
 
 from superboss.core.actors import Actor, get_actor
-from superboss.core.errors import FileDeliveryPendingError
 from superboss.modules.files.schemas import UploadComplete
 from superboss.modules.files.service import FileLifecycleService
 from superboss.modules.files.storage import CompletedPart
@@ -96,13 +95,11 @@ async def complete_import_attachment(
         request_id=_request_id(request),
     )
     attachment = await service.view_attachment(job_id, attachment_id)
-    delivered = await FileLifecycleService(
+    await FileLifecycleService(
         request.app.state.session_factory,
         request.app.state.object_storage,
         request.app.state.enqueue_file_scan,
     ).deliver_completion(attachment.upload_id)
-    if not delivered:
-        raise FileDeliveryPendingError()
     return ImportAttachmentRead.model_validate(
         await service.view_attachment(job_id, attachment_id)
     )

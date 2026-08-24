@@ -82,7 +82,7 @@ class FileUploadProjectMismatchError(FileUploadConflictError):
 
 
 class FileScanService:
-    """Atomically scan one quarantined object under its PostgreSQL File lock."""
+    """Scan a quarantined object without holding the File row lock during I/O."""
 
     _TERMINAL_STATES = frozenset(
         {FileState.CLEAN, FileState.INFECTED, FileState.FAILED}
@@ -107,6 +107,8 @@ class FileScanService:
         return sanitized[: cls._MAX_SIGNATURE_LENGTH] or "INFECTED"
 
     async def scan_file(self, file_id: UUID) -> None:
+        object_key = ""
+        expected_sha256 = ""
         async with self.session_factory() as session, session.begin():
             file = await session.scalar(
                 select(File).where(File.id == file_id).with_for_update()
@@ -115,39 +117,55 @@ class FileScanService:
                 return
             if file.state != FileState.QUARANTINED:
                 return
-
             file.state = FileState.SCANNING
-            await session.flush()
-            digest = hashlib.sha256()
+            object_key = file.object_key
+            expected_sha256 = file.sha256
+
+        digest = hashlib.sha256()
+        new_state = FileState.FAILED
+        scan_result = "SCAN_FAILED"
+        try:
 
             async def hashing_chunks() -> AsyncGenerator[bytes]:
-                async for chunk in self.storage.stream(file.object_key):
+                async for chunk in self.storage.stream(object_key):
                     digest.update(chunk)
                     yield chunk
 
             chunks = hashing_chunks()
             try:
-                try:
-                    verdict = await self.scanner.scan(chunks)
-                finally:
-                    await chunks.aclose()
-            except Exception:  # noqa: BLE001 -- persist only the fixed safe result
-                file.state = FileState.FAILED
-                file.scan_result = "SCAN_FAILED"
-                return
-
-            if digest.hexdigest() != file.sha256:
-                file.state = FileState.FAILED
-                file.scan_result = "HASH_MISMATCH"
+                verdict = await self.scanner.scan(chunks)
+            finally:
+                await chunks.aclose()
+            if digest.hexdigest() != expected_sha256:
+                new_state = FileState.FAILED
+                scan_result = "HASH_MISMATCH"
             elif verdict.status == ScanStatus.CLEAN:
-                file.state = FileState.CLEAN
-                file.scan_result = "CLEAN"
+                new_state = FileState.CLEAN
+                scan_result = "CLEAN"
             elif verdict.status == ScanStatus.INFECTED:
-                file.state = FileState.INFECTED
-                file.scan_result = self._safe_signature(verdict.signature)
+                new_state = FileState.INFECTED
+                scan_result = self._safe_signature(verdict.signature)
             else:
-                file.state = FileState.FAILED
-                file.scan_result = "SCAN_FAILED"
+                new_state = FileState.FAILED
+                scan_result = "SCAN_FAILED"
+        except Exception:  # noqa: BLE001 -- persist only the fixed safe result
+            new_state = FileState.FAILED
+            scan_result = "SCAN_FAILED"
+
+        async with self.session_factory() as session, session.begin():
+            file = await session.scalar(
+                select(File).where(File.id == file_id).with_for_update()
+            )
+            if file is None or file.state != FileState.SCANNING:
+                return
+            file.state = new_state
+            file.scan_result = scan_result
+
+        if new_state in {FileState.INFECTED, FileState.FAILED}:
+            try:
+                await self.storage.delete_object(object_key)
+            except Exception:  # noqa: BLE001 -- scan result is already durable
+                return
 
 
 class FileService:
@@ -988,7 +1006,7 @@ class FileLifecycleService:
                         and outbox.locked_at <= expired
                     )
                 ):
-                    return False
+                    return True
                 claim_token = uuid4()
                 outbox.state = "DELIVERING"
                 outbox.locked_at = now

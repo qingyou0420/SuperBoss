@@ -30,7 +30,7 @@ services:
       minio-init:
         condition: service_completed_successfully
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     healthcheck:
       test:
         - CMD
@@ -48,13 +48,13 @@ services:
     restart: unless-stopped
 
   postgres:
-    image: postgres:17-alpine
+    image: postgres:18-alpine
     environment:
       POSTGRES_DB: superboss
       POSTGRES_USER: superboss
       POSTGRES_PASSWORD: superboss
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -67,10 +67,10 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:7.4-alpine
+    image: redis:8-alpine
     command: ["redis-server", "--appendonly", "yes"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis-data:/data
     healthcheck:
@@ -89,8 +89,8 @@ services:
       MINIO_ROOT_USER: superboss
       MINIO_ROOT_PASSWORD: superboss-dev-only
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     volumes:
       - minio-data:/data
     healthcheck:
@@ -123,7 +123,7 @@ services:
     restart: "no"
 
   clamav:
-    image: clamav/clamav:1.4
+    image: clamav/clamav:1.5.3
     volumes:
       - clamav-database:/var/lib/clamav
       - ./server/config/clamd.conf:/etc/clamav/clamd.conf:ro
@@ -131,17 +131,65 @@ services:
       - backend
     restart: unless-stopped
 
-  file-scan-worker:
+  web:
+    build:
+      context: ./web
+      args:
+        VITE_OBJECT_STORAGE_ORIGIN: https://objects.localhost
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks:
+      - edge
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.29-alpine
+    environment:
+      SUPERBOSS_APP_HOST: app.localhost
+      SUPERBOSS_OBJECTS_HOST: objects.localhost
+    volumes:
+      - ./ops/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ops/nginx/conf.d/superboss.conf:/etc/nginx/templates/superboss.conf.template:ro
+      - ./ops/local-tls/allowlist.conf:/etc/nginx/allowlist.conf:ro
+      - ./ops/local-tls/tls.crt:/etc/nginx/tls/tls.crt:ro
+      - ./ops/local-tls/tls.key:/etc/nginx/tls/tls.key:ro
+    ports:
+      - "127.0.0.1:443:443"
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/null --no-check-certificate https://127.0.0.1/
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      edge: {}
+      backend:
+        aliases:
+          - objects.localhost
+    restart: unless-stopped
+
+  worker:
     build: *backend-build
     command:
       - celery
       - -A
       - superboss.workers.celery_app:celery_app
       - worker
+      - --beat
       - --loglevel=INFO
-      - --queues=file-scan
+      - --queues=file-scan,file-maintenance
       - --concurrency=1
       - --prefetch-multiplier=1
+      - --schedule=/var/lib/celery/celerybeat-schedule
     environment: *backend-environment
     depends_on:
       postgres:
@@ -153,45 +201,6 @@ services:
       minio-init:
         condition: service_completed_successfully
       clamav:
-        condition: service_healthy
-    networks:
-      - backend
-    restart: unless-stopped
-
-  file-maintenance-worker:
-    build: *backend-build
-    command:
-      - celery
-      - -A
-      - superboss.workers.celery_app:celery_app
-      - worker
-      - --loglevel=INFO
-      - --queues=file-maintenance
-      - --concurrency=1
-      - --prefetch-multiplier=1
-    environment: *backend-environment
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    networks:
-      - backend
-    restart: unless-stopped
-
-  celery-beat:
-    build: *backend-build
-    command:
-      - celery
-      - -A
-      - superboss.workers.celery_app:celery_app
-      - beat
-      - --loglevel=INFO
-      - --pidfile=
-      - --schedule=/var/lib/celery/celerybeat-schedule
-    environment: *backend-environment
-    depends_on:
-      redis:
         condition: service_healthy
     volumes:
       - celery-beat-data:/var/lib/celery

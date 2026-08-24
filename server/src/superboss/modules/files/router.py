@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, Header, Path, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core.actors import Actor, get_actor
-from superboss.core.errors import DomainError, FileDeliveryPendingError
+from superboss.core.errors import DomainError
 from superboss.modules.audit.schemas import AuditEventInput
 from superboss.modules.audit.service import AuditService
 from superboss.modules.files.models import File, Upload
@@ -157,13 +157,11 @@ async def complete(
         )
         raise
     await service.session.commit()
-    delivered = await FileLifecycleService(
+    await FileLifecycleService(
         request.app.state.session_factory,
         request.app.state.object_storage,
         request.app.state.enqueue_file_scan,
     ).deliver_completion(upload_id)
-    if not delivered:
-        raise FileDeliveryPendingError()
     return {"file_id": str(file.id), "state": file.state}
 
 

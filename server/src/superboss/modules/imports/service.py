@@ -777,7 +777,10 @@ class ImportService:
                 if evaluation.status == ImportStatus.SCANNING:
                     continue
                 event_key = self._transition_event_key(
-                    "import.reconcile", job.id, evaluation.status
+                    "import.reconcile",
+                    job.id,
+                    evaluation.status,
+                    evaluation.result_code,
                 )
                 self._apply_transition(
                     session,
@@ -953,7 +956,9 @@ class ImportService:
         job.result_code = evaluation.result_code
         job.submitted_at = job.submitted_at or now
         job.updated_at = now
-        event_key = cls._transition_event_key(action, job.id, evaluation.status)
+        event_key = cls._transition_event_key(
+            action, job.id, evaluation.status, evaluation.result_code
+        )
         session.add(
             AuditLog(
                 actor_kind=actor_kind,
@@ -974,10 +979,15 @@ class ImportService:
         )
 
     @staticmethod
-    def _transition_event_key(action: str, job_id: UUID, status: ImportStatus) -> UUID:
+    def _transition_event_key(
+        action: str,
+        job_id: UUID,
+        status: ImportStatus,
+        result_code: str | None = None,
+    ) -> UUID:
         return uuid5(
             NAMESPACE_URL,
-            f"superboss:{action}:{job_id}:{status.value}",
+            f"superboss:{action}:{job_id}:{status.value}:{result_code or ''}",
         )
 
     async def _job_result(

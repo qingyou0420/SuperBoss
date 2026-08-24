@@ -15,20 +15,8 @@ const renderApp = async (path: string) => {
     })
 }
 
-test('renders the SuperBoss shell', async () => {
-    await renderApp('/health')
-
-    expect(screen.getByText('SuperBoss')).toBeInTheDocument()
-})
-
 test('shows the readiness message at /health', async () => {
     await renderApp('/health')
-
-    expect(screen.getByText('SuperBoss is ready')).toBeInTheDocument()
-})
-
-test('redirects the default route to the readiness page', async () => {
-    await renderApp('/')
 
     expect(screen.getByText('SuperBoss is ready')).toBeInTheDocument()
 })

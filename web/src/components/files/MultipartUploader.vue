@@ -7,6 +7,7 @@ import {
     createMultipartUploader,
     createPresignedUploadTransport,
     createWorkerHasher,
+    UploadUserError,
 } from '../../uploads/multipart'
 
 const props = defineProps<{
@@ -56,9 +57,17 @@ async function submit(): Promise<void> {
         })
         status.value = '\u626b\u63cf\u4e2d'
         emit('completed', result)
-    } catch {
-        errorMessage.value =
-            '\u6587\u4ef6\u4e0a\u4f20\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002'
+    } catch (error) {
+        if (error instanceof UploadUserError && error.code === 'TOO_LARGE') {
+            errorMessage.value = '文件超过 100MB 上限。'
+        } else if (error instanceof UploadUserError && error.code === 'EMPTY') {
+            errorMessage.value = '请选择非空文件。'
+        } else if (error instanceof UploadUserError && error.code === 'BAD_TYPE') {
+            errorMessage.value = '不支持的文件类型。'
+        } else {
+            errorMessage.value =
+                '\u6587\u4ef6\u4e0a\u4f20\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002'
+        }
     } finally {
         pending.value = false
         activeUploader = undefined

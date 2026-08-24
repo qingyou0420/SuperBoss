@@ -113,15 +113,7 @@ export function projectErrorMessage(error: unknown): string {
         return '项目操作失败，请稍后重试。'
     }
     const detail = body.error
-    if (!exactKeys(detail, ['code', 'message', 'request_id'])) {
-        return '项目操作失败，请稍后重试。'
-    }
-    if (
-        detail.code === 'PROJECT_NAME_CONFLICT' &&
-        detail.message === 'A project with this name already exists' &&
-        typeof detail.request_id === 'string' &&
-        UUID.test(detail.request_id)
-    ) {
+    if (detail.code === 'PROJECT_NAME_CONFLICT') {
         return '项目名称已存在。'
     }
     return '项目操作失败，请稍后重试。'

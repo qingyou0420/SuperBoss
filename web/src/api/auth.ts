@@ -71,7 +71,13 @@ function validPassword(value: unknown): value is string {
 }
 
 function validateCredentials(value: LoginCredentials): void {
-    if (!USERNAME.test(value.username) || !validPassword(value.password)) {
+    if (
+        typeof value.username !== 'string' ||
+        !USERNAME.test(value.username) ||
+        typeof value.password !== 'string' ||
+        value.password.length < 1 ||
+        hasUnsafeText(value.password)
+    ) {
         throw new AuthContractError()
     }
 }

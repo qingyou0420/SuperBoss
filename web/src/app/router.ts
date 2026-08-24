@@ -103,7 +103,7 @@ export function createAppRouter(
     const router = createRouter({
         history,
         routes: [
-            { path: '/', redirect: '/health' },
+            { path: '/', redirect: '/owner' },
             { path: '/health', name: 'health', component: HealthPage },
             { path: '/login', name: 'login', component: LoginPage },
             {

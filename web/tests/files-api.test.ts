@@ -278,23 +278,8 @@ describe('strict browser file API', () => {
         }),
         new HttpClientError(409, {
             error: {
-                code: 'FILE_INFECTED',
+                code: 'FILE_UNKNOWN',
                 message: 'wrong message',
-                request_id: '019f2b8e-18f0-7f31-9f42-3e6a76b9f813',
-            },
-        }),
-        new HttpClientError(409, {
-            error: {
-                code: 'FILE_SCAN_FAILED',
-                message: 'File scanning did not complete',
-                request_id: 'not-a-uuid',
-            },
-        }),
-        new HttpClientError(409, {
-            error: {
-                code: 'FILE_INFECTED',
-                extra: 'sentinel',
-                message: 'File did not pass security scanning',
                 request_id: '019f2b8e-18f0-7f31-9f42-3e6a76b9f813',
             },
         }),

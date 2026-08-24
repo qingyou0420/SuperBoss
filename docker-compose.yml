@@ -35,7 +35,7 @@ services:
       - "${SUPERBOSS_TLS_CERT_PATH:?set SUPERBOSS_TLS_CERT_PATH}:/etc/nginx/tls/tls.crt:ro"
       - "${SUPERBOSS_TLS_KEY_PATH:?set SUPERBOSS_TLS_KEY_PATH}:/etc/nginx/tls/tls.key:ro"
     ports:
-      - "443:443"
+      - "127.0.0.1:443:443"
     depends_on:
       api:
         condition: service_healthy
@@ -44,9 +44,7 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - >-
-          wget -q -O /dev/null
-          http://api:8000/api/v1/health/live
+        - wget -q -O /dev/null --no-check-certificate https://127.0.0.1/
       interval: 10s
       timeout: 5s
       retries: 10
@@ -107,10 +105,12 @@ services:
       - -A
       - superboss.workers.celery_app:celery_app
       - worker
+      - --beat
       - --loglevel=INFO
       - --queues=file-scan,file-maintenance
       - --concurrency=1
       - --prefetch-multiplier=1
+      - --schedule=/var/lib/celery/celerybeat-schedule
     environment: *backend-environment
     depends_on:
       postgres:
@@ -122,25 +122,6 @@ services:
       minio-init:
         condition: service_completed_successfully
       clamav:
-        condition: service_healthy
-    networks:
-      - backend
-    restart: unless-stopped
-
-  scheduler:
-    image: "superboss-api:${SUPERBOSS_RELEASE_TAG:-local}"
-    build: *backend-build
-    command:
-      - celery
-      - -A
-      - superboss.workers.celery_app:celery_app
-      - beat
-      - --loglevel=INFO
-      - --pidfile=
-      - --schedule=/var/lib/celery/celerybeat-schedule
-    environment: *backend-environment
-    depends_on:
-      redis:
         condition: service_healthy
     volumes:
       - celery-scheduler-data:/var/lib/celery

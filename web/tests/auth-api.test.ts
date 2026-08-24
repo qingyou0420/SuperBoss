@@ -93,10 +93,20 @@ describe('local auth API', () => {
         )
     })
 
+    test('sends short login passwords to the server', async () => {
+        const http = client()
+        vi.mocked(http.get).mockResolvedValue(response(204, null))
+        vi.mocked(http.post).mockResolvedValue(response(204, null))
+        await createAuthApi(http).login({
+            username: 'owner',
+            password: 'short',
+        })
+        expect(http.post).toHaveBeenCalled()
+    })
+
     test.each([
         { username: 'Owner', password: 'correct horse battery staple' },
         { username: 'ab', password: 'correct horse battery staple' },
-        { username: 'owner', password: 'too short' },
         { username: 'owner', password: 'line\nbreak password' },
     ])(
         'rejects invalid credentials before CSRF or login I/O %#',

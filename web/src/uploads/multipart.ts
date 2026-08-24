@@ -112,6 +112,16 @@ export class UploadContractError extends Error {
     }
 }
 
+export class UploadUserError extends UploadContractError {
+    readonly code: 'EMPTY' | 'TOO_LARGE' | 'BAD_TYPE'
+
+    constructor(code: 'EMPTY' | 'TOO_LARGE' | 'BAD_TYPE') {
+        super()
+        this.name = 'UploadUserError'
+        this.code = code
+    }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
     if (typeof value !== 'object' || value === null || Array.isArray(value))
         return false
@@ -171,8 +181,6 @@ function canonicalCommand(value: unknown): UploadCommand {
         !isRecord(value) ||
         !exactKeys(value, ['category', 'file', 'file_date', 'project_id']) ||
         !(value.file instanceof File) ||
-        value.file.size < 1 ||
-        value.file.size > MAX_FILE_BYTES ||
         !isSafeText(value.file.name, 1024) ||
         !Number.isSafeInteger(value.file.lastModified) ||
         value.file.lastModified < 0 ||
@@ -184,9 +192,11 @@ function canonicalCommand(value: unknown): UploadCommand {
     ) {
         throw new UploadContractError()
     }
+    if (value.file.size < 1) throw new UploadUserError('EMPTY')
+    if (value.file.size > MAX_FILE_BYTES) throw new UploadUserError('TOO_LARGE')
     const contentType = value.file.type || 'application/octet-stream'
     if (contentType.length > 255 || !MIME.test(contentType))
-        throw new UploadContractError()
+        throw new UploadUserError('BAD_TYPE')
     return {
         category: value.category,
         file: value.file,
