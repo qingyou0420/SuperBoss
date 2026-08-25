@@ -8,7 +8,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core.actors import Actor, get_actor
 from superboss.modules.audit.service import AuditService
-from superboss.modules.projects.repository import ProjectRepository
 from superboss.modules.projects.schemas import ProjectCreate, ProjectRead
 from superboss.modules.projects.service import ProjectService
 
@@ -29,7 +28,7 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
 
 
 def get_service(request: Request, session: AsyncSession = Depends(get_session)) -> ProjectService:
-    return ProjectService(ProjectRepository(session), AuditService(request.app.state.session_factory))
+    return ProjectService(session, AuditService(request.app.state.session_factory))
 
 
 @router.post("", response_model=ProjectRead, status_code=status.HTTP_201_CREATED)

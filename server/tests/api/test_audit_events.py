@@ -26,16 +26,13 @@ from superboss.modules.audit.models import AuditLog
 from superboss.modules.audit.schemas import AuditEventInput
 from superboss.modules.audit.service import AuditService
 from superboss.modules.auth.models import AuthSession
-from superboss.modules.auth.repository import AuthRepository
 from superboss.modules.auth.service import AuthService
 from superboss.modules.files.models import File, FileState
 from superboss.modules.projects.models import Project, ProjectMember
-from superboss.modules.projects.repository import ProjectRepository
 from superboss.modules.projects.router import get_service, get_session
 from superboss.modules.projects.schemas import ProjectCreate
 from superboss.modules.projects.service import ProjectService
 from superboss.modules.users.models import Role, User
-from superboss.modules.users.repository import UserRepository
 from tests.identity import LOCAL_TEST_PASSWORD, local_user
 
 
@@ -442,11 +439,11 @@ async def test_business_commit_failure_persists_no_success_audit(
     actor = Actor("user", uuid4(), Role.OWNER, frozenset(), frozenset())
     assert db_session.bind is not None
     service = ProjectService(
-        ProjectRepository(db_session),
+        db_session,
         AuditService(async_sessionmaker(db_session.bind, expire_on_commit=False)),
     )
     project = await service.create(actor, ProjectCreate(name="Commit failure"), request_id)
-    service.repository.session = _CommitFailure()  # type: ignore[assignment]
+    service.session = _CommitFailure()  # type: ignore[assignment]
     with pytest.raises(RuntimeError, match="controlled commit failure"):
         await service.commit_and_record_success(actor, "project.create", request_id, project.id)
     assert not list(
@@ -463,7 +460,7 @@ async def test_successful_commit_control_persists_one_success_audit(
     actor = Actor("user", uuid4(), Role.OWNER, frozenset(), frozenset())
     assert db_session.bind is not None
     service = ProjectService(
-        ProjectRepository(db_session),
+        db_session,
         AuditService(async_sessionmaker(db_session.bind, expire_on_commit=False)),
     )
     project = await service.create(actor, ProjectCreate(name="Commit success"), request_id)
@@ -490,7 +487,7 @@ async def test_audit_write_failure_is_not_returned_as_project_success(
         request: Request, session: AsyncSession = Depends(get_session)
     ) -> ProjectService:
         del request
-        return ProjectService(ProjectRepository(session), _FailingAuditService())  # type: ignore[arg-type]
+        return ProjectService(session, _FailingAuditService())  # type: ignore[arg-type]
 
     db_session.add(local_user("owner", display_name="Owner", role=Role.OWNER))
     await db_session.commit()
@@ -542,9 +539,7 @@ async def test_concurrent_request_ids_keep_audit_actors_isolated(
     assigned = await db_session.scalar(select(Project).where(Project.name == "Assigned"))
     assert assigned is not None
     db_session.add(ProjectMember(project_id=assigned.id, user_id=staff.id))
-    service = AuthService(
-        db_session, AuthRepository(db_session), UserRepository(db_session), test_settings
-    )
+    service = AuthService(db_session, test_settings)
     tokens: list[tuple[UUID, str, UUID, str]] = []
     for index in range(10):
         user = owner if index % 2 == 0 else staff

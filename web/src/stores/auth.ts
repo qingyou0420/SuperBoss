@@ -27,9 +27,9 @@ export const useAuthStore = defineStore('auth', () => {
         isBootstrapped.value = true
     }
 
-    const bootstrap = (force = false): Promise<void> => {
+    const bootstrap = (): Promise<void> => {
         if (bootstrapPromise) return bootstrapPromise
-        if (isBootstrapped.value && !force) return Promise.resolve()
+        if (isBootstrapped.value) return Promise.resolve()
         const pending = (async () => {
             errorMessage.value = ''
             try {

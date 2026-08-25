@@ -1,10 +1,12 @@
 """Exact browser credential lifetime contracts without external services."""
 
 from datetime import UTC, datetime, timedelta
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import jwt
 import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core import security
 from superboss.core.config import Settings
@@ -12,43 +14,12 @@ from superboss.core.security import hash_token, issue_access_token, issue_device
 from superboss.modules.auth import service as auth_service_module
 from superboss.modules.auth.models import AuthSession
 from superboss.modules.auth.service import AuthService
-from superboss.modules.users.models import Role, User
+from superboss.modules.users.models import Role
 from tests.identity import local_user
-
-
-class RecordingAuthRepository:
-    def __init__(self) -> None:
-        self.records: dict[str, AuthSession] = {}
-
-    async def add(self, auth_session: AuthSession) -> None:
-        auth_session.id = uuid4()
-        self.records[auth_session.refresh_token_hash] = auth_session
-
-    async def by_refresh_hash(self, token_hash: str) -> AuthSession | None:
-        return self.records.get(token_hash)
-
-
-class MemorySession:
-    def __init__(self, user: User) -> None:
-        self.user = user
-
-    async def flush(self) -> None:
-        pass
-
-    async def get(self, model: type[User], object_id: UUID) -> User | None:
-        if model is User and object_id == self.user.id:
-            return self.user
-        return None
 
 
 def _settings() -> Settings:
     return Settings(jwt_secret="test-only-signing-secret-with-at-least-thirty-two-bytes")
-
-
-def _user() -> User:
-    user = local_user("owner", display_name="Owner", role=Role.OWNER)
-    user.id = uuid4()
-    return user
 
 
 def _claims(token: str, settings: Settings) -> dict[str, object]:
@@ -58,12 +29,6 @@ def _claims(token: str, settings: Settings) -> dict[str, object]:
         algorithms=["HS256"],
         options={"verify_exp": False, "verify_iat": False},
     )
-
-
-def _service(
-    user: User, repository: RecordingAuthRepository, settings: Settings
-) -> AuthService:
-    return AuthService(MemorySession(user), repository, object(), settings)  # type: ignore[arg-type]
 
 
 def test_browser_access_token_expires_exactly_two_hours_after_issuance(
@@ -87,22 +52,27 @@ def test_browser_access_token_expires_exactly_two_hours_after_issuance(
 
 @pytest.mark.asyncio
 async def test_issue_session_returns_and_persists_exact_browser_lifetimes(
+    db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Short access or 30-day refresh values must not escape the real issue flow."""
     issued_at = datetime.now(UTC).replace(microsecond=654321) - timedelta(minutes=1)
     settings = _settings()
-    user = _user()
-    repository = RecordingAuthRepository()
+    user = local_user("owner", display_name="Owner", role=Role.OWNER)
+    db_session.add(user)
+    await db_session.flush()
     monkeypatch.setattr(security, "utcnow", lambda: issued_at)
     monkeypatch.setattr(auth_service_module, "utcnow", lambda: issued_at)
 
-    pair = await _service(user, repository, settings).issue_session(user)
+    pair = await AuthService(db_session, settings).issue_session(user)
 
     claims = _claims(pair.access_token, settings)
-    stored = repository.records[hash_token(pair.refresh_token)]
+    stored = await db_session.scalar(
+        select(AuthSession).where(AuthSession.refresh_token_hash == hash_token(pair.refresh_token))
+    )
     expected_access_expiry = issued_at.replace(microsecond=0) + timedelta(hours=2)
     expected_refresh_expiry = issued_at + timedelta(days=14)
+    assert stored is not None
     assert pair.access_expires_at == expected_access_expiry
     assert datetime.fromtimestamp(int(claims["exp"]), UTC) == expected_access_expiry
     assert stored.access_expires_at == expected_access_expiry
@@ -112,25 +82,37 @@ async def test_issue_session_returns_and_persists_exact_browser_lifetimes(
 
 @pytest.mark.asyncio
 async def test_refresh_rotation_reissues_exact_browser_lifetimes(
+    db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Rotation must start a fresh 2-hour/14-day session from the rotation instant."""
     clock = {"now": datetime.now(UTC).replace(microsecond=654321) - timedelta(minutes=1)}
     settings = _settings()
-    user = _user()
-    repository = RecordingAuthRepository()
+    user = local_user("owner", display_name="Owner", role=Role.OWNER)
+    db_session.add(user)
+    await db_session.flush()
     monkeypatch.setattr(security, "utcnow", lambda: clock["now"])
     monkeypatch.setattr(auth_service_module, "utcnow", lambda: clock["now"])
-    service = _service(user, repository, settings)
+    service = AuthService(db_session, settings)
     initial = await service.issue_session(user)
-    initial_record = repository.records[hash_token(initial.refresh_token)]
+    initial_record = await db_session.scalar(
+        select(AuthSession).where(
+            AuthSession.refresh_token_hash == hash_token(initial.refresh_token)
+        )
+    )
+    assert initial_record is not None
     rotation_time = clock["now"] + timedelta(seconds=30)
     clock["now"] = rotation_time
 
     rotated = await service.rotate_refresh_token(initial.refresh_token)
 
     claims = _claims(rotated.access_token, settings)
-    stored = repository.records[hash_token(rotated.refresh_token)]
+    stored = await db_session.scalar(
+        select(AuthSession).where(
+            AuthSession.refresh_token_hash == hash_token(rotated.refresh_token)
+        )
+    )
+    assert stored is not None
     assert initial_record.refresh_used_at == rotation_time
     assert initial_record.revoked_at == rotation_time
     expected_access_expiry = rotation_time.replace(microsecond=0) + timedelta(hours=2)

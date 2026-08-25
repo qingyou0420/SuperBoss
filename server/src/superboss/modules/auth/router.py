@@ -11,7 +11,6 @@ from superboss.core.errors import AuthenticationFailedError, UnauthenticatedErro
 from superboss.core.security import new_csrf_token
 from superboss.modules.audit.models import AuditLog
 from superboss.modules.audit.schemas import AuditEventInput
-from superboss.modules.auth.repository import AuthRepository
 from superboss.modules.auth.schemas import (
     AuthUserRead,
     LoginCommand,
@@ -19,7 +18,6 @@ from superboss.modules.auth.schemas import (
     SessionPair,
 )
 from superboss.modules.auth.service import AuthService, CompletedLogin, InvalidSession, LoginFailure
-from superboss.modules.users.repository import UserRepository
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 _SYSTEM_ACTOR_ID = UUID(int=0)
@@ -39,12 +37,7 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
 
 
 def get_service(request: Request, session: AsyncSession = Depends(get_session)) -> AuthService:
-    return AuthService(
-        session,
-        AuthRepository(session),
-        UserRepository(session),
-        request.app.state.settings,
-    )
+    return AuthService(session, request.app.state.settings)
 
 
 def _set_csrf_cookie(response: Response) -> None:

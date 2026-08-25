@@ -15,11 +15,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from superboss.core.config import Settings
 from superboss.main import create_app
 from superboss.modules.auth.models import AuthSession
-from superboss.modules.auth.repository import AuthRepository
 from superboss.modules.auth.service import AuthService
 from superboss.modules.projects.models import Project, ProjectMember
 from superboss.modules.users.models import Role, User, UserStatus
-from superboss.modules.users.repository import UserRepository
 from tests.identity import LOCAL_TEST_PASSWORD, local_user
 
 
@@ -282,12 +280,7 @@ async def test_concurrent_canonical_name_creates_have_one_winner(
     db_session.add(owner)
     await db_session.flush()
     token = (
-        await AuthService(
-            db_session,
-            AuthRepository(db_session),
-            UserRepository(db_session),
-            test_settings,
-        ).issue_session(owner)
+        await AuthService(db_session, test_settings).issue_session(owner)
     ).access_token
     await db_session.commit()
     transport = httpx.ASGITransport(app=create_app(test_settings))

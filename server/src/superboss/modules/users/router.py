@@ -8,7 +8,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core.actors import Actor, get_actor
 from superboss.modules.audit.service import AuditService
-from superboss.modules.users.repository import UserRepository
 from superboss.modules.users.schemas import (
     OwnerUserRead,
     PasswordResetRead,
@@ -36,7 +35,7 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
 
 
 def get_service(request: Request, session: AsyncSession = Depends(get_session)) -> OwnerUserService:
-    return OwnerUserService(UserRepository(session), AuditService(request.app.state.session_factory))
+    return OwnerUserService(session, AuditService(request.app.state.session_factory))
 
 
 def request_id(request: Request) -> UUID:

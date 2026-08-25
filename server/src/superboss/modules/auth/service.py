@@ -1,9 +1,11 @@
 """Local password policy and rotating browser-session lifecycle."""
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
+from typing import cast
 from uuid import UUID
 
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core.config import Settings
@@ -18,10 +20,8 @@ from superboss.core.security import (
 )
 from superboss.modules.auth.models import AuthSession, SessionKind
 from superboss.modules.auth.passwords import hash_password, verify_dummy_password, verify_password
-from superboss.modules.auth.repository import AuthRepository
 from superboss.modules.auth.schemas import SessionPair
 from superboss.modules.users.models import User, UserStatus
-from superboss.modules.users.repository import UserRepository
 
 MAX_LOGIN_FAILURES = 5
 LOGIN_LOCK_DURATION = timedelta(minutes=15)
@@ -47,20 +47,44 @@ class CompletedLogin:
 
 
 class AuthService:
-    def __init__(
-        self,
-        session: AsyncSession,
-        auth_repository: AuthRepository,
-        user_repository: UserRepository,
-        settings: Settings,
-    ) -> None:
+    def __init__(self, session: AsyncSession, settings: Settings) -> None:
         self.session = session
-        self.auth_repository = auth_repository
-        self.user_repository = user_repository
         self.settings = settings
 
+    async def _user_by_username_for_update(self, username: str) -> User | None:
+        return cast(
+            User | None,
+            await self.session.scalar(
+                select(User).where(User.username == username).with_for_update()
+            ),
+        )
+
+    async def _user_by_id_for_update(self, user_id: UUID) -> User | None:
+        return cast(
+            User | None,
+            await self.session.scalar(select(User).where(User.id == user_id).with_for_update()),
+        )
+
+    async def _session_by_refresh_hash(self, token_hash: str) -> AuthSession | None:
+        return cast(
+            AuthSession | None,
+            await self.session.scalar(
+                select(AuthSession)
+                .where(AuthSession.refresh_token_hash == token_hash)
+                .with_for_update()
+            ),
+        )
+
+    async def _revoke_all_for_user(self, user_id: UUID, at: datetime) -> None:
+        await self.session.execute(
+            update(AuthSession)
+            .where(AuthSession.user_id == user_id, AuthSession.revoked_at.is_(None))
+            .values(revoked_at=at)
+        )
+        await self.session.flush()
+
     async def login(self, username: str, password: str) -> CompletedLogin:
-        user = await self.user_repository.by_username_for_update(username)
+        user = await self._user_by_username_for_update(username)
         if user is None:
             verify_dummy_password(password)
             raise LoginFailure(None)
@@ -98,7 +122,8 @@ class AuthService:
             access_expires_at=now,
             refresh_expires_at=refresh_expires_at,
         )
-        await self.auth_repository.add(auth_session)
+        self.session.add(auth_session)
+        await self.session.flush()
         access_token, access_expires_at = issue_access_token(
             self.settings, user.id, str(user.role), auth_session.id
         )
@@ -111,7 +136,7 @@ class AuthService:
     async def change_password(
         self, user_id: UUID, current_password: str, new_password: str
     ) -> CompletedLogin:
-        user = await self.user_repository.by_id_for_update(user_id)
+        user = await self._user_by_id_for_update(user_id)
         if user is None or user.status != UserStatus.ACTIVE:
             raise LoginFailure(None)
         current = verify_password(user.password_hash, current_password)
@@ -125,12 +150,12 @@ class AuthService:
         user.must_change_password = False
         user.failed_login_count = 0
         user.locked_until = None
-        await self.auth_repository.revoke_all_for_user(user.id, now)
+        await self._revoke_all_for_user(user.id, now)
         await self.session.flush()
         return CompletedLogin(await self.issue_session(user), user)
 
     async def rotate_refresh_token(self, raw_token: str) -> SessionPair:
-        current = await self.auth_repository.by_refresh_hash(hash_token(raw_token))
+        current = await self._session_by_refresh_hash(hash_token(raw_token))
         now = utcnow()
         if (
             current is None
@@ -156,7 +181,7 @@ class AuthService:
             token_role = str(claims["role"])
         except (TokenError, ValueError) as error:
             raise InvalidSession("Access token is invalid") from error
-        auth_session = await self.auth_repository.by_id(session_id)
+        auth_session = await self.session.get(AuthSession, session_id)
         if (
             auth_session is None
             or auth_session.kind != SessionKind.USER
@@ -178,16 +203,19 @@ class AuthService:
     async def logout(self, access_token: str | None, refresh_token: str | None) -> None:
         records: list[AuthSession] = []
         if refresh_token:
-            found = await self.auth_repository.by_refresh_hash(hash_token(refresh_token))
+            found = await self._session_by_refresh_hash(hash_token(refresh_token))
             if found is not None:
                 records.append(found)
         if access_token:
             try:
                 claims = decode_access_token(self.settings, access_token)
-                found = await self.auth_repository.by_id(UUID(str(claims["session_id"])))
+                found = await self.session.get(AuthSession, UUID(str(claims["session_id"])))
                 if found is not None:
                     records.append(found)
             except (TokenError, ValueError):
                 pass
+        now = utcnow()
         for record in records:
-            await self.auth_repository.revoke(record, utcnow())
+            record.revoked_at = now
+        if records:
+            await self.session.flush()

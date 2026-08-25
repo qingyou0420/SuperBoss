@@ -13,11 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from superboss.core.actors import Actor, require_project_access
 from superboss.core.errors import (
     ConflictError,
-    DomainError,
     FileCompletionPendingError,
-    FileNotFoundError,
     FileProvisioningPendingError,
-    FileUploadSizeMismatchError,
     ForbiddenError,
     NotFoundError,
 )
@@ -26,42 +23,6 @@ from superboss.modules.audit.models import AuditLog
 from superboss.modules.files.models import File, FileState
 from superboss.modules.files.schemas import UploadStart
 from superboss.modules.files.storage import CompletedPart, ObjectStorage
-
-
-class FileNotReadyError(ConflictError):
-    def __init__(self) -> None:
-        super().__init__()
-        self.code = "FILE_NOT_READY"
-        self.message = "File is not available for download"
-
-
-class FileInfectedError(ConflictError):
-    def __init__(self) -> None:
-        super().__init__()
-        self.code = "FILE_INFECTED"
-        self.message = "File did not pass security scanning"
-
-
-class FileScanFailedError(ConflictError):
-    def __init__(self) -> None:
-        super().__init__()
-        self.code = "FILE_SCAN_FAILED"
-        self.message = "File scanning did not complete"
-
-
-class FileUploadConflictError(ConflictError):
-    def __init__(self) -> None:
-        DomainError.__init__(self, "FILE_UPLOAD_CONFLICT", "Upload metadata conflicts", 409)
-
-
-class FileUploadNotFoundError(NotFoundError):
-    def __init__(self) -> None:
-        DomainError.__init__(self, "FILE_UPLOAD_NOT_FOUND", "Upload not found", 404)
-
-
-class FileUploadNotActiveError(ConflictError):
-    def __init__(self) -> None:
-        DomainError.__init__(self, "FILE_UPLOAD_NOT_ACTIVE", "Upload is not active", 409)
 
 
 class FileScanService:
@@ -171,11 +132,11 @@ class FileService:
 
     async def ensure_downloadable(self, file: File) -> None:
         if file.state == FileState.INFECTED:
-            raise FileInfectedError()
+            raise ConflictError("FILE_INFECTED", "File did not pass security scanning")
         if file.state == FileState.FAILED:
-            raise FileScanFailedError()
+            raise ConflictError("FILE_SCAN_FAILED", "File scanning did not complete")
         if file.state != FileState.CLEAN:
-            raise FileNotReadyError()
+            raise ConflictError("FILE_NOT_READY", "File is not available for download")
 
     @staticmethod
     def _segment(value: str, fallback: str) -> str:
@@ -221,7 +182,7 @@ class FileService:
         )
         if existing is not None:
             if existing.metadata_fingerprint != fingerprint:
-                raise FileUploadConflictError()
+                raise ConflictError("FILE_UPLOAD_CONFLICT", "Upload metadata conflicts")
             return await self._provision_upload(existing)
         file_id = uuid4()
         category = self._segment(command.category, "uncategorized")
@@ -264,7 +225,7 @@ class FileService:
             )
             if winner is not None and winner.metadata_fingerprint == fingerprint:
                 return await self._provision_upload(winner)
-            raise FileUploadConflictError() from error
+            raise ConflictError("FILE_UPLOAD_CONFLICT", "Upload metadata conflicts") from error
         await self.session.commit()
         return await self._provision_upload(file)
 
@@ -333,7 +294,7 @@ class FileService:
     async def presign_download(self, actor: Actor, file_id: UUID) -> str:
         file = await self.session.get(File, file_id)
         if file is None:
-            raise FileNotFoundError()
+            raise NotFoundError("FILE_NOT_FOUND", "File not found")
         require_project_access(actor, file.project_id)
         await self.ensure_downloadable(file)
         return await self._storage().presign_get(file.object_key, 60)
@@ -360,12 +321,12 @@ class FileService:
             select(File).where(File.id == upload_id).with_for_update()
         )
         if file is None:
-            raise FileUploadNotFoundError()
+            raise NotFoundError("FILE_UPLOAD_NOT_FOUND", "Upload not found")
         if file.state != FileState.UPLOADING:
-            raise FileUploadNotActiveError()
+            raise ConflictError("FILE_UPLOAD_NOT_ACTIVE", "Upload is not active")
         self._authorize_upload_operation(actor, file.project_id, import_device=import_device)
         if file.multipart_id is None:
-            raise FileUploadNotActiveError()
+            raise ConflictError("FILE_UPLOAD_NOT_ACTIVE", "Upload is not active")
         return await self._storage().presign_upload_part(
             file.object_key, file.multipart_id, part_number, 900
         )
@@ -408,12 +369,12 @@ class FileService:
             .execution_options(populate_existing=True)
         )
         if file is None:
-            raise FileUploadNotFoundError()
+            raise NotFoundError("FILE_UPLOAD_NOT_FOUND", "Upload not found")
         self._authorize_upload_operation(actor, file.project_id, import_device=import_device)
         if file.state != FileState.UPLOADING:
             return file
         if file.multipart_id is None:
-            raise FileUploadNotActiveError()
+            raise ConflictError("FILE_UPLOAD_NOT_ACTIVE", "Upload is not active")
         if len({part.part_number for part in parts}) != len(parts):
             raise ValueError("duplicate part number")
         canonical = sorted(parts, key=lambda part: part.part_number)
@@ -435,7 +396,9 @@ class FileService:
                 await self._storage().delete_object(file.object_key)
             except Exception:  # noqa: BLE001,S110 -- hourly janitor retries leftover objects
                 pass
-            raise FileUploadSizeMismatchError()
+            raise ConflictError(
+                "FILE_UPLOAD_SIZE_MISMATCH", "Uploaded object size does not match declared size"
+            )
         file.state = FileState.QUARANTINED
         if request_id is not None:
             self.session.add(

@@ -44,8 +44,9 @@ async def test_memory_storage_completes_and_presigns_behaviorally() -> None:
 @pytest.mark.asyncio
 async def test_download_requires_clean_state() -> None:
     """Changing the state gate would expose quarantined material."""
+    from superboss.core.errors import ConflictError
     from superboss.modules.files.models import File, FileState
-    from superboss.modules.files.service import FileNotReadyError, FileService
+    from superboss.modules.files.service import FileService
 
     service = FileService(None, None)
     file = File(
@@ -59,8 +60,9 @@ async def test_download_requires_clean_state() -> None:
         state=FileState.QUARANTINED,
         uploader_id=uuid4(),
     )
-    with pytest.raises(FileNotReadyError):
+    with pytest.raises(ConflictError) as error:
         await service.ensure_downloadable(file)
+    assert error.value.code == "FILE_NOT_READY"
 
 
 @pytest.mark.asyncio
@@ -424,7 +426,7 @@ async def test_complete_sorts_parts_and_quarantines_with_enqueue(
 
 @pytest.mark.asyncio
 async def test_size_mismatch_aborts_and_persists_failed(db_session, active_owner) -> None:
-    from superboss.core.errors import FileUploadSizeMismatchError
+    from superboss.core.errors import ConflictError
     from superboss.modules.files.schemas import UploadStart
     from superboss.modules.files.service import FileService
     from superboss.modules.files.storage import CompletedPart
@@ -447,8 +449,9 @@ async def test_size_mismatch_aborts_and_persists_failed(db_session, active_owner
         ),
         "mismatch",
     )
-    with pytest.raises(FileUploadSizeMismatchError):
+    with pytest.raises(ConflictError) as mismatch:
         await service.complete_upload(actor, upload.id, [CompletedPart(1, "e")])
+    assert mismatch.value.code == "FILE_UPLOAD_SIZE_MISMATCH"
     from superboss.modules.files.models import File
 
     file = await db_session.get(File, upload.id)
@@ -651,25 +654,21 @@ async def test_deleted_file_cascades_upload_and_operations_fail_closed(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("state", "expected_error"),
+    ("state", "expected_code"),
     [
-        ("UPLOADING", "FileNotReadyError"),
-        ("QUARANTINED", "FileNotReadyError"),
-        ("SCANNING", "FileNotReadyError"),
-        ("INFECTED", "FileInfectedError"),
-        ("FAILED", "FileScanFailedError"),
+        ("UPLOADING", "FILE_NOT_READY"),
+        ("QUARANTINED", "FILE_NOT_READY"),
+        ("SCANNING", "FILE_NOT_READY"),
+        ("INFECTED", "FILE_INFECTED"),
+        ("FAILED", "FILE_SCAN_FAILED"),
     ],
 )
 async def test_download_rejects_non_clean_state(
-    db_session, active_owner, state, expected_error
+    db_session, active_owner, state, expected_code
 ) -> None:
+    from superboss.core.errors import ConflictError
     from superboss.modules.files.models import File, FileState
-    from superboss.modules.files.service import (
-        FileInfectedError,
-        FileNotReadyError,
-        FileScanFailedError,
-        FileService,
-    )
+    from superboss.modules.files.service import FileService
 
     project = Project(name=f"Download {state}")
     db_session.add(project)
@@ -691,13 +690,9 @@ async def test_download_rejects_non_clean_state(
     await db_session.flush()
     storage = InMemoryObjectStorage()
     actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
-    error_types = {
-        "FileInfectedError": FileInfectedError,
-        "FileNotReadyError": FileNotReadyError,
-        "FileScanFailedError": FileScanFailedError,
-    }
-    with pytest.raises(error_types[expected_error]):
+    with pytest.raises(ConflictError) as error:
         await FileService(db_session, storage).presign_download(actor, file.id)
+    assert error.value.code == expected_code
     assert storage.expiries == []
 
 

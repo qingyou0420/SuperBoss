@@ -70,19 +70,6 @@ def test_only_user_staff_membership_can_access_assigned_project(
         require_project_access(actor, assigned_project_id)
 
 
-class _RepositoryThatMustNotBeCalled:
-    async def list_all(self) -> list[object]:
-        raise AssertionError("unauthorized list reached repository")
-
-    async def list_for_staff(self, user_id: UUID) -> list[object]:
-        del user_id
-        raise AssertionError("unauthorized list reached repository")
-
-    async def by_id(self, project_id: UUID) -> object:
-        del project_id
-        raise AssertionError("unauthorized detail reached repository")
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("kind", "role"),
@@ -96,12 +83,12 @@ class _RepositoryThatMustNotBeCalled:
         ("system", Role.STAFF),
     ],
 )
-async def test_invalid_actor_cannot_reach_project_service_repository(
+async def test_invalid_actor_cannot_reach_project_queries(
     kind: str, role: Role | None
 ) -> None:
     """Dropping service-boundary checks lets device/system IDs query user projects."""
     actor = Actor(kind, uuid4(), role, frozenset(), frozenset())  # type: ignore[arg-type]
-    service = ProjectService(_RepositoryThatMustNotBeCalled())  # type: ignore[arg-type]
+    service = ProjectService(None)  # type: ignore[arg-type]
     with pytest.raises(ForbiddenError):
         await service.list(actor)
     with pytest.raises(ForbiddenError):

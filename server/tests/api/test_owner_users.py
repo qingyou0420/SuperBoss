@@ -158,7 +158,6 @@ async def test_concurrent_project_replaces_are_serialized_to_one_complete_member
 ) -> None:
     from superboss.core.actors import Actor
     from superboss.modules.audit.service import AuditService
-    from superboss.modules.users.repository import UserRepository
     from superboss.modules.users.schemas import ProjectAssignments
     from superboss.modules.users.service import OwnerUserService
 
@@ -176,7 +175,7 @@ async def test_concurrent_project_replaces_are_serialized_to_one_complete_member
     async def replace(project_ids: list[UUID], request_id: UUID) -> None:
         await gate.wait()
         async with session_factory() as session:
-            service = OwnerUserService(UserRepository(session), AuditService(session_factory))
+            service = OwnerUserService(session, AuditService(session_factory))
             await service.replace_projects(actor, staff_id, ProjectAssignments(project_ids=project_ids), request_id)
             await service.commit_and_record_success(actor, "user.projects.replace", request_id, staff_id)
 

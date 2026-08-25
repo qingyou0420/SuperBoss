@@ -14,11 +14,9 @@ from superboss.core.errors import (
     PasswordChangeRequiredError,
     UnauthenticatedError,
 )
-from superboss.modules.auth.repository import AuthRepository
 from superboss.modules.auth.service import AuthService, InvalidSession
 from superboss.modules.projects.models import ProjectMember
 from superboss.modules.users.models import Role
-from superboss.modules.users.repository import UserRepository
 
 
 @dataclass(frozen=True)
@@ -51,12 +49,7 @@ async def get_actor(request: Request) -> Actor:
     if not token:
         raise UnauthenticatedError()
     async for session in _session(request):
-        service = AuthService(
-            session,
-            AuthRepository(session),
-            UserRepository(session),
-            request.app.state.settings,
-        )
+        service = AuthService(session, request.app.state.settings)
         try:
             user = await service.authenticate_access_token(token)
         except InvalidSession as error:

@@ -12,13 +12,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from superboss.core.actors import Actor
-from superboss.core.errors import DomainError, ForbiddenError, OwnerRequiredError
+from superboss.core.errors import ConflictError, DomainError, ForbiddenError, NotFoundError
 from superboss.modules.audit.models import AuditLog
 from superboss.modules.audit.schemas import AuditEventInput
 from superboss.modules.audit.service import AuditService
 from superboss.modules.files.models import File, FileState
 from superboss.modules.files.schemas import UploadStart
-from superboss.modules.files.service import FileService, FileUploadConflictError
+from superboss.modules.files.service import FileService
 from superboss.modules.files.storage import CompletedPart, ObjectStorage
 from superboss.modules.imports.models import (
     AttachmentKind,
@@ -29,34 +29,6 @@ from superboss.modules.imports.models import (
 from superboss.modules.imports.schemas import ImportJobCreate, K3Result, canonical_manifest_bytes
 from superboss.modules.projects.models import Project
 from superboss.modules.users.models import Role
-
-
-class ImportIdempotencyConflictError(DomainError):
-    def __init__(self) -> None:
-        super().__init__(
-            "IMPORT_IDEMPOTENCY_CONFLICT",
-            "Idempotency key is already bound to another import manifest",
-            409,
-        )
-
-
-class ImportAttachmentNotFoundError(DomainError):
-    def __init__(self) -> None:
-        super().__init__("IMPORT_ATTACHMENT_NOT_FOUND", "Import attachment not found", 404)
-
-
-class ImportJobNotFoundError(DomainError):
-    def __init__(self) -> None:
-        super().__init__("IMPORT_JOB_NOT_FOUND", "Import job not found", 404)
-
-
-class ImportAttachmentsIncompleteError(DomainError):
-    def __init__(self) -> None:
-        super().__init__(
-            "IMPORT_ATTACHMENTS_INCOMPLETE",
-            "Import attachments are incomplete",
-            409,
-        )
 
 
 @dataclass(frozen=True)
@@ -206,8 +178,13 @@ class ImportService:
                             declaration.kind,
                         ),
                     )
-            except FileUploadConflictError as error:
-                raise ImportIdempotencyConflictError() from error
+            except ConflictError as error:
+                if error.code != "FILE_UPLOAD_CONFLICT":
+                    raise
+                raise ConflictError(
+                    "IMPORT_IDEMPOTENCY_CONFLICT",
+                    "Idempotency key is already bound to another import manifest",
+                ) from error
             uploads.append(upload)
 
         async with self.session_factory() as persist_session, persist_session.begin():
@@ -276,7 +253,7 @@ class ImportService:
         async with self.session_factory() as session:
             job = await session.get(ImportJob, job_id)
             if job is None:
-                raise ImportJobNotFoundError()
+                raise NotFoundError("IMPORT_JOB_NOT_FOUND", "Import job not found")
             return await self._job_view(session, job)
 
     async def view_attachment(
@@ -303,7 +280,7 @@ class ImportService:
                 )
             ).one_or_none()
             if row is None:
-                raise ImportAttachmentNotFoundError()
+                raise NotFoundError("IMPORT_ATTACHMENT_NOT_FOUND", "Import attachment not found")
             attachment, file_state = row
             return self._attachment_view(attachment, file_state)
 
@@ -338,7 +315,7 @@ class ImportService:
         async with self.session_factory() as session:
             job = await session.get(ImportJob, job_id)
             if job is None or job.device_id != actor.subject_id:
-                denial = ImportJobNotFoundError()
+                denial = NotFoundError("IMPORT_JOB_NOT_FOUND", "Import job not found")
                 project_id = None
             elif job.project_id not in actor.project_ids:
                 denial = ForbiddenError(
@@ -377,7 +354,7 @@ class ImportService:
                 or job.device_id != actor.subject_id
                 or job.project_id != project_id
             ):
-                denial = ImportJobNotFoundError()
+                denial = NotFoundError("IMPORT_JOB_NOT_FOUND", "Import job not found")
             elif job.project_id not in actor.project_ids:
                 denial = ForbiddenError(
                     "IMPORT_READ_FORBIDDEN",
@@ -413,7 +390,7 @@ class ImportService:
                     metadata={"reason": "OWNER_REQUIRED"},
                 )
             )
-            raise OwnerRequiredError()
+            raise ForbiddenError("OWNER_REQUIRED", "Owner access required")
         if not 1 <= limit <= 100:
             raise ValueError("import list limit must be in 1..100")
 
@@ -526,7 +503,7 @@ class ImportService:
             ).one_or_none()
 
         if row is None or row.device_id != actor.subject_id:
-            not_found_error = ImportAttachmentNotFoundError()
+            not_found_error = NotFoundError("IMPORT_ATTACHMENT_NOT_FOUND", "Import attachment not found")
             await self._record_attachment_denial(
                 actor,
                 job_id,
@@ -602,7 +579,7 @@ class ImportService:
                 select(ImportJob).where(ImportJob.id == job_id).with_for_update()
             )
             if job is None or job.device_id != actor.subject_id:
-                denial = ImportJobNotFoundError()
+                denial = NotFoundError("IMPORT_JOB_NOT_FOUND", "Import job not found")
                 denial_project_id = None
             elif job.project_id != target.project_id or job.project_id not in actor.project_ids:
                 denial = ForbiddenError(
@@ -622,7 +599,10 @@ class ImportService:
                     observation.state == FileState.UPLOADING
                     for observation in observations
                 ):
-                    denial = ImportAttachmentsIncompleteError()
+                    denial = ConflictError(
+                        "IMPORT_ATTACHMENTS_INCOMPLETE",
+                        "Import attachments are incomplete",
+                    )
                 else:
                     evaluation = self._evaluate_files(job, observations)
                     if (
@@ -687,7 +667,7 @@ class ImportService:
                 )
             ).one_or_none()
         if row is None or row.device_id != actor.subject_id:
-            not_found = ImportJobNotFoundError()
+            not_found = NotFoundError("IMPORT_JOB_NOT_FOUND", "Import job not found")
             await self._record_submit_denial(
                 actor,
                 job_id,
@@ -789,7 +769,7 @@ class ImportService:
     ) -> ImportJobView:
         views = await self._job_views(session, [job])
         if not views:
-            raise ImportJobNotFoundError()
+            raise NotFoundError("IMPORT_JOB_NOT_FOUND", "Import job not found")
         return views[0]
 
     async def _job_views(
@@ -1158,7 +1138,10 @@ class ImportService:
         manifest_fingerprint: str,
     ) -> ImportJobResult:
         if job.manifest_fingerprint != manifest_fingerprint:
-            raise ImportIdempotencyConflictError()
+            raise ConflictError(
+                "IMPORT_IDEMPOTENCY_CONFLICT",
+                "Idempotency key is already bound to another import manifest",
+            )
         attachments = list(
             await session.scalars(
                 select(ImportAttachment)

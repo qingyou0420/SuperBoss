@@ -5,7 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Request, Response, status
 
 from superboss.core.actors import Actor, get_actor
-from superboss.core.errors import DomainError, OwnerRequiredError, UnauthenticatedError
+from superboss.core.errors import DomainError, ForbiddenError, UnauthenticatedError
 from superboss.modules.audit.schemas import AuditEventInput
 from superboss.modules.audit.service import AuditService
 from superboss.modules.devices.schemas import (
@@ -57,7 +57,7 @@ async def _require_owner(
             metadata={"reason": "OWNER_REQUIRED"},
         )
     )
-    raise OwnerRequiredError()
+    raise ForbiddenError("OWNER_REQUIRED", "Owner access required")
 
 
 def _validation_error() -> DomainError:
