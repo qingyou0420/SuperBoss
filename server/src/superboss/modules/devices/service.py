@@ -20,7 +20,7 @@ from superboss.core.security import (
     issue_device_access_token,
     new_opaque_token,
 )
-from superboss.modules.audit.models import AuditLog
+from superboss.modules.audit.service import write_audit
 from superboss.modules.auth.models import SessionKind
 from superboss.modules.devices.models import (
     DeviceConnection,
@@ -148,43 +148,22 @@ class DeviceService:
         metadata: dict[str, object],
         event_key: UUID | None = None,
     ) -> None:
-        expected_metadata = {
-            **metadata,
-            "actor_role": actor_role.value if actor_role is not None else None,
-        }
-        if event_key is not None:
-            existing = await session.scalar(
-                select(AuditLog).where(AuditLog.event_key == event_key)
-            )
-            if existing is not None:
-                if (
-                    existing.actor_kind == actor_kind
-                    and existing.actor_id == actor_id
-                    and existing.action == action
-                    and existing.object_type == object_type
-                    and existing.object_id == object_id
-                    and existing.project_id is None
-                    and existing.outcome == outcome
-                    and existing.request_id == request_id
-                    and existing.metadata_json == expected_metadata
-                ):
-                    return
-                raise RuntimeError("device audit event conflicts with immutable evidence")
-        session.add(
-            AuditLog(
-                actor_kind=actor_kind,
-                actor_id=actor_id,
-                action=action,
-                object_type=object_type,
-                object_id=object_id,
-                project_id=None,
-                outcome=outcome,
-                metadata_json=expected_metadata,
-                request_id=request_id,
-                event_key=event_key,
-            )
+        await write_audit(
+            session,
+            actor_kind=actor_kind,
+            actor_id=actor_id,
+            action=action,
+            object_type=object_type,
+            object_id=object_id,
+            project_id=None,
+            outcome=outcome,
+            request_id=request_id,
+            metadata={
+                **metadata,
+                "actor_role": actor_role.value if actor_role is not None else None,
+            },
+            event_key=event_key,
         )
-        await session.flush()
 
     async def _denied(
         self,
