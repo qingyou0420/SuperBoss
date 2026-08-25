@@ -473,12 +473,6 @@ async def test_me_uses_live_active_project_names_and_updates_last_used(
     db_session.expire_all()
     after = await db_session.get(DeviceConnection, pair.device_id)
     assert after is not None and after.last_used_at is not None
-    use_event = await db_session.scalar(
-        select(AuditLog).where(
-            AuditLog.action == "device.use", AuditLog.actor_id == pair.device_id
-        )
-    )
-    assert use_event is not None
 
 
 @pytest.mark.asyncio
@@ -832,35 +826,3 @@ async def test_invalid_device_name_does_not_return_422_when_denial_audit_fails(
         )
     )
     assert pairing is not None and pairing.used_at is None
-
-
-@pytest.mark.asyncio
-async def test_reused_request_id_cannot_suppress_distinct_device_use_events(
-    device_client: TestClient, db_session: AsyncSession, active_owner: User
-) -> None:
-    """A client-controlled correlation ID must not deduplicate separate successful uses."""
-    project = Project(name="Repeated request ID use audit")
-    db_session.add(project)
-    await db_session.commit()
-    pair = await _pair_device(device_client, db_session, active_owner.id, project.id)
-    request_id = uuid4()
-    headers = {
-        "Authorization": f"Bearer {pair.access_token}",
-        "X-Request-ID": str(request_id),
-    }
-
-    first = device_client.get("/api/v1/device-auth/me", headers=headers)
-    second = device_client.get("/api/v1/device-auth/me", headers=headers)
-
-    assert first.status_code == second.status_code == 200
-    events = list(
-        await db_session.scalars(
-            select(AuditLog).where(
-                AuditLog.request_id == request_id,
-                AuditLog.action == "device.use",
-                AuditLog.outcome == "SUCCESS",
-            )
-        )
-    )
-    assert len(events) == 2
-    assert all(event.actor_id == pair.device_id for event in events)

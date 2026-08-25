@@ -65,11 +65,6 @@ class FileUploadSizeMismatchError(DomainError):
         super().__init__("FILE_UPLOAD_SIZE_MISMATCH", "Uploaded object size does not match declared size", 409)
 
 
-class FileStorageFailureError(DomainError):
-    def __init__(self) -> None:
-        super().__init__("FILE_STORAGE_FAILURE", "File storage operation failed", 502)
-
-
 class FileProvisioningPendingError(DomainError):
     def __init__(self) -> None:
         super().__init__("FILE_PROVISIONING_PENDING", "File upload provisioning is pending", 503)
@@ -78,8 +73,3 @@ class FileProvisioningPendingError(DomainError):
 class FileCompletionPendingError(DomainError):
     def __init__(self) -> None:
         super().__init__("FILE_COMPLETION_PENDING", "File completion is pending", 503)
-
-
-class FileDeliveryPendingError(DomainError):
-    def __init__(self) -> None:
-        super().__init__("FILE_DELIVERY_PENDING", "File delivery is pending", 503)

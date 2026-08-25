@@ -64,13 +64,6 @@ class FileUploadNotActiveError(ConflictError):
         DomainError.__init__(self, "FILE_UPLOAD_NOT_ACTIVE", "Upload is not active", 409)
 
 
-class FileUploadProjectMismatchError(FileUploadConflictError):
-    def __init__(self) -> None:
-        DomainError.__init__(
-            self, "FILE_UPLOAD_PROJECT_MISMATCH", "Upload project does not match file", 409
-        )
-
-
 class FileScanService:
     """Scan a quarantined object without holding the File row lock during I/O."""
 

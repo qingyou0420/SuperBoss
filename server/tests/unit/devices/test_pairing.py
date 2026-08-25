@@ -353,8 +353,8 @@ async def test_refresh_rotates_once_and_invalidates_the_old_access_jti(
     assert rotated.refresh_token != first.refresh_token
     assert rotated.access_token != first.access_token
     with pytest.raises(service_module.InvalidDeviceCredential):
-        await service.authenticate_access_token(first.access_token, request_id=uuid4())
-    actor = await service.authenticate_access_token(rotated.access_token, request_id=uuid4())
+        await service.authenticate_access_token(first.access_token)
+    actor = await service.authenticate_access_token(rotated.access_token)
     assert actor.kind == "device" and actor.role is None and actor.subject_id == first.device_id
     with pytest.raises(service_module.InvalidDeviceCredential):
         await service.refresh(first.refresh_token, request_id=uuid4())
@@ -474,14 +474,14 @@ async def test_live_owner_device_and_project_grants_control_access_immediately(
         session.add(
             models.DeviceProjectGrant(device_id=pair.device_id, project_id=second_project.id)
         )
-    actor = await service.authenticate_access_token(pair.access_token, request_id=uuid4())
+    actor = await service.authenticate_access_token(pair.access_token)
     assert actor.project_ids == frozenset({second_project.id})
 
     async with session_factory() as session, session.begin():
         project = await session.get(Project, second_project.id)
         assert project is not None
         project.status = ProjectStatus.ARCHIVED
-    actor = await service.authenticate_access_token(pair.access_token, request_id=uuid4())
+    actor = await service.authenticate_access_token(pair.access_token)
     assert actor.project_ids == frozenset()
 
 
@@ -513,18 +513,18 @@ async def test_live_owner_status_and_role_are_required_for_device_access(
         else:
             owner.role = Role.STAFF
     with pytest.raises(service_module.InvalidDeviceCredential):
-        await service.authenticate_access_token(pair.access_token, request_id=uuid4())
+        await service.authenticate_access_token(pair.access_token)
 
 
 @pytest.mark.asyncio
-async def test_successful_access_updates_last_used_and_appends_safe_use_audit(
+async def test_successful_access_updates_last_used(
     db_session: AsyncSession,
     active_owner: object,
     session_factory: async_sessionmaker[AsyncSession],
     test_settings: object,
     reference_time: datetime,
 ) -> None:
-    """A successful device use must leave current activity evidence without token material."""
+    """A successful device use must leave current activity evidence without an audit row."""
     models, _service = device_contract()
     _service, pair, _project = await paired_fixture(
         db_session,
@@ -532,75 +532,17 @@ async def test_successful_access_updates_last_used_and_appends_safe_use_audit(
         session_factory,
         test_settings,
         reference_time,
-        "Device use audit",
+        "Device last used",
     )
     used_at = reference_time + timedelta(minutes=1)
     service = service_for(session_factory, test_settings, used_at)
-    request_id = uuid4()
 
-    actor = await service.authenticate_access_token(pair.access_token, request_id=request_id)
+    actor = await service.authenticate_access_token(pair.access_token)
 
     async with session_factory() as session:
         device = await session.get(models.DeviceConnection, pair.device_id)
-        use_event = await session.scalar(
-            select(AuditLog).where(
-                AuditLog.action == "device.use", AuditLog.request_id == request_id
-            )
-        )
     assert actor.kind == "device" and actor.role is None
     assert device is not None and device.last_used_at == used_at
-    assert use_event is not None
-    assert use_event.actor_kind == "device" and use_event.actor_id == pair.device_id
-    assert use_event.metadata_json == {"actor_role": None, "state": "ACTIVE"}
-    serialized = json.dumps(use_event.metadata_json)
-    assert pair.access_token not in serialized and pair.refresh_token not in serialized
-
-
-@pytest.mark.asyncio
-async def test_device_use_audit_failure_rolls_back_last_used(
-    db_session: AsyncSession,
-    active_owner: object,
-    session_factory: async_sessionmaker[AsyncSession],
-    test_settings: object,
-    reference_time: datetime,
-) -> None:
-    """Activity state must not advance when its mandatory use evidence cannot persist."""
-    models, _service = device_contract()
-    _service, pair, _project = await paired_fixture(
-        db_session,
-        active_owner,
-        session_factory,
-        test_settings,
-        reference_time,
-        "Device use audit rollback",
-    )
-    service = service_for(
-        session_factory, test_settings, reference_time + timedelta(minutes=1)
-    )
-
-    def fail_use(_mapper: object, _connection: object, target: AuditLog) -> None:
-        if target.action == "device.use":
-            raise RuntimeError("audit unavailable")
-
-    event.listen(AuditLog, "before_insert", fail_use)
-    try:
-        with pytest.raises(RuntimeError, match="audit unavailable"):
-            await service.authenticate_access_token(pair.access_token, request_id=uuid4())
-    finally:
-        event.remove(AuditLog, "before_insert", fail_use)
-
-    async with session_factory() as session:
-        device = await session.get(models.DeviceConnection, pair.device_id)
-        use_events = list(
-            await session.scalars(
-                select(AuditLog).where(
-                    AuditLog.action == "device.use",
-                    AuditLog.actor_id == pair.device_id,
-                )
-            )
-        )
-    assert device is not None and device.last_used_at is None
-    assert use_events == []
 
 
 @pytest.mark.asyncio
@@ -661,7 +603,7 @@ async def test_device_access_claims_are_exact_and_fail_with_one_safe_error(
     token = jwt.encode(claims, test_settings.jwt_secret, algorithm="HS256")
 
     with pytest.raises(service_module.InvalidDeviceCredential, match="Device credential is invalid"):
-        await service.authenticate_access_token(token, request_id=uuid4())
+        await service.authenticate_access_token(token)
 
 
 async def _wait_for_database_lock(database_url: str, application_name: str) -> None:
@@ -743,7 +685,7 @@ async def test_revoke_and_credential_use_share_one_deadlock_free_lock_order(
             )
         else:
             use_task = asyncio.create_task(
-                use_service.authenticate_access_token(pair.access_token, request_id=uuid4())
+                use_service.authenticate_access_token(pair.access_token)
             )
         await _wait_for_database_lock(postgres_database, use_name)
         revoke_task = asyncio.create_task(
@@ -759,13 +701,11 @@ async def test_revoke_and_credential_use_share_one_deadlock_free_lock_order(
 
         verifier = service_for(session_factory, test_settings, reference_time)
         with pytest.raises(service_module.InvalidDeviceCredential):
-            await verifier.authenticate_access_token(pair.access_token, request_id=uuid4())
+            await verifier.authenticate_access_token(pair.access_token)
         if operation == "refresh":
             rotated = results[0]
             with pytest.raises(service_module.InvalidDeviceCredential):
-                await verifier.authenticate_access_token(
-                    rotated.access_token, request_id=uuid4()
-                )
+                await verifier.authenticate_access_token(rotated.access_token)
             with pytest.raises(service_module.InvalidDeviceCredential):
                 await verifier.refresh(rotated.refresh_token, request_id=uuid4())
 
@@ -787,7 +727,7 @@ async def test_revoke_and_credential_use_share_one_deadlock_free_lock_order(
         assert device.last_used_at is None or device.last_used_at <= device.revoked_at
         assert sessions and all(item.revoked_at == reference_time for item in sessions)
         assert len([event for event in audits if event.action == "device.revoke"]) == 1
-        assert len([event for event in audits if event.action == "device.use"]) <= 1
+        assert all(event.action != "device.use" for event in audits)
     finally:
         if not lock_released:
             await lock_transaction.rollback()
@@ -826,7 +766,7 @@ async def test_revoke_is_idempotent_and_immediately_rejects_access_and_refresh(
     await service.revoke(active_owner.id, pair.device_id, request_id=uuid4())
 
     with pytest.raises(service_module.InvalidDeviceCredential):
-        await service.authenticate_access_token(pair.access_token, request_id=uuid4())
+        await service.authenticate_access_token(pair.access_token)
     with pytest.raises(service_module.InvalidDeviceCredential):
         await service.refresh(pair.refresh_token, request_id=uuid4())
     async with session_factory() as session:

@@ -69,9 +69,7 @@ async def get_actor(request: Request) -> Actor:
             try:
                 actor = await DeviceService(
                     request.app.state.session_factory, request.app.state.settings
-                ).authenticate_access_token(
-                    token, request_id=UUID(request.state.request_id)
-                )
+                ).authenticate_access_token(token)
             except InvalidDeviceCredential as device_error:
                 raise UnauthenticatedError() from device_error
             request.state.resolved_actor = actor

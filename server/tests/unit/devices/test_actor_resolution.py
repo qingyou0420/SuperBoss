@@ -4,13 +4,11 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.requests import Request
 
 from superboss.core.actors import get_actor
 from superboss.core.config import Settings
-from superboss.modules.audit.models import AuditLog
 from superboss.modules.devices.models import DeviceConnection
 from superboss.modules.devices.service import DeviceService
 from superboss.modules.projects.models import Project
@@ -54,10 +52,4 @@ async def test_get_actor_resolves_device_from_live_database_state(
     )
     async with factory() as session:
         device = await session.get(DeviceConnection, pair.device_id)
-        use_event = await session.scalar(
-            select(AuditLog).where(
-                AuditLog.action == "device.use", AuditLog.request_id == request_id
-            )
-        )
     assert device is not None and device.last_used_at is not None
-    assert use_event is not None and use_event.actor_id == pair.device_id

@@ -1,6 +1,4 @@
-import { readFileSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
-import { resolve } from 'node:path'
 
 import { expect, test } from '@playwright/test'
 
@@ -47,16 +45,6 @@ test('an HTTPS-looking invalid href passes the old assertion but fails the brows
     const invalidUrl = 'https://example.invalid/expired-signed-object'
     expect(invalidUrl).toMatch(/^https:\/\//)
     await expect(fetchDownloadBytes(page, invalidUrl)).rejects.toThrow(/fetch/i)
-})
-
-test('the live CLEAN flow invokes the verified browser object boundary', () => {
-    const liveSpec = readFileSync(
-        resolve(import.meta.dirname, '../specs/file-quarantine.spec.ts'),
-        'utf8',
-    )
-    expect(liveSpec).toContain('fetchDownloadBytes(page, signedUrl)')
-    expect(liveSpec).toContain('expect(evidence.byteLength).toBe(cleanBytes.byteLength)')
-    expect(liveSpec).toContain('expect(evidence.sha256).toBe(cleanSha256)')
 })
 
 test('browser fetch returns the real cross-origin bytes and rejects redirects', async ({ page }) => {

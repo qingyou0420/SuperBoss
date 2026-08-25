@@ -460,9 +460,7 @@ class DeviceService:
             await self._denied("device.refresh", request_id, error.object_id)
             raise InvalidDeviceCredential() from None
 
-    async def authenticate_access_token(
-        self, raw_access: str, *, request_id: UUID
-    ) -> Actor:
+    async def authenticate_access_token(self, raw_access: str) -> Actor:
         try:
             claims = decode_device_access_token(self.settings, raw_access)
             device_id = UUID(str(claims["device_id"]))
@@ -527,18 +525,6 @@ class DeviceService:
             effective_scopes = current_scopes & frozenset(DEVICE_ACCESS_SCOPES)
             if device.last_used_at is None or now > device.last_used_at:
                 device.last_used_at = now
-            await self._audit(
-                session,
-                actor_kind="device",
-                actor_id=device.id,
-                actor_role=None,
-                action="device.use",
-                object_type="device",
-                object_id=device.id,
-                outcome="SUCCESS",
-                request_id=request_id,
-                metadata={"state": "ACTIVE"},
-            )
             return Actor(
                 "device",
                 device.id,

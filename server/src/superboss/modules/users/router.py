@@ -47,7 +47,6 @@ def request_id(request: Request) -> UUID:
 async def list_users(request: Request, actor: Actor = Depends(get_actor), service: OwnerUserService = Depends(get_service)) -> list[OwnerUserRead]:
     current_request_id = request_id(request)
     users = await service.list_users(actor, current_request_id)
-    await service.commit_and_record_success(actor, "user.list", current_request_id)
     return [OwnerUserRead.model_validate(user) for user in users]
 
 
