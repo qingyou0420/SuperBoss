@@ -725,7 +725,7 @@ async def test_revoke_and_credential_use_share_one_deadlock_free_lock_order(
     await lock_transaction.start()
     lock_released = False
     await lock_connection.execute(
-        "SELECT id FROM device_sessions WHERE refresh_token_hash = $1 FOR UPDATE",
+        "SELECT id FROM sessions WHERE refresh_token_hash = $1 FOR UPDATE",
         hash_token(pair.refresh_token),
     )
     use_name = f"task9_{operation}_{uuid4().hex}"

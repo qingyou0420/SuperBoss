@@ -16,7 +16,7 @@ from superboss.core.security import (
     new_opaque_token,
     utcnow,
 )
-from superboss.modules.auth.models import AuthSession
+from superboss.modules.auth.models import AuthSession, SessionKind
 from superboss.modules.auth.passwords import hash_password, verify_dummy_password, verify_password
 from superboss.modules.auth.repository import AuthRepository
 from superboss.modules.auth.schemas import SessionPair
@@ -91,6 +91,7 @@ class AuthService:
         now = utcnow()
         refresh_expires_at = now + timedelta(days=14)
         auth_session = AuthSession(
+            kind=SessionKind.USER,
             user_id=user.id,
             access_jti="pending",
             refresh_token_hash=hash_token(raw_refresh),
@@ -133,6 +134,7 @@ class AuthService:
         now = utcnow()
         if (
             current is None
+            or current.kind != SessionKind.USER
             or current.revoked_at is not None
             or current.refresh_used_at is not None
             or current.refresh_expires_at <= now
@@ -157,6 +159,7 @@ class AuthService:
         auth_session = await self.auth_repository.by_id(session_id)
         if (
             auth_session is None
+            or auth_session.kind != SessionKind.USER
             or auth_session.revoked_at is not None
             or auth_session.access_expires_at <= utcnow()
             or auth_session.access_jti != claims["jti"]

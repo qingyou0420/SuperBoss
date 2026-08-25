@@ -21,7 +21,6 @@ from superboss.modules.devices.models import (
     DevicePairingProject,
     DeviceProjectGrant,
     DeviceScopeGrant,
-    DeviceSession,
 )
 from superboss.modules.files.models import (
     File,
@@ -73,14 +72,13 @@ async def db_session(postgres_database: str) -> AsyncIterator[AsyncSession]:
                 await connection.execute(delete(import_models.ImportJob))
             await connection.execute(delete(DeviceScopeGrant))
             await connection.execute(delete(DeviceProjectGrant))
-            await connection.execute(delete(DeviceSession))
+            await connection.execute(delete(AuthSession))
             await connection.execute(delete(DeviceConnection))
             await connection.execute(delete(DevicePairingProject))
             await connection.execute(delete(DevicePairingCode))
             await connection.execute(delete(File))
             await connection.execute(delete(ProjectMember))
             await connection.execute(delete(Project))
-            await connection.execute(delete(AuthSession))
             await connection.execute(delete(User))
 
     await clear()

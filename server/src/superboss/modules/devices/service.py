@@ -21,6 +21,7 @@ from superboss.core.security import (
     new_opaque_token,
 )
 from superboss.modules.audit.models import AuditLog
+from superboss.modules.auth.models import SessionKind
 from superboss.modules.devices.models import (
     DeviceConnection,
     DevicePairingCode,
@@ -371,8 +372,9 @@ class DeviceService:
         session.add(
             DeviceSession(
                 id=session_id,
+                kind=SessionKind.DEVICE,
                 device_id=device.id,
-                access_jti=access_jti,
+                access_jti=str(access_jti),
                 refresh_token_hash=hash_token(raw_refresh),
                 access_expires_at=access_expires_at,
                 refresh_expires_at=refresh_expires_at,
@@ -429,6 +431,7 @@ class DeviceService:
                     or device.owner_id != owner.id
                     or device.revoked_at is not None
                     or current is None
+                    or current.kind != SessionKind.DEVICE
                     or current.id != locator.id
                     or current.device_id != device.id
                     or current.refresh_used_at is not None
@@ -493,8 +496,9 @@ class DeviceService:
                 or device.owner_id != owner_id
                 or device.revoked_at is not None
                 or device_session is None
+                or device_session.kind != SessionKind.DEVICE
                 or device_session.device_id != device_id
-                or device_session.access_jti != access_jti
+                or device_session.access_jti != str(access_jti)
                 or device_session.revoked_at is not None
                 or device_session.created_at != issued_at
                 or device_session.access_expires_at != expires_at

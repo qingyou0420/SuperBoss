@@ -8,6 +8,7 @@ from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from superboss.core.db import Base
+from superboss.modules.auth.models import AuthSession as DeviceSession  # noqa: F401
 
 
 class DevicePairingCode(Base):
@@ -87,47 +88,6 @@ class DeviceConnection(Base):
     )
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-
-
-class DeviceSession(Base):
-    __tablename__ = "device_sessions"
-    __table_args__ = (
-        CheckConstraint(
-            "refresh_token_hash ~ '^[0-9a-f]{64}$'", name="ck_device_sessions_refresh_hash"
-        ),
-        CheckConstraint(
-            "access_expires_at > created_at", name="ck_device_sessions_access_expiry_order"
-        ),
-        CheckConstraint(
-            "refresh_expires_at > access_expires_at",
-            name="ck_device_sessions_refresh_expiry_order",
-        ),
-        CheckConstraint(
-            "refresh_used_at IS NULL OR refresh_used_at >= created_at",
-            name="ck_device_sessions_refresh_used_order",
-        ),
-        CheckConstraint(
-            "revoked_at IS NULL OR revoked_at >= created_at",
-            name="ck_device_sessions_revoked_order",
-        ),
-        Index("ix_device_sessions_device_created", "device_id", "created_at"),
-    )
-
-    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    device_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
-        ForeignKey("device_connections.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    access_jti: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), unique=True, nullable=False)
-    refresh_token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
-    access_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    refresh_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    refresh_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
 
 
 class DeviceProjectGrant(Base):
