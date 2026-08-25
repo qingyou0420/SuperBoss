@@ -1,4 +1,9 @@
-import { apiClient, type BrowserHttpClient, HttpClientError } from './http'
+import {
+    apiClient,
+    formatRequestError,
+    type BrowserHttpClient,
+    HttpClientError,
+} from './http'
 
 const UUID =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -232,29 +237,12 @@ function parseUrl(value: unknown): string {
     return value.url
 }
 
-function errorRequestId(error: unknown): string | undefined {
-    if (!(error instanceof HttpClientError) || !isRecord(error.data)) {
-        return undefined
-    }
-    if (!isRecord(error.data.error)) return undefined
-    const requestId = error.data.error.request_id
-    return typeof requestId === 'string' &&
-        requestId.length >= 1 &&
-        requestId.length <= 128 &&
-        !/[^\u0020-\u007e]/.test(requestId)
-        ? requestId
-        : undefined
-}
-
 export function fileErrorMessage(error: unknown): string {
-    if (error instanceof HttpClientError && error.status) {
-        const requestId = errorRequestId(error)
-        if (requestId) {
-            return `文件操作失败（${error.status}，${requestId}）`
-        }
-        return `文件操作失败（${error.status}）`
-    }
-    return '文件操作失败，请稍后重试。'
+    return formatRequestError(
+        '文件操作失败',
+        error,
+        '文件操作失败，请稍后重试。',
+    )
 }
 
 export function createFilesApi(client: BrowserHttpClient) {

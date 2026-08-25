@@ -27,9 +27,9 @@ def test_stale_recovery_task_has_hourly_schedule_and_delivery_safety() -> None:
     assert entry == {
         "task": task.name,
         "schedule": 3600.0,
-        "options": {"queue": "file-maintenance"},
+        "options": {"queue": "file-scan"},
     }
-    assert app.conf.task_routes[task.name]["queue"] == "file-maintenance"
+    assert app.conf.task_routes[task.name]["queue"] == "file-scan"
 
 
 def test_stale_recovery_task_drives_async_execution(monkeypatch: pytest.MonkeyPatch) -> None:

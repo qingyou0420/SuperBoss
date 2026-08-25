@@ -1,4 +1,9 @@
-import { HttpClientError, apiClient, type BrowserHttpClient } from './http'
+import {
+    HttpClientError,
+    apiClient,
+    formatRequestError,
+    type BrowserHttpClient,
+} from './http'
 
 export const MAX_PROJECTS_PER_RESPONSE = 1000
 
@@ -101,21 +106,19 @@ function validatedCreate(value: unknown): ProjectCreate {
 
 export function projectErrorMessage(error: unknown): string {
     if (
-        !(error instanceof HttpClientError) ||
-        error.status !== 409 ||
-        !isRecord(error.data)
+        error instanceof HttpClientError &&
+        error.status === 409 &&
+        isRecord(error.data) &&
+        isRecord(error.data.error) &&
+        error.data.error.code === 'PROJECT_NAME_CONFLICT'
     ) {
-        return '项目操作失败，请稍后重试。'
-    }
-    const body = error.data
-    if (!isRecord(body.error)) {
-        return '项目操作失败，请稍后重试。'
-    }
-    const detail = body.error
-    if (detail.code === 'PROJECT_NAME_CONFLICT') {
         return '项目名称已存在。'
     }
-    return '项目操作失败，请稍后重试。'
+    return formatRequestError(
+        '项目操作失败',
+        error,
+        '项目操作失败，请稍后重试。',
+    )
 }
 
 export function createProjectsApi(client: BrowserHttpClient) {

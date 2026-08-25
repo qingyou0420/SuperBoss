@@ -186,7 +186,7 @@ services:
       - worker
       - --beat
       - --loglevel=INFO
-      - --queues=file-scan,file-maintenance
+      - --queues=file-scan
       - --concurrency=1
       - --prefetch-multiplier=1
       - --schedule=/var/lib/celery/celerybeat-schedule

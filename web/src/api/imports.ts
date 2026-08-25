@@ -1,4 +1,4 @@
-import { apiClient, type BrowserHttpClient } from './http'
+import { apiClient, formatRequestError, type BrowserHttpClient } from './http'
 
 export const MAX_OWNER_IMPORTS = 100
 
@@ -219,9 +219,12 @@ function parseSummary(value: unknown): OwnerImportSummary {
     }
 }
 
-export function importErrorMessage(_error: unknown): string {
-    void _error
-    return '\u5bfc\u5165\u4efb\u52a1\u6682\u65f6\u65e0\u6cd5\u52a0\u8f7d\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002'
+export function importErrorMessage(error: unknown): string {
+    return formatRequestError(
+        '导入任务暂时无法加载',
+        error,
+        '导入任务暂时无法加载，请稍后重试。',
+    )
 }
 
 export function createImportsApi(client: BrowserHttpClient) {

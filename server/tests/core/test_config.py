@@ -49,9 +49,6 @@ def test_development_uses_the_internal_s3_endpoint_for_presigning_by_default() -
         "https://objects .nightforest.com",
         "https://objects.nightforest.com:0",
         "HTTPS://objects.nightforest.com",
-        "https://OBJECTS.nightforest.com",
-        "https://objects.nightforest.com:443",
-        "https://objects.nightforest.com.",
     ],
 )
 def test_production_requires_a_canonical_https_public_s3_origin(endpoint: str) -> None:

@@ -1,6 +1,4 @@
-"""Application wiring for durable file lifecycle maintenance."""
-
-import threading
+"""Application wiring without constructing live cloud clients."""
 
 from fastapi.testclient import TestClient
 
@@ -31,35 +29,5 @@ def test_injected_file_boundaries_do_not_construct_boto_client(monkeypatch) -> N
     app = create_app(_settings(), object_storage=storage, enqueue_file_scan=dispatcher)
     assert app.state.object_storage is storage
     assert app.state.enqueue_file_scan is dispatcher
-
-
-def test_lifespan_reconciles_retries_and_disposes_engine(monkeypatch) -> None:
-    """A failed maintenance iteration is safe and does not stop the next bounded iteration."""
-    from superboss import main
-
-    first = threading.Event()
-    second = threading.Event()
-    calls = 0
-
-    class RecordingLifecycle:
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
-        async def recover_stale_uploads(self, *, limit: int = 100) -> int:
-            del limit
-            nonlocal calls
-            calls += 1
-            (first if calls == 1 else second).set()
-            if calls == 1:
-                raise RuntimeError("provider secret")
-            return 0
-
-    monkeypatch.setattr(main, "StaleUploadService", RecordingLifecycle)
-    settings = _settings(
-        lifecycle_reconcile_interval_seconds=0.01,
-        lifecycle_reconcile_batch_size=1,
-    )
-    app = create_app(settings, object_storage=InMemoryObjectStorage())
     with TestClient(app):
-        assert first.wait(1) and second.wait(1)
-    assert app.state.lifecycle_maintenance_task.done()
+        pass

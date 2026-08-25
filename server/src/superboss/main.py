@@ -1,7 +1,5 @@
 """FastAPI application factory."""
 
-import asyncio
-import logging
 import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -17,11 +15,9 @@ from superboss.core.actors import get_actor
 from superboss.core.config import Settings, get_settings
 from superboss.core.errors import DomainError, UnauthenticatedError
 from superboss.infrastructure.s3 import Boto3ObjectStorage
-from superboss.modules.files.service import StaleUploadService
 from superboss.modules.files.storage import ObjectStorage
 from superboss.modules.files.tasks import enqueue_file_scan as celery_enqueue_file_scan
 
-logger = logging.getLogger(__name__)
 
 def create_app(
     settings: Settings | None = None,
@@ -33,37 +29,10 @@ def create_app(
     engine = create_async_engine(active_settings.database_url, pool_pre_ping=True)
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        stop = asyncio.Event()
-        task: asyncio.Task[None] | None = None
-        if active_settings.lifecycle_reconcile_interval_seconds > 0:
-            async def maintain() -> None:
-                while not stop.is_set():
-                    try:
-                        await StaleUploadService(
-                            app.state.session_factory,
-                            app.state.object_storage,
-                            app.state.enqueue_file_scan,
-                        ).recover_stale_uploads(
-                            limit=active_settings.lifecycle_reconcile_batch_size
-                        )
-                    except Exception as error:  # noqa: BLE001
-                        logger.warning("file lifecycle maintenance failed: %s", type(error).__name__)
-                    try:
-                        await asyncio.wait_for(stop.wait(), active_settings.lifecycle_reconcile_interval_seconds)
-                    except TimeoutError:
-                        continue
-            task = asyncio.create_task(maintain())
-        app.state.lifecycle_maintenance_task = task
+        del app
         try:
             yield
         finally:
-            stop.set()
-            if task is not None:
-                try:
-                    await asyncio.wait_for(task, timeout=5)
-                except TimeoutError:
-                    task.cancel()
-                    await asyncio.gather(task, return_exceptions=True)
             await engine.dispose()
 
     app = FastAPI(title="SuperBoss API", version="1.0.0", lifespan=lifespan)

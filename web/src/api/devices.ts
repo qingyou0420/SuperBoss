@@ -1,4 +1,4 @@
-import { apiClient, type BrowserHttpClient } from './http'
+import { apiClient, formatRequestError, type BrowserHttpClient } from './http'
 
 const UUID =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -166,9 +166,12 @@ function canonicalPairingRequest(value: unknown): { project_ids: string[] } {
     return { project_ids: [...ids] }
 }
 
-export function deviceErrorMessage(_error: unknown): string {
-    void _error
-    return '\u8bbe\u5907\u64cd\u4f5c\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002'
+export function deviceErrorMessage(error: unknown): string {
+    return formatRequestError(
+        '设备操作失败',
+        error,
+        '设备操作失败，请稍后重试。',
+    )
 }
 
 export function createDevicesApi(client: BrowserHttpClient) {

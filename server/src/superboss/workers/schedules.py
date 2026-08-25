@@ -57,7 +57,7 @@ async def _run_stale_upload_recovery() -> int:
     retry_kwargs={"max_retries": 3},
     soft_time_limit=300,
     time_limit=360,
-    queue="file-maintenance",
+    queue="file-scan",
 )
 def recover_stale_uploads_task() -> int:
     return asyncio.run(_run_stale_upload_recovery())

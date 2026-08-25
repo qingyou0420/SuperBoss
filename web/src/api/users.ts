@@ -1,4 +1,9 @@
-import { HttpClientError, apiClient, type BrowserHttpClient } from './http'
+import {
+    HttpClientError,
+    apiClient,
+    formatRequestError,
+    type BrowserHttpClient,
+} from './http'
 
 const UUID =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -207,7 +212,11 @@ function update(value: StaffUpdate): StaffUpdate {
 export function userErrorMessage(error: unknown): string {
     if (error instanceof HttpClientError && error.status === 409)
         return '员工状态与现有记录冲突，请刷新后重试。'
-    return '员工操作暂时无法完成，请稍后重试。'
+    return formatRequestError(
+        '员工操作暂时无法完成',
+        error,
+        '员工操作暂时无法完成，请稍后重试。',
+    )
 }
 
 export function createUsersApi(client: BrowserHttpClient): UsersApi {

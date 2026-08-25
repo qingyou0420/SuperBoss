@@ -97,7 +97,6 @@ def test_settings(postgres_database: str) -> Settings:
         environment="test",
         database_url=postgres_database,
         jwt_secret="test-only-signing-secret-with-at-least-thirty-two-bytes",
-        lifecycle_reconcile_interval_seconds=0,
     )
 
 

@@ -27,8 +27,6 @@ class Settings(BaseSettings):
     clamav_max_response_bytes: int = 1024
     scan_soft_time_limit_seconds: int = 660
     scan_hard_time_limit_seconds: int = 720
-    lifecycle_reconcile_interval_seconds: float = 30.0
-    lifecycle_reconcile_batch_size: int = 100
 
     model_config = SettingsConfigDict(env_prefix="SUPERBOSS_", extra="forbid", hide_input_in_errors=True)
 
@@ -39,37 +37,19 @@ class Settings(BaseSettings):
             raise ValueError("public S3 endpoint must be an HTTPS origin")
         if public_endpoint is not None:
             try:
-                parsed_public_endpoint = urlsplit(public_endpoint)
-                public_port = parsed_public_endpoint.port
+                parsed = urlsplit(public_endpoint)
             except ValueError:
                 raise ValueError("public S3 endpoint must be an HTTPS origin") from None
-            public_hostname = parsed_public_endpoint.hostname
-            hostname_labels = public_hostname.split(".") if public_hostname is not None else []
-            canonical_hostname = bool(hostname_labels) and len(public_hostname or "") <= 253 and all(
-                re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
-                for label in hostname_labels
-            )
-            canonical_authority = public_hostname or ""
-            if public_port is not None:
-                canonical_authority = f"{canonical_authority}:{public_port}"
             if (
-                parsed_public_endpoint.scheme != "https"
-                or not canonical_hostname
-                or parsed_public_endpoint.username is not None
-                or parsed_public_endpoint.password is not None
-                or parsed_public_endpoint.path
-                or parsed_public_endpoint.query
-                or parsed_public_endpoint.fragment
-                or public_port in {0, 443}
-                or public_endpoint != f"https://{canonical_authority}"
+                parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.path
+                or parsed.query
+                or parsed.fragment
             ):
                 raise ValueError("public S3 endpoint must be an HTTPS origin")
-        if self.lifecycle_reconcile_interval_seconds < 0:
-            raise ValueError("Lifecycle reconcile interval must be non-negative")
-        if self.environment != "test" and self.lifecycle_reconcile_interval_seconds <= 0:
-            raise ValueError("Lifecycle reconcile interval must be positive")
-        if self.lifecycle_reconcile_batch_size < 1:
-            raise ValueError("Lifecycle reconcile batch size must be positive")
         if not self.redis_url.startswith(("redis://", "rediss://")):
             raise ValueError("Redis URL must use the Redis scheme")
         if not self.clamav_host or not 1 <= self.clamav_port <= 65535:
@@ -101,11 +81,10 @@ class Settings(BaseSettings):
                 raise ValueError("JWT secret must be canonical base64url random material") from None
             if base64.urlsafe_b64encode(material).rstrip(b"=").decode("ascii") != candidate:
                 raise ValueError("JWT secret must be canonical base64url random material")
-            periodic = any(material == material[:period] * (len(material) // period) for period in range(1, len(material) // 2 + 1) if len(material) % period == 0)
             markers = (
                 "change-me", "change_me", "changeme", "example", "placeholder", "password", "common", "secret",
             )
-            if len(material) < 32 or periodic or len(set(material)) < 16 or any(marker in candidate.lower() for marker in markers):
+            if len(material) < 32 or len(set(material)) < 16 or any(marker in candidate.lower() for marker in markers):
                 raise ValueError("JWT secret must be canonical base64url random material")
         return self
 

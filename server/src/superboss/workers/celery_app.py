@@ -18,7 +18,7 @@ celery_app.conf.update(
         "recover-stale-uploads-hourly": {
             "task": "superboss.files.recover_stale_uploads",
             "schedule": 3600.0,
-            "options": {"queue": "file-maintenance"},
+            "options": {"queue": "file-scan"},
         }
     },
     broker_connection_retry_on_startup=True,
@@ -27,7 +27,7 @@ celery_app.conf.update(
     task_default_queue="file-scan",
     task_reject_on_worker_lost=True,
     task_routes={
-        "superboss.files.recover_stale_uploads": {"queue": "file-maintenance"},
+        "superboss.files.recover_stale_uploads": {"queue": "file-scan"},
         "superboss.files.scan": {"queue": "file-scan"},
     },
     task_serializer="json",

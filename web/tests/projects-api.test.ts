@@ -188,9 +188,7 @@ describe('strict project API contracts', () => {
             },
         ]) {
             const malformed = new HttpClientError(500, data)
-            expect(projectErrorMessage(malformed)).toBe(
-                '项目操作失败，请稍后重试。',
-            )
+            expect(projectErrorMessage(malformed)).toMatch(/^项目操作失败（500/)
             expect(projectErrorMessage(malformed)).not.toContain('sentinel')
         }
     })
@@ -203,9 +201,14 @@ describe('strict project API contracts', () => {
         'does not map the exact conflict body with $label to a name conflict',
         ({ status }) => {
             const error = new HttpClientError(status, projectConflictBody)
-
+            if (!status) {
+                expect(projectErrorMessage(error)).toBe(
+                    '项目操作失败，请稍后重试。',
+                )
+                return
+            }
             expect(projectErrorMessage(error)).toBe(
-                '项目操作失败，请稍后重试。',
+                `项目操作失败（${status}，${projectConflictBody.error.request_id}）`,
             )
         },
     )

@@ -4,6 +4,18 @@ This checklist is evidence collection, not evidence that acceptance has happened
 blank until a human performs the step against a live deployment. Never record a cookie, token,
 pairing code, password, or connector credential.
 
+## Release-gate live e2e specs
+
+Before a release, run the four Playwright specs in `tests/e2e/specs/` against a live
+`https://app.localhost` stack. They are the highest-value checks in the repository:
+
+- `owner-login-project.spec.ts`
+- `file-quarantine.spec.ts`
+- `device-import.spec.ts`
+- `staff-denial.spec.ts`
+
+Do not substitute `npm run test:contracts`, unit tests, or skipped specs for this gate.
+
 ## Secure Playwright preparation
 
 Use two distinct local accounts created by the interactive acceptance seed. Put credentials only in
