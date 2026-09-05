@@ -10,7 +10,6 @@ from superboss.infrastructure.clamav import ClamAVScanner, Scanner
 from superboss.infrastructure.s3 import Boto3ObjectStorage
 from superboss.modules.files.service import FileScanService
 from superboss.modules.files.storage import ObjectStorage
-from superboss.modules.imports.service import ImportService
 from superboss.workers.celery_app import celery_app
 
 settings = get_settings()
@@ -25,7 +24,6 @@ async def execute_file_scan(
 ) -> None:
     parsed_file_id = UUID(file_id)
     await FileScanService(session_factory, storage, scanner).scan_file(parsed_file_id)
-    await ImportService(session_factory, storage).reconcile_file(parsed_file_id)
 
 
 async def _run_scan_file(file_id: str) -> None:

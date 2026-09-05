@@ -1,41 +1,35 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 
 import {
     FileDownloadUnavailableError,
     filesApi,
+    type DriveFile,
+    type DriveFolder,
     type FileUploadCompleted,
+    type FolderVisibility,
 } from '../../api/files'
-import { projectsApi, type Project } from '../../api/projects'
 import MultipartUploader from '../../components/files/MultipartUploader.vue'
+import { useAuthStore } from '../../stores/auth'
+
+const VISIBILITY_LABEL: Record<FolderVisibility, string> = {
+    ALL: '全员',
+    MANAGEMENT: '管理层',
+    OWNER_ONLY: '仅老板',
+}
 
 const props = defineProps<{
     allowedObjectOrigin: string
 }>()
 
-const activeProjects = ref<Project[]>([])
-const selectedProjectId = ref('')
+const auth = useAuthStore()
+const canManage = computed(() => auth.user?.role === 'OWNER')
+const folders = ref<DriveFolder[]>([])
+const files = ref<DriveFile[]>([])
+const currentId = ref('')
+const newFolderName = ref('')
 const currentResult = ref<FileUploadCompleted>()
 const downloadUrl = ref('')
-const loading = ref(true)
-const errorMessage = ref('')
-
-const currentStatusMessage = computed(() => {
-    switch (currentResult.value?.state) {
-        case 'CLEAN':
-            return '处理完成'
-        case 'INFECTED':
-            return '检测到风险，文件不可下载'
-        case 'FAILED':
-            return '扫描失败，文件不可下载，请重新上传'
-        case 'QUARANTINED':
-        case 'SCANNING':
-            return '扫描中'
-        default:
-            return ''
-    }
-})
-
 const canCheckDownload = computed(() => {
     const state = currentResult.value?.state
     return Boolean(
@@ -44,6 +38,30 @@ const canCheckDownload = computed(() => {
         state !== 'INFECTED' &&
         state !== 'FAILED',
     )
+})
+const loading = ref(true)
+const errorMessage = ref('')
+const renamingId = ref('')
+const renameValue = ref('')
+const movingId = ref('')
+const moveTarget = ref('')
+
+const current = computed(
+    () => folders.value.find((folder) => folder.id === currentId.value) ?? null,
+)
+const children = computed(() =>
+    folders.value.filter((folder) => folder.parent_id === currentId.value),
+)
+const breadcrumbs = computed(() => {
+    const trail: DriveFolder[] = []
+    let cursor = current.value
+    while (cursor) {
+        trail.unshift(cursor)
+        cursor =
+            folders.value.find((folder) => folder.id === cursor?.parent_id) ??
+            null
+    }
+    return trail
 })
 
 const validObjectOrigin = computed(() => {
@@ -64,24 +82,130 @@ const validObjectOrigin = computed(() => {
     }
 })
 
-async function loadProjects(): Promise<void> {
+const currentStatusMessage = computed(() => {
+    switch (currentResult.value?.state) {
+        case 'CLEAN':
+            return '处理完成'
+        case 'INFECTED':
+            return '检测到风险，文件不可下载'
+        case 'FAILED':
+            return '扫描失败，文件不可下载，请重新上传'
+        case 'QUARANTINED':
+        case 'SCANNING':
+            return '扫描中'
+        default:
+            return ''
+    }
+})
+
+async function loadFolders(): Promise<void> {
     loading.value = true
     errorMessage.value = ''
     try {
-        activeProjects.value = (await projectsApi.list()).filter(
-            (project) => project.status === 'ACTIVE',
-        )
-        selectedProjectId.value = activeProjects.value[0]?.id ?? ''
+        folders.value = await filesApi.listFolders()
+        if (!folders.value.some((folder) => folder.id === currentId.value)) {
+            currentId.value =
+                folders.value.find(
+                    (folder) =>
+                        folder.name === '项目' && folder.parent_id === null,
+                )?.id ??
+                folders.value.find((folder) => folder.parent_id === null)?.id ??
+                ''
+        }
+        await loadFiles()
     } catch {
-        errorMessage.value = '项目列表暂时无法加载，请稍后重试。'
+        errorMessage.value = '网盘暂时无法加载，请稍后重试。'
     } finally {
         loading.value = false
+    }
+}
+
+async function loadFiles(): Promise<void> {
+    if (!currentId.value) {
+        files.value = []
+        return
+    }
+    files.value = await filesApi.listFiles(currentId.value)
+}
+
+async function createFolder(): Promise<void> {
+    const name = newFolderName.value.trim()
+    if (!name || !currentId.value) return
+    errorMessage.value = ''
+    try {
+        const created = await filesApi.createFolder(currentId.value, name)
+        folders.value.push(created)
+        newFolderName.value = ''
+    } catch {
+        errorMessage.value = '无法创建目录。'
+    }
+}
+
+async function downloadFile(file: DriveFile): Promise<void> {
+    errorMessage.value = ''
+    try {
+        globalThis.location.assign(await filesApi.download(file.id))
+    } catch (error) {
+        if (error instanceof FileDownloadUnavailableError) {
+            errorMessage.value =
+                error.state === 'INFECTED'
+                    ? '检测到风险，文件不可下载'
+                    : '扫描失败，文件不可下载'
+            return
+        }
+        errorMessage.value = '文件仍在扫描中，请稍后重试。'
+    }
+}
+
+function beginRename(file: DriveFile): void {
+    renamingId.value = file.id
+    renameValue.value = file.filename
+}
+
+function beginMove(file: DriveFile): void {
+    movingId.value = file.id
+    moveTarget.value = file.folder_id
+}
+
+async function renameFile(file: DriveFile): Promise<void> {
+    const filename = renameValue.value.trim()
+    if (!filename) return
+    try {
+        const updated = await filesApi.rename(file.id, filename)
+        files.value = files.value.map((item) =>
+            item.id === updated.id ? updated : item,
+        )
+        renamingId.value = ''
+    } catch {
+        errorMessage.value = '无法重命名。'
+    }
+}
+
+async function removeFile(file: DriveFile): Promise<void> {
+    if (!globalThis.confirm(`确认删除 ${file.filename} 吗？`)) return
+    try {
+        await filesApi.remove(file.id)
+        files.value = files.value.filter((item) => item.id !== file.id)
+    } catch {
+        errorMessage.value = '无法删除文件。'
+    }
+}
+
+async function moveFile(file: DriveFile): Promise<void> {
+    if (!moveTarget.value || moveTarget.value === file.folder_id) return
+    try {
+        await filesApi.move(file.id, moveTarget.value)
+        files.value = files.value.filter((item) => item.id !== file.id)
+        movingId.value = ''
+    } catch {
+        errorMessage.value = '无法移动文件。'
     }
 }
 
 function showCompleted(result: FileUploadCompleted): void {
     currentResult.value = result
     downloadUrl.value = ''
+    void loadFiles()
 }
 
 async function prepareDownload(): Promise<void> {
@@ -101,17 +225,18 @@ async function prepareDownload(): Promise<void> {
     }
 }
 
-onMounted(loadProjects)
+watch(currentId, () => {
+    void loadFiles()
+})
+onMounted(loadFolders)
 </script>
 
 <template>
     <section class="drive-page" aria-labelledby="drive-title">
         <header>
-            <p class="drive-page__eyebrow">OWNER</p>
-            <h1 id="drive-title">文件上传</h1>
-            <p>上传完成后仅展示本次文件的处理状态。</p>
+            <p class="drive-page__eyebrow">{{ auth.user?.role || '工作台' }}</p>
+            <h1 id="drive-title">网盘</h1>
         </header>
-
         <el-alert
             v-if="!validObjectOrigin"
             type="error"
@@ -128,31 +253,99 @@ onMounted(loadProjects)
         >
             {{ errorMessage }}
         </el-alert>
-
-        <el-card v-if="validObjectOrigin" v-loading="loading" shadow="never">
-            <label class="project-field">
-                项目
-                <select v-model="selectedProjectId" :disabled="loading">
-                    <option
-                        v-for="project in activeProjects"
-                        :key="project.id"
-                        :value="project.id"
+        <nav class="crumbs" aria-label="目录">
+            <button
+                v-for="folder in breadcrumbs"
+                :key="folder.id"
+                type="button"
+                @click="currentId = folder.id"
+            >
+                {{ folder.name }}
+            </button>
+        </nav>
+        <div v-loading="loading" class="drive-grid">
+            <el-card shadow="never">
+                <h2>目录</h2>
+                <p v-if="current">
+                    可见范围：{{ VISIBILITY_LABEL[current.visibility] }}
+                </p>
+                <button
+                    v-for="folder in children"
+                    :key="folder.id"
+                    type="button"
+                    class="folder-item"
+                    @click="currentId = folder.id"
+                >
+                    {{ folder.name }}
+                </button>
+                <form
+                    v-if="canManage && currentId"
+                    class="new-folder"
+                    @submit.prevent="createFolder"
+                >
+                    <label for="new-folder">新建子目录</label>
+                    <el-input id="new-folder" v-model="newFolderName" />
+                    <el-button native-type="submit" type="primary"
+                        >创建</el-button
                     >
-                        {{ project.name }}
-                    </option>
-                </select>
-            </label>
-
-            <MultipartUploader
-                v-if="selectedProjectId"
-                :allowed-object-origin="allowedObjectOrigin"
-                :project-id="selectedProjectId"
-                @completed="showCompleted"
-            />
-            <p v-else-if="!loading">暂无可用于上传的启用项目。</p>
-        </el-card>
-
-        <el-card v-if="currentResult" shadow="never" class="current-result">
+                </form>
+            </el-card>
+            <el-card shadow="never">
+                <h2>文件</h2>
+                <ul class="file-list">
+                    <li v-for="file in files" :key="file.id">
+                        <strong>{{ file.filename }}</strong>
+                        <span>{{ file.state }}</span>
+                        <el-button text @click="downloadFile(file)"
+                            >下载</el-button
+                        >
+                        <template v-if="canManage">
+                            <el-button text @click="beginRename(file)"
+                                >重命名</el-button
+                            >
+                            <el-button text @click="beginMove(file)"
+                                >移动</el-button
+                            >
+                            <el-button
+                                text
+                                type="danger"
+                                @click="removeFile(file)"
+                                >删除</el-button
+                            >
+                        </template>
+                        <form
+                            v-if="renamingId === file.id"
+                            @submit.prevent="renameFile(file)"
+                        >
+                            <el-input v-model="renameValue" />
+                            <el-button native-type="submit">确定</el-button>
+                        </form>
+                        <form
+                            v-if="movingId === file.id"
+                            @submit.prevent="moveFile(file)"
+                        >
+                            <select v-model="moveTarget" aria-label="目标目录">
+                                <option
+                                    v-for="folder in folders"
+                                    :key="folder.id"
+                                    :value="folder.id"
+                                >
+                                    {{ folder.name }}
+                                </option>
+                            </select>
+                            <el-button native-type="submit">确定移动</el-button>
+                        </form>
+                    </li>
+                </ul>
+                <MultipartUploader
+                    v-if="validObjectOrigin && currentId"
+                    :allowed-object-origin="allowedObjectOrigin"
+                    :folder-id="currentId"
+                    @completed="showCompleted"
+                />
+            </el-card>
+        </div>
+        <el-card v-if="currentResult" shadow="never">
             <h2>本次上传</h2>
             <p>{{ currentStatusMessage }}</p>
             <p>{{ currentResult.file_id }}</p>
@@ -165,32 +358,48 @@ onMounted(loadProjects)
 </template>
 
 <style scoped>
-.drive-page {
+.drive-page,
+.drive-grid,
+.file-list,
+.new-folder {
     display: grid;
     gap: 1rem;
 }
-
 .drive-page__eyebrow {
     margin: 0;
     color: #909399;
 }
-
-.project-field {
-    display: grid;
-    gap: 0.4rem;
-    margin-bottom: 1.25rem;
+.crumbs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
 }
-
-.project-field select {
-    min-height: 2.5rem;
-    padding: 0.45rem 0.6rem;
-    color: #303133;
+.folder-item,
+.crumbs button {
+    text-align: left;
+    cursor: pointer;
     background: #fff;
     border: 1px solid #dcdfe6;
-    border-radius: 6px;
+    border-radius: 8px;
+    padding: 0.6rem 0.9rem;
 }
-
-.current-result {
-    overflow-wrap: anywhere;
+.drive-grid {
+    grid-template-columns: minmax(220px, 0.8fr) minmax(320px, 1.2fr);
+}
+.file-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+.file-list li {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+@media (max-width: 760px) {
+    .drive-grid {
+        grid-template-columns: 1fr;
+    }
 }
 </style>

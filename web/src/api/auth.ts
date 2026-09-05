@@ -3,7 +3,7 @@ import { ApiContractError, apiClient, type BrowserHttpClient } from './http'
 const USERNAME = /^[a-z][a-z0-9._-]{2,31}$/
 const MAX_PASSWORD_UTF8_BYTES = 512
 
-export type UserRole = 'OWNER' | 'STAFF'
+export type UserRole = 'OWNER' | 'MANAGER' | 'STAFF'
 
 export interface AuthUser {
     username: string
@@ -102,7 +102,9 @@ function parseUser(data: unknown): AuthUser {
         [...data.display_name].length > 255 ||
         hasUnsafeText(data.display_name) ||
         typeof data.must_change_password !== 'boolean' ||
-        (data.role !== 'OWNER' && data.role !== 'STAFF')
+        (data.role !== 'OWNER' &&
+            data.role !== 'MANAGER' &&
+            data.role !== 'STAFF')
     ) {
         throw new AuthContractError()
     }

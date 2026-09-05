@@ -14,6 +14,7 @@ class InMemoryObjectStorage:
     completed: dict[str, list[CompletedPart]] = field(default_factory=dict)
     aborted: set[str] = field(default_factory=set)
     objects: dict[str, ObjectMetadata] = field(default_factory=dict)
+    bodies: dict[str, bytes] = field(default_factory=dict)
     expiries: list[int] = field(default_factory=list)
     complete_error: Exception | None = None
     abort_error: Exception | None = None
@@ -97,4 +98,4 @@ class InMemoryObjectStorage:
         return f"memory://get/{object_key}"
 
     async def stream(self, object_key: str) -> AsyncIterator[bytes]:
-        yield b""
+        yield self.bodies.get(object_key, b"")

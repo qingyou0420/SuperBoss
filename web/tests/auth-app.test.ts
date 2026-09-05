@@ -24,12 +24,46 @@ vi.mock('../src/api/auth', () => ({
     },
 }))
 
+vi.mock('../src/api/agent', () => ({
+    agentApi: {
+        listConversations: vi.fn().mockResolvedValue([]),
+        createConversation: vi.fn(),
+        listMessages: vi.fn().mockResolvedValue([]),
+        listCards: vi.fn().mockResolvedValue([]),
+        send: vi.fn(),
+        confirm: vi.fn(),
+        revise: vi.fn(),
+        reject: vi.fn(),
+        listSoul: vi.fn().mockResolvedValue([]),
+        writeSoul: vi.fn(),
+        activateSoul: vi.fn(),
+        previewSoul: vi.fn(),
+        listMemories: vi.fn().mockResolvedValue([]),
+        patchMemory: vi.fn(),
+    },
+    agentErrorMessage: () => '霜月暂时无法完成操作，请稍后重试。',
+}))
+
 vi.mock('../src/api/projects', () => ({
     projectsApi: {
         create: vi.fn(),
+        get: vi.fn(),
         list: vi.fn(),
+        replaceMilestones: vi.fn(),
+        update: vi.fn(),
     },
     projectErrorMessage: vi.fn(() => 'safe project error'),
+}))
+
+vi.mock('../src/api/users', () => ({
+    usersApi: {
+        list: vi.fn().mockResolvedValue([]),
+        create: vi.fn(),
+        update: vi.fn(),
+        replaceProjects: vi.fn(),
+        resetPassword: vi.fn(),
+    },
+    userErrorMessage: () => '员工操作暂时无法完成，请稍后重试。',
 }))
 
 vi.mock('../src/api/http', async (importOriginal) => {
@@ -245,7 +279,7 @@ describe('local-auth route guards', () => {
         await router.push('/owner/projects?view=all')
         expect(router.currentRoute.value.name).toBe('login')
         expect(router.currentRoute.value.query).toEqual({
-            redirect: '/owner/projects?view=all',
+            redirect: '/projects?view=all',
         })
     })
 
@@ -258,7 +292,7 @@ describe('local-auth route guards', () => {
         await router.push('/owner/projects')
         expect(router.currentRoute.value.name).toBe('password-change')
         expect(router.currentRoute.value.query).toEqual({
-            redirect: '/owner/projects',
+            redirect: '/projects',
         })
         await router.push('/forbidden')
         expect(router.currentRoute.value.name).toBe('password-change')
@@ -268,7 +302,7 @@ describe('local-auth route guards', () => {
         mockedAuth.me.mockResolvedValue(owner)
         const router = createAppRouter(createMemoryHistory())
         await router.push('/password/change')
-        expect(router.currentRoute.value.name).toBe('owner-home')
+        expect(router.currentRoute.value.name).toBe('chat')
         expect(
             router.getRoutes().some((route) => route.path === '/auth/callback'),
         ).toBe(false)
@@ -302,7 +336,7 @@ describe('local-auth route guards', () => {
             '/login',
             '',
         ]) {
-            expect(safePostLoginPath(unsafe)).toBe('/owner')
+            expect(safePostLoginPath(unsafe)).toBe('/projects')
         }
     })
 })
@@ -410,7 +444,7 @@ describe('PasswordChangePage', () => {
         await fireEvent.update(inputs[2], 'replacement local password')
         await fireEvent.click(screen.getByRole('button', { name: '更新密码' }))
         await waitFor(() =>
-            expect(router.currentRoute.value.path).toBe('/owner'),
+            expect(router.currentRoute.value.path).toBe('/chat'),
         )
         expect(mockedAuth.changePassword).toHaveBeenCalledWith({
             current_password: 'temporary local password',
@@ -428,7 +462,7 @@ describe('complete local-auth browser flow', () => {
             .mockRejectedValueOnce(unauthorized())
             .mockResolvedValue(owner)
         mockedAuth.login.mockResolvedValue()
-        const target = '/owner/projects?view=all#acceptance'
+        const target = '/projects?view=all#acceptance'
         const router = await renderAnonymous(target)
         expect(router.currentRoute.value.name).toBe('login')
 
@@ -454,7 +488,7 @@ describe('complete local-auth browser flow', () => {
         )
         await submitLogin()
         await waitFor(() =>
-            expect(router.currentRoute.value.fullPath).toBe('/owner'),
+            expect(router.currentRoute.value.fullPath).toBe('/projects'),
         )
     })
 
@@ -465,7 +499,7 @@ describe('complete local-auth browser flow', () => {
             .mockResolvedValueOnce(owner)
         mockedAuth.login.mockResolvedValue()
         mockedAuth.changePassword.mockResolvedValue()
-        const router = await renderAnonymous('/owner/projects')
+        const router = await renderAnonymous('/projects')
         await submitLogin('temporary local password')
         await waitFor(() =>
             expect(router.currentRoute.value.name).toBe('password-change'),
@@ -481,7 +515,7 @@ describe('complete local-auth browser flow', () => {
         await fireEvent.update(inputs[2], 'replacement local password')
         await fireEvent.click(screen.getByRole('button', { name: '更新密码' }))
         await waitFor(() =>
-            expect(router.currentRoute.value.fullPath).toBe('/owner/projects'),
+            expect(router.currentRoute.value.fullPath).toBe('/projects'),
         )
         expect(document.body.textContent).not.toMatch(
             /temporary local password|replacement local password/,
@@ -504,9 +538,9 @@ describe('server-authoritative role refresh routing', () => {
                 role: 'STAFF',
                 must_change_password: false,
             })
-        const router = await renderAt('/owner/projects')
+        const router = await renderAt('/users')
         expect(
-            await screen.findByRole('button', { name: '创建项目' }),
+            await screen.findByRole('heading', { name: '账号管理' }),
         ).toBeInTheDocument()
 
         await sessionRefreshedHandler()()
@@ -521,7 +555,7 @@ describe('server-authoritative role refresh routing', () => {
             expect(router.currentRoute.value.name).toBe('forbidden'),
         )
         expect(
-            screen.queryByRole('button', { name: '创建项目' }),
+            screen.queryByRole('heading', { name: '账号管理' }),
         ).not.toBeInTheDocument()
     })
 
@@ -539,7 +573,7 @@ describe('server-authoritative role refresh routing', () => {
                 role: 'OWNER',
                 must_change_password: false,
             })
-        const router = await renderAt('/owner/projects')
+        const router = await renderAt('/users')
         expect(router.currentRoute.value.name).toBe('forbidden')
 
         await sessionRefreshedHandler()()
@@ -550,9 +584,7 @@ describe('server-authoritative role refresh routing', () => {
             role: 'OWNER',
             must_change_password: false,
         })
-        await waitFor(() =>
-            expect(router.currentRoute.value.name).toBe('owner-home'),
-        )
+        await waitFor(() => expect(router.currentRoute.value.name).toBe('chat'))
         expect(screen.getByText('Person')).toBeInTheDocument()
     })
 

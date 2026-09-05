@@ -103,7 +103,7 @@ class AuditService:
         async def persist(session: AsyncSession) -> UUID:
             return await write_audit(
                 session,
-                actor_kind=event.actor.kind,
+                actor_kind="user" if event.actor.role is not None else "system",
                 actor_id=event.actor.subject_id,
                 action=event.action,
                 object_type=event.object_type,
@@ -125,3 +125,11 @@ class AuditService:
                     raise
                 return await persist(session)
             return audit_id
+
+    async def list_events(self, *, limit: int = 100, action: str | None = None) -> list[AuditLog]:
+        bound = min(max(limit, 1), 200)
+        statement = select(AuditLog).order_by(AuditLog.created_at.desc()).limit(bound)
+        if action:
+            statement = statement.where(AuditLog.action == action)
+        async with self.session_factory() as session:
+            return list((await session.scalars(statement)).all())

@@ -63,7 +63,7 @@ class OwnerUserService:
         )
 
     async def _require_owner(self, actor: Actor, action: str, request_id: UUID, user_id: UUID | None = None) -> None:
-        if actor.kind == "user" and actor.role == Role.OWNER:
+        if actor.role == Role.OWNER:
             return
         await self._record(actor, action, "DENIED", request_id, user_id, reason="OWNER_REQUIRED")
         raise ForbiddenError("OWNER_REQUIRED", "Owner access required")
@@ -145,7 +145,7 @@ class OwnerUserService:
             password_hash=hash_password(temporary_password),
             must_change_password=True,
             password_changed_at=utcnow(),
-            role=Role.STAFF,
+            role=command.role,
             status=UserStatus.ACTIVE,
         )
         try:
@@ -177,6 +177,8 @@ class OwnerUserService:
             raise DomainError("VALIDATION_ERROR", "Request validation failed", 422)
         if "display_name" in values:
             user.display_name = values["display_name"]
+        if values.get("role") in {Role.MANAGER, Role.STAFF}:
+            user.role = values["role"]
         if values.get("status") == UserStatus.DISABLED:
             user.status = UserStatus.DISABLED
             await self._revoke_browser_sessions(user.id, utcnow())
@@ -214,7 +216,7 @@ class OwnerUserService:
         """Commit the business mutation and SUCCESS evidence atomically."""
         self.session.add(
             AuditLog(
-                actor_kind=actor.kind,
+                actor_kind="user",
                 actor_id=actor.subject_id,
                 action=action,
                 object_type="user",

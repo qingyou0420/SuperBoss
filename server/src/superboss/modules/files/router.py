@@ -9,15 +9,24 @@ from superboss.core.errors import DomainError
 from superboss.modules.audit.schemas import AuditEventInput
 from superboss.modules.audit.service import AuditService
 from superboss.modules.files.models import File
-from superboss.modules.files.schemas import UploadComplete, UploadStart
+from superboss.modules.files.schemas import (
+    FilePatch,
+    FileRead,
+    FolderCreate,
+    FolderRead,
+    UploadComplete,
+    UploadStart,
+)
 from superboss.modules.files.service import FileService
 from superboss.modules.files.storage import CompletedPart
 
 router = APIRouter(prefix="/files", tags=["files"])
+folders_router = APIRouter(prefix="/folders", tags=["folders"])
 
 _AUDITABLE_UPLOAD_DENIAL_CODES = frozenset(
     {
-        "PROJECT_FORBIDDEN",
+        "FOLDER_FORBIDDEN",
+        "FOLDER_NOT_FOUND",
         "FILE_UPLOAD_CONFLICT",
         "FILE_UPLOAD_NOT_FOUND",
         "FILE_UPLOAD_NOT_ACTIVE",
@@ -120,8 +129,8 @@ async def start(
             request,
             actor,
             action="file.upload.start",
-            object_type="project",
-            object_id=command.project_id,
+            object_type="folder",
+            object_id=command.folder_id,
             project_id=command.project_id,
             error=error,
         )
@@ -200,3 +209,62 @@ async def download(
     assert file is not None
     await _record_download_audit(request, actor, file, file_id, "SUCCESS", best_effort=False)
     return {"url": url}
+
+
+@router.get("", response_model=list[FileRead])
+async def list_files(
+    folder_id: UUID,
+    actor: Actor = Depends(get_actor),
+    service: FileService = Depends(get_service),
+) -> list[FileRead]:
+    return [FileRead.model_validate(item) for item in await service.list_files(actor, folder_id)]
+
+
+@router.patch("/{file_id}", response_model=FileRead)
+async def patch_file(
+    file_id: UUID,
+    command: FilePatch,
+    actor: Actor = Depends(get_actor),
+    service: FileService = Depends(get_service),
+) -> FileRead:
+    return FileRead.model_validate(await service.patch_file(actor, file_id, command))
+
+
+@router.delete("/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_file(
+    request: Request,
+    file_id: UUID,
+    actor: Actor = Depends(get_actor),
+    service: FileService = Depends(get_service),
+) -> None:
+    file = await service.session.get(File, file_id)
+    await service.delete_file(actor, file_id)
+    await AuditService(request.app.state.session_factory).record(
+        AuditEventInput(
+            actor=actor,
+            action="file.delete",
+            object_type="file",
+            object_id=file_id,
+            project_id=file.project_id if file is not None else None,
+            outcome="SUCCESS",
+            request_id=UUID(request.state.request_id),
+            metadata={"filename": file.filename} if file is not None else {},
+        )
+    )
+
+
+@folders_router.get("", response_model=list[FolderRead])
+async def list_folders(
+    actor: Actor = Depends(get_actor),
+    service: FileService = Depends(get_service),
+) -> list[FolderRead]:
+    return [FolderRead.model_validate(item) for item in await service.list_folders(actor)]
+
+
+@folders_router.post("", response_model=FolderRead, status_code=status.HTTP_201_CREATED)
+async def create_folder(
+    command: FolderCreate,
+    actor: Actor = Depends(get_actor),
+    service: FileService = Depends(get_service),
+) -> FolderRead:
+    return FolderRead.model_validate(await service.create_folder(actor, command))

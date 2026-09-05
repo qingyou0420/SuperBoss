@@ -1,15 +1,28 @@
-"""File upload state-machine behavior."""
+"""File upload state-machine and drive folder behavior."""
 
-from datetime import date
 from uuid import UUID, uuid4
 
 import pytest
 
 from superboss.core.actors import Actor
-from superboss.modules.projects.models import Project, ProjectMember
+from superboss.modules.files.models import File, FileState, FolderVisibility
 from superboss.modules.users.models import Role
+from tests.files.factory import add_folder, make_file
 from tests.files.storage import InMemoryObjectStorage
 from tests.identity import local_user
+
+
+def _start(folder_id: UUID, **overrides: object):
+    from superboss.modules.files.schemas import UploadStart
+
+    payload: dict[str, object] = {
+        "folder_id": folder_id,
+        "filename": "x.pdf",
+        "size_bytes": 1,
+        "sha256": "0" * 64,
+    }
+    payload.update(overrides)
+    return UploadStart(**payload)
 
 
 @pytest.mark.parametrize(
@@ -38,6 +51,8 @@ async def test_memory_storage_completes_and_presigns_behaviorally() -> None:
     assert metadata.size_bytes == 7 and storage.completed[upload] == [CompletedPart(1, "e")]
     assert await storage.presign_get("projects/x/a", 300) == "memory://get/projects/x/a"
     assert [chunk async for chunk in storage.stream("projects/x/a")] == [b""]
+    storage.bodies["projects/x/a"] = b"hello"
+    assert [chunk async for chunk in storage.stream("projects/x/a")] == [b"hello"]
     assert storage.expiries == [300, 300]
 
 
@@ -45,20 +60,19 @@ async def test_memory_storage_completes_and_presigns_behaviorally() -> None:
 async def test_download_requires_clean_state() -> None:
     """Changing the state gate would expose quarantined material."""
     from superboss.core.errors import ConflictError
-    from superboss.modules.files.models import File, FileState
     from superboss.modules.files.service import FileService
 
     service = FileService(None, None)
     file = File(
         id=uuid4(),
-        project_id=uuid4(),
+        folder_id=uuid4(),
         filename="report.pdf",
-        category="资料",
         object_key="x",
         size_bytes=1,
         sha256="0" * 64,
         state=FileState.QUARANTINED,
         uploader_id=uuid4(),
+        content_type="application/pdf",
     )
     with pytest.raises(ConflictError) as error:
         await service.ensure_downloadable(file)
@@ -68,22 +82,12 @@ async def test_download_requires_clean_state() -> None:
 @pytest.mark.asyncio
 async def test_same_idempotency_key_reuses_one_active_multipart(db_session, active_owner) -> None:
     """A second identical start must not allocate another external upload."""
-    from superboss.modules.files.schemas import UploadStart
     from superboss.modules.files.service import FileService
 
     storage = InMemoryObjectStorage()
-    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
-    project = Project(name="Files")
-    db_session.add(project)
-    await db_session.flush()
-    command = UploadStart(
-        project_id=project.id,
-        filename="x.pdf",
-        size_bytes=1,
-        sha256="0" * 64,
-        category="资料",
-        file_date="2026-08-09",
-    )
+    actor = Actor(active_owner.id, Role.OWNER)
+    folder = await add_folder(db_session, active_owner.id)
+    command = _start(folder.id)
     service = FileService(db_session, storage)
     first = await service.start_upload(actor, command, "same")
     second = await service.start_upload(actor, command, "same")
@@ -92,232 +96,10 @@ async def test_same_idempotency_key_reuses_one_active_multipart(db_session, acti
 
 
 @pytest.mark.asyncio
-async def test_generic_start_upload_rejects_device_with_project_and_import_scope(
-    db_session, active_owner
-) -> None:
-    """The browser File API boundary must stay closed even to a fully granted import device."""
-    from superboss.core.errors import ForbiddenError
-    from superboss.modules.files.schemas import UploadStart
-    from superboss.modules.files.service import FileService
-
-    project = Project(name="Generic upload remains browser-only")
-    db_session.add(project)
-    await db_session.flush()
-    actor = Actor(
-        "device",
-        uuid4(),
-        None,
-        frozenset({project.id}),
-        frozenset({"imports:create", "imports:upload"}),
-    )
-    storage = InMemoryObjectStorage()
-
-    with pytest.raises(ForbiddenError):
-        await FileService(db_session, storage).start_upload(
-            actor,
-            UploadStart(
-                project_id=project.id,
-                filename="k3.json",
-                size_bytes=1,
-                sha256="0" * 64,
-                category="kimi-imports",
-                file_date="2026-08-09",
-                content_type="application/json",
-            ),
-            "generic-device-denied",
-        )
-
-    assert storage.create_calls == 0 and storage.active == {}
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("actor_case", ["valid", "kind", "role", "project", "scope"])
-async def test_import_start_upload_requires_exact_import_create_actor(
-    db_session, active_owner, actor_case: str
-) -> None:
-    """Only a roleless device with this project and imports:create may use the narrow entry."""
-    from superboss.core.errors import ForbiddenError
-    from superboss.modules.files.schemas import UploadStart
-    from superboss.modules.files.service import FileService
-
-    project = Project(name=f"Import upload actor {actor_case}")
-    db_session.add(project)
-    await db_session.flush()
-    subject_id = uuid4()
-    actor = Actor(
-        "device",
-        subject_id,
-        None,
-        frozenset({project.id}),
-        frozenset({"imports:create", "imports:upload"}),
-    )
-    if actor_case == "kind":
-        actor = Actor("user", subject_id, None, actor.project_ids, actor.scopes)
-    elif actor_case == "role":
-        actor = Actor("device", subject_id, Role.OWNER, actor.project_ids, actor.scopes)
-    elif actor_case == "project":
-        actor = Actor("device", subject_id, None, frozenset(), actor.scopes)
-    elif actor_case == "scope":
-        actor = Actor(
-            "device",
-            subject_id,
-            None,
-            actor.project_ids,
-            frozenset({"imports:upload"}),
-        )
-    command = UploadStart(
-        project_id=project.id,
-        filename="k3.json",
-        size_bytes=1,
-        sha256="0" * 64,
-        category="kimi-imports",
-        file_date="2026-08-09",
-        content_type="application/json",
-    )
-    storage = InMemoryObjectStorage()
-    service = FileService(db_session, storage)
-
-    if actor_case == "valid":
-        upload = await service.start_import_upload(actor, command, "import-device-allowed")
-        assert upload.uploader_kind == "device" and upload.uploader_id == subject_id
-        assert storage.create_calls == 1 and len(storage.active) == 1
-    else:
-        with pytest.raises(ForbiddenError):
-            await service.start_import_upload(actor, command, f"import-device-{actor_case}")
-        assert storage.create_calls == 0 and storage.active == {}
-
-
-@pytest.mark.asyncio
-async def test_generic_part_and_completion_remain_closed_to_import_device(
-    db_session, active_owner
-) -> None:
-    """A fully scoped import device still cannot call either generic FileService operation."""
-    from superboss.core.errors import ForbiddenError
-    from superboss.modules.files.schemas import UploadStart
-    from superboss.modules.files.service import FileService
-    from superboss.modules.files.storage import CompletedPart
-
-    project = Project(name="Generic attachment operations remain browser-only")
-    db_session.add(project)
-    await db_session.flush()
-    actor = Actor(
-        "device",
-        uuid4(),
-        None,
-        frozenset({project.id}),
-        frozenset({"imports:create", "imports:upload"}),
-    )
-    storage = InMemoryObjectStorage(complete_size=1)
-    service = FileService(db_session, storage)
-    upload = await service.start_import_upload(
-        actor,
-        UploadStart(
-            project_id=project.id,
-            filename="k3.json",
-            size_bytes=1,
-            sha256="0" * 64,
-            category="kimi-imports",
-            file_date="2026-08-09",
-            content_type="application/json",
-        ),
-        "generic-attachment-device-denied",
-    )
-
-    with pytest.raises(ForbiddenError):
-        await service.presign_part(actor, upload.id, 1)
-    with pytest.raises(ForbiddenError):
-        await service.complete_upload(actor, upload.id, [CompletedPart(1, "private-etag")])
-
-    assert storage.expiries == [] and storage.complete_calls == 0 and storage.completed == {}
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["part", "complete"])
-@pytest.mark.parametrize("actor_case", ["valid", "kind", "role", "project", "scope"])
-async def test_import_attachment_file_entries_require_exact_upload_actor(
-    db_session, active_owner, operation: str, actor_case: str
-) -> None:
-    """Narrow FileService entries authorize imports:upload before sharing Task 7 internals."""
-    from superboss.core.errors import ForbiddenError
-    from superboss.modules.files.schemas import UploadStart
-    from superboss.modules.files.service import FileService
-    from superboss.modules.files.storage import CompletedPart
-
-    project = Project(name=f"Import attachment actor {operation} {actor_case}")
-    db_session.add(project)
-    await db_session.flush()
-    subject_id = uuid4()
-    creator = Actor(
-        "device",
-        subject_id,
-        None,
-        frozenset({project.id}),
-        frozenset({"imports:create", "imports:upload"}),
-    )
-    storage = InMemoryObjectStorage(complete_size=1)
-    service = FileService(db_session, storage)
-    upload = await service.start_import_upload(
-        creator,
-        UploadStart(
-            project_id=project.id,
-            filename="k3.json",
-            size_bytes=1,
-            sha256="0" * 64,
-            category="kimi-imports",
-            file_date="2026-08-09",
-            content_type="application/json",
-        ),
-        f"import-attachment-{operation}-{actor_case}",
-    )
-    actor = Actor(
-        "device",
-        subject_id,
-        None,
-        frozenset({project.id}),
-        frozenset({"imports:upload"}),
-    )
-    if actor_case == "kind":
-        actor = Actor("user", subject_id, None, actor.project_ids, actor.scopes)
-    elif actor_case == "role":
-        actor = Actor("device", subject_id, Role.OWNER, actor.project_ids, actor.scopes)
-    elif actor_case == "project":
-        actor = Actor("device", subject_id, None, frozenset(), actor.scopes)
-    elif actor_case == "scope":
-        actor = Actor(
-            "device", subject_id, None, actor.project_ids, frozenset({"imports:create"})
-        )
-
-    async def invoke() -> object:
-        if operation == "part":
-            return await service.presign_import_part(actor, upload.id, 1)
-        return await service.complete_import_upload(
-            actor,
-            upload.id,
-            [CompletedPart(1, "private-etag")],
-            uuid4(),
-        )
-
-    if actor_case == "valid":
-        result = await invoke()
-        if operation == "part":
-            assert isinstance(result, str) and result.endswith("/1")
-            assert storage.expiries == [900]
-        else:
-            assert result.state.value == "QUARANTINED"
-            assert storage.complete_calls == 1
-    else:
-        with pytest.raises(ForbiddenError):
-            await invoke()
-        assert storage.expiries == [] and storage.complete_calls == 0
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "change",
     [
         {"filename": "y.pdf"},
-        {"category": "合同"},
-        {"file_date": date(2026, 8, 10)},
         {"size_bytes": 2},
         {"sha256": "1" * 64},
         {"content_type": "image/png"},
@@ -326,24 +108,13 @@ async def test_import_attachment_file_entries_require_exact_upload_actor(
 async def test_same_key_with_changed_metadata_conflicts(db_session, active_owner, change) -> None:
     """A fingerprint omission would let one key name two different uploads."""
     from superboss.core.errors import ConflictError
-    from superboss.modules.files.schemas import UploadStart
     from superboss.modules.files.service import FileService
 
-    project = Project(name="Files conflict")
-    db_session.add(project)
-    await db_session.flush()
-    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    actor = Actor(active_owner.id, Role.OWNER)
+    folder = await add_folder(db_session, active_owner.id)
     storage = InMemoryObjectStorage()
     service = FileService(db_session, storage)
-    original = UploadStart(
-        project_id=project.id,
-        filename="x.pdf",
-        size_bytes=1,
-        sha256="0" * 64,
-        category="资料",
-        file_date="2026-08-09",
-        content_type="application/pdf",
-    )
+    original = _start(folder.id, content_type="application/pdf")
     changed = original.model_copy(update=change)
     await service.start_upload(actor, original, "same")
     with pytest.raises(ConflictError):
@@ -352,67 +123,37 @@ async def test_same_key_with_changed_metadata_conflicts(db_session, active_owner
 
 
 @pytest.mark.asyncio
-async def test_same_key_is_scoped_to_project_and_actor(db_session, active_owner) -> None:
-    """Global idempotency would wrongly join independent project/user uploads."""
-    from superboss.modules.files.schemas import UploadStart
+async def test_same_key_is_scoped_to_folder_and_actor(db_session, active_owner) -> None:
+    """Global idempotency would wrongly join independent folder/user uploads."""
     from superboss.modules.files.service import FileService
 
-    first_project, second_project = Project(name="Idem one"), Project(name="Idem two")
     staff = local_user("file-staff", display_name="Staff")
-    db_session.add_all([first_project, second_project, staff])
+    db_session.add(staff)
     await db_session.flush()
-    db_session.add(ProjectMember(project_id=second_project.id, user_id=staff.id))
+    first_folder = await add_folder(db_session, active_owner.id, name="one")
+    second_folder = await add_folder(db_session, active_owner.id, name="two")
     storage = InMemoryObjectStorage()
     service = FileService(db_session, storage)
-    owner = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
-    staff_actor = Actor("user", staff.id, Role.STAFF, frozenset({second_project.id}), frozenset())
-
-    def command(project_id):
-        return UploadStart(
-            project_id=project_id,
-            filename="x.pdf",
-            size_bytes=1,
-            sha256="0" * 64,
-            category="资料",
-            file_date="2026-08-09",
-        )
-
-    first = await service.start_upload(owner, command(first_project.id), "same")
-    second = await service.start_upload(owner, command(second_project.id), "same")
-    third = await service.start_upload(staff_actor, command(second_project.id), "same")
+    owner = Actor(active_owner.id, Role.OWNER)
+    staff_actor = Actor(staff.id, Role.STAFF)
+    first = await service.start_upload(owner, _start(first_folder.id), "same")
+    second = await service.start_upload(owner, _start(second_folder.id), "same")
+    third = await service.start_upload(staff_actor, _start(second_folder.id), "same")
     assert len({first.id, second.id, third.id}) == 3 and len(storage.active) == 3
 
 
 @pytest.mark.asyncio
-async def test_complete_sorts_parts_and_quarantines_with_enqueue(
-    db_session, active_owner
-) -> None:
+async def test_complete_sorts_parts_and_quarantines_with_enqueue(db_session, active_owner) -> None:
     """Completion must persist quarantine, not use multipart ETags as checksums."""
-    from superboss.modules.files.schemas import UploadStart
     from superboss.modules.files.service import FileService
     from superboss.modules.files.storage import CompletedPart
 
-    project = Project(name="Complete")
-    db_session.add(project)
-    await db_session.flush()
-    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    folder = await add_folder(db_session, active_owner.id)
+    actor = Actor(active_owner.id, Role.OWNER)
     enqueued: list[UUID] = []
     storage = InMemoryObjectStorage(complete_size=2)
-    service = FileService(
-        db_session, storage, lambda file_id, _key: enqueued.append(file_id)
-    )
-    upload = await service.start_upload(
-        actor,
-        UploadStart(
-            project_id=project.id,
-            filename="x.pdf",
-            size_bytes=2,
-            sha256="0" * 64,
-            category="资料",
-            file_date="2026-08-09",
-        ),
-        "complete",
-    )
+    service = FileService(db_session, storage, lambda file_id, _key: enqueued.append(file_id))
+    upload = await service.start_upload(actor, _start(folder.id, size_bytes=2), "complete")
     file = await service.complete_upload(
         actor, upload.id, [CompletedPart(2, "not-a-sha"), CompletedPart(1, "0" * 64)]
     )
@@ -427,33 +168,17 @@ async def test_complete_sorts_parts_and_quarantines_with_enqueue(
 @pytest.mark.asyncio
 async def test_size_mismatch_aborts_and_persists_failed(db_session, active_owner) -> None:
     from superboss.core.errors import ConflictError
-    from superboss.modules.files.schemas import UploadStart
     from superboss.modules.files.service import FileService
     from superboss.modules.files.storage import CompletedPart
 
-    project = Project(name="Mismatch")
-    db_session.add(project)
-    await db_session.flush()
-    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    folder = await add_folder(db_session, active_owner.id)
+    actor = Actor(active_owner.id, Role.OWNER)
     storage = InMemoryObjectStorage(complete_size=2)
     service = FileService(db_session, storage)
-    upload = await service.start_upload(
-        actor,
-        UploadStart(
-            project_id=project.id,
-            filename="x.pdf",
-            size_bytes=1,
-            sha256="0" * 64,
-            category="资料",
-            file_date="2026-08-09",
-        ),
-        "mismatch",
-    )
+    upload = await service.start_upload(actor, _start(folder.id), "mismatch")
     with pytest.raises(ConflictError) as mismatch:
         await service.complete_upload(actor, upload.id, [CompletedPart(1, "e")])
     assert mismatch.value.code == "FILE_UPLOAD_SIZE_MISMATCH"
-    from superboss.modules.files.models import File
-
     file = await db_session.get(File, upload.id)
     assert file is not None
     assert file.state.value == "FAILED" and file.scan_result == "SIZE_MISMATCH"
@@ -464,27 +189,13 @@ async def test_size_mismatch_aborts_and_persists_failed(db_session, active_owner
 @pytest.mark.asyncio
 async def test_part_presign_accepts_s3_boundaries(db_session, active_owner) -> None:
     """Changing the S3 boundary would reject valid first or last parts."""
-    from superboss.modules.files.schemas import UploadStart
     from superboss.modules.files.service import FileService
 
-    project = Project(name="Parts")
-    db_session.add(project)
-    await db_session.flush()
+    folder = await add_folder(db_session, active_owner.id)
     storage = InMemoryObjectStorage()
-    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    actor = Actor(active_owner.id, Role.OWNER)
     service = FileService(db_session, storage)
-    upload = await service.start_upload(
-        actor,
-        UploadStart(
-            project_id=project.id,
-            filename="x.pdf",
-            size_bytes=1,
-            sha256="0" * 64,
-            category="资料",
-            file_date="2026-08-09",
-        ),
-        "parts",
-    )
+    upload = await service.start_upload(actor, _start(folder.id), "parts")
     assert (await service.presign_part(actor, upload.id, 1)).endswith("/1")
     assert (await service.presign_part(actor, upload.id, 10_000)).endswith("/10000")
     assert storage.expiries == [900, 900]
@@ -495,7 +206,7 @@ async def test_part_missing_upload_fails_closed(db_session, active_owner) -> Non
     from superboss.core.errors import NotFoundError
     from superboss.modules.files.service import FileService
 
-    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    actor = Actor(active_owner.id, Role.OWNER)
     with pytest.raises(NotFoundError):
         await FileService(db_session, InMemoryObjectStorage()).presign_part(actor, uuid4(), 1)
 
@@ -504,30 +215,13 @@ async def test_part_missing_upload_fails_closed(db_session, active_owner) -> Non
 @pytest.mark.parametrize("state", ["QUARANTINED", "SCANNING", "CLEAN", "INFECTED", "FAILED"])
 async def test_part_rejects_every_non_uploading_state(db_session, active_owner, state) -> None:
     from superboss.core.errors import ConflictError
-    from superboss.modules.files.models import FileState
-    from superboss.modules.files.schemas import UploadStart
     from superboss.modules.files.service import FileService
 
-    project = Project(name=f"Part {state}")
-    db_session.add(project)
-    await db_session.flush()
-    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    folder = await add_folder(db_session, active_owner.id)
+    actor = Actor(active_owner.id, Role.OWNER)
     service = FileService(db_session, InMemoryObjectStorage())
-    upload = await service.start_upload(
-        actor,
-        UploadStart(
-            project_id=project.id,
-            filename="x.pdf",
-            size_bytes=1,
-            sha256="0" * 64,
-            category="资料",
-            file_date="2026-08-09",
-        ),
-        f"{state}-key",
-    )
-    file = await db_session.get(
-        __import__("superboss.modules.files.models", fromlist=["File"]).File, upload.id
-    )
+    upload = await service.start_upload(actor, _start(folder.id), f"{state}-key")
+    file = await db_session.get(File, upload.id)
     assert file is not None
     file.state = FileState(state)
     await db_session.flush()
@@ -536,34 +230,24 @@ async def test_part_rejects_every_non_uploading_state(db_session, active_owner, 
 
 
 @pytest.mark.asyncio
-async def test_foreign_staff_cannot_presign_part(db_session, active_owner) -> None:
+async def test_staff_cannot_presign_part_in_owner_only_folder(db_session, active_owner) -> None:
     from superboss.core.errors import ForbiddenError
-    from superboss.modules.files.schemas import UploadStart
     from superboss.modules.files.service import FileService
 
-    target, assigned = Project(name="Target part"), Project(name="Assigned part")
     staff = local_user("part-staff", display_name="Staff")
-    db_session.add_all([target, assigned, staff])
+    db_session.add(staff)
     await db_session.flush()
-    db_session.add(ProjectMember(project_id=assigned.id, user_id=staff.id))
+    private = await add_folder(
+        db_session, active_owner.id, name="老板私有", visibility=FolderVisibility.OWNER_ONLY
+    )
     storage = InMemoryObjectStorage()
     service = FileService(db_session, storage)
-    owner = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
-    upload = await service.start_upload(
-        owner,
-        UploadStart(
-            project_id=target.id,
-            filename="x.pdf",
-            size_bytes=1,
-            sha256="0" * 64,
-            category="资料",
-            file_date="2026-08-09",
-        ),
-        "foreign",
-    )
-    staff_actor = Actor("user", staff.id, Role.STAFF, frozenset({assigned.id}), frozenset())
-    with pytest.raises(ForbiddenError):
+    owner = Actor(active_owner.id, Role.OWNER)
+    upload = await service.start_upload(owner, _start(private.id), "foreign")
+    staff_actor = Actor(staff.id, Role.STAFF)
+    with pytest.raises(ForbiddenError) as error:
         await service.presign_part(staff_actor, upload.id, 1)
+    assert error.value.code == "FOLDER_FORBIDDEN"
     assert storage.expiries == []
 
 
@@ -576,39 +260,24 @@ def test_idempotency_key_grammar(key: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_storage_error_is_safe_and_leaves_uploading_file(
-    db_session, active_owner
-) -> None:
+async def test_storage_error_is_safe_and_leaves_uploading_file(db_session, active_owner) -> None:
     from superboss.core.errors import FileCompletionPendingError
-    from superboss.modules.files.models import File, FileState
-    from superboss.modules.files.schemas import UploadStart
     from superboss.modules.files.service import FileService
     from superboss.modules.files.storage import CompletedPart
 
-    project = Project(name="Storage error")
-    db_session.add(project)
-    await db_session.flush()
+    folder = await add_folder(db_session, active_owner.id)
     storage = InMemoryObjectStorage(complete_error=RuntimeError("S3 secret"))
-    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    actor = Actor(active_owner.id, Role.OWNER)
     service = FileService(db_session, storage)
-    upload = await service.start_upload(
-        actor,
-        UploadStart(
-            project_id=project.id,
-            filename="x.pdf",
-            size_bytes=1,
-            sha256="0" * 64,
-            category="资料",
-            file_date="2026-08-09",
-        ),
-        "storage-error",
-    )
+    upload = await service.start_upload(actor, _start(folder.id), "storage-error")
+    upload_id = upload.id
+    multipart_id = upload.multipart_id
     with pytest.raises(FileCompletionPendingError) as error:
-        await service.complete_upload(actor, upload.id, [CompletedPart(1, "e")])
+        await service.complete_upload(actor, upload_id, [CompletedPart(1, "e")])
     assert "secret" not in str(error.value).lower()
-    file = await db_session.get(File, upload.id)
+    file = await db_session.get(File, upload_id)
     assert file is not None and file.state == FileState.UPLOADING
-    assert upload.multipart_id in storage.active and upload.multipart_id not in storage.aborted
+    assert multipart_id in storage.active and multipart_id not in storage.aborted
 
 
 @pytest.mark.asyncio
@@ -616,29 +285,14 @@ async def test_deleted_file_cascades_upload_and_operations_fail_closed(
     db_session, active_owner
 ) -> None:
     from superboss.core.errors import NotFoundError
-    from superboss.modules.files.models import File
-    from superboss.modules.files.schemas import UploadStart
     from superboss.modules.files.service import FileService
     from superboss.modules.files.storage import CompletedPart
 
-    project = Project(name="Cascade")
-    db_session.add(project)
-    await db_session.flush()
+    folder = await add_folder(db_session, active_owner.id)
     storage = InMemoryObjectStorage()
-    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    actor = Actor(active_owner.id, Role.OWNER)
     service = FileService(db_session, storage)
-    upload = await service.start_upload(
-        actor,
-        UploadStart(
-            project_id=project.id,
-            filename="x.pdf",
-            size_bytes=1,
-            sha256="0" * 64,
-            category="资料",
-            file_date="2026-08-09",
-        ),
-        "cascade",
-    )
+    upload = await service.start_upload(actor, _start(folder.id), "cascade")
     upload_id = upload.id
     file = await db_session.get(File, upload.id)
     assert file is not None
@@ -667,29 +321,20 @@ async def test_download_rejects_non_clean_state(
     db_session, active_owner, state, expected_code
 ) -> None:
     from superboss.core.errors import ConflictError
-    from superboss.modules.files.models import File, FileState
     from superboss.modules.files.service import FileService
 
-    project = Project(name=f"Download {state}")
-    db_session.add(project)
-    await db_session.flush()
-    file = File(
-        project_id=project.id,
-        filename="secret.pdf",
-        category="资料",
-        file_date=date(2026, 8, 9),
-        object_key="projects/x/secret",
-        size_bytes=1,
-        sha256="0" * 64,
+    folder = await add_folder(db_session, active_owner.id)
+    file = make_file(
+        folder_id=folder.id,
         uploader_id=active_owner.id,
-        uploader_kind="user",
-        content_type="application/pdf",
+        filename="secret.pdf",
+        object_key="projects/x/secret",
         state=FileState(state),
     )
     db_session.add(file)
     await db_session.flush()
     storage = InMemoryObjectStorage()
-    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    actor = Actor(active_owner.id, Role.OWNER)
     with pytest.raises(ConflictError) as error:
         await FileService(db_session, storage).presign_download(actor, file.id)
     assert error.value.code == expected_code
@@ -700,29 +345,18 @@ async def test_download_rejects_non_clean_state(
 async def test_clean_download_owner_returns_key_url_with_short_expiry(
     db_session, active_owner
 ) -> None:
-    from superboss.modules.files.models import File, FileState
     from superboss.modules.files.service import FileService
 
-    project = Project(name="Clean download")
-    db_session.add(project)
-    await db_session.flush()
-    file = File(
-        project_id=project.id,
-        filename="x.pdf",
-        category="资料",
-        file_date=date(2026, 8, 9),
-        object_key="projects/clean/key",
-        size_bytes=1,
-        sha256="0" * 64,
+    folder = await add_folder(db_session, active_owner.id)
+    file = make_file(
+        folder_id=folder.id,
         uploader_id=active_owner.id,
-        uploader_kind="user",
-        content_type="application/pdf",
-        state=FileState.CLEAN,
+        object_key="projects/clean/key",
     )
     db_session.add(file)
     await db_session.flush()
     storage = InMemoryObjectStorage()
-    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    actor = Actor(active_owner.id, Role.OWNER)
     assert (
         await FileService(db_session, storage).presign_download(actor, file.id)
         == "memory://get/projects/clean/key"
@@ -731,38 +365,41 @@ async def test_clean_download_owner_returns_key_url_with_short_expiry(
 
 
 @pytest.mark.asyncio
-async def test_clean_download_assigned_staff_and_foreign_denial(db_session, active_owner) -> None:
+async def test_clean_download_staff_all_folder_and_owner_only_denial(
+    db_session, active_owner
+) -> None:
     from superboss.core.errors import ForbiddenError
-    from superboss.modules.files.models import File, FileState
     from superboss.modules.files.service import FileService
 
-    project, other = Project(name="Staff download"), Project(name="Other download")
     staff = local_user("download-staff", display_name="Staff")
-    db_session.add_all([project, other, staff])
+    db_session.add(staff)
     await db_session.flush()
-    db_session.add(ProjectMember(project_id=project.id, user_id=staff.id))
-    file = File(
-        project_id=project.id,
-        filename="x.pdf",
-        category="资料",
-        file_date=date(2026, 8, 9),
-        object_key="projects/staff/key",
-        size_bytes=1,
-        sha256="0" * 64,
-        uploader_id=active_owner.id,
-        uploader_kind="user",
-        content_type="application/pdf",
-        state=FileState.CLEAN,
+    shared = await add_folder(db_session, active_owner.id, name="项目")
+    private = await add_folder(
+        db_session, active_owner.id, name="老板私有", visibility=FolderVisibility.OWNER_ONLY
     )
-    db_session.add(file)
+    shared_file = make_file(
+        folder_id=shared.id,
+        uploader_id=active_owner.id,
+        object_key="folders/staff/key",
+    )
+    private_file = make_file(
+        folder_id=private.id,
+        uploader_id=active_owner.id,
+        object_key="folders/private/key",
+    )
+    db_session.add_all([shared_file, private_file])
     await db_session.flush()
     storage = InMemoryObjectStorage()
     service = FileService(db_session, storage)
-    assigned = Actor("user", staff.id, Role.STAFF, frozenset({project.id}), frozenset())
-    assert await service.presign_download(assigned, file.id) == "memory://get/projects/staff/key"
-    foreign = Actor("user", staff.id, Role.STAFF, frozenset({other.id}), frozenset())
-    with pytest.raises(ForbiddenError):
-        await service.presign_download(foreign, file.id)
+    staff_actor = Actor(staff.id, Role.STAFF)
+    assert (
+        await service.presign_download(staff_actor, shared_file.id)
+        == "memory://get/folders/staff/key"
+    )
+    with pytest.raises(ForbiddenError) as error:
+        await service.presign_download(staff_actor, private_file.id)
+    assert error.value.code == "FOLDER_FORBIDDEN"
     assert storage.expiries == [60]
 
 
@@ -772,51 +409,126 @@ async def test_missing_download_file_fails_closed(db_session, active_owner) -> N
     from superboss.modules.files.service import FileService
 
     storage = InMemoryObjectStorage()
-    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    actor = Actor(active_owner.id, Role.OWNER)
     with pytest.raises(NotFoundError):
         await FileService(db_session, storage).presign_download(actor, uuid4())
     assert storage.expiries == []
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "kind,role",
-    [
-        ("device", None),
-        ("system", None),
-        ("device", Role.OWNER),
-        ("system", Role.STAFF),
-        ("user", None),
-    ],
-)
-async def test_download_rejects_unsupported_actor_shapes(
-    db_session, active_owner, kind, role
-) -> None:
-    from superboss.core.errors import ForbiddenError
-    from superboss.modules.files.models import File, FileState
+async def test_list_folders_seeds_roots_and_filters_by_role(db_session, active_owner) -> None:
     from superboss.modules.files.service import FileService
 
-    project = Project(name=f"Actor {kind} {role}")
-    db_session.add(project)
+    staff = local_user("folder-staff", display_name="Staff")
+    manager = local_user("folder-manager", display_name="Manager", role=Role.MANAGER)
+    db_session.add_all([staff, manager])
     await db_session.flush()
-    file = File(
-        project_id=project.id,
-        filename="x.pdf",
-        category="资料",
-        file_date=date(2026, 8, 9),
-        object_key="projects/actor/key",
-        size_bytes=1,
-        sha256="0" * 64,
+    service = FileService(db_session, InMemoryObjectStorage())
+    owner_names = {
+        folder.name for folder in await service.list_folders(Actor(active_owner.id, Role.OWNER))
+    }
+    manager_names = {
+        folder.name for folder in await service.list_folders(Actor(manager.id, Role.MANAGER))
+    }
+    staff_names = {
+        folder.name for folder in await service.list_folders(Actor(staff.id, Role.STAFF))
+    }
+    assert owner_names == {"公司", "项目", "老板私有"}
+    assert manager_names == {"公司", "项目"}
+    assert staff_names == {"项目"}
+
+
+@pytest.mark.asyncio
+async def test_create_folder_inherits_parent_visibility_and_staff_is_denied(
+    db_session, active_owner
+) -> None:
+    from superboss.core.errors import ForbiddenError
+    from superboss.modules.files.schemas import FolderCreate
+    from superboss.modules.files.service import FileService
+
+    staff = local_user("mkdir-staff", display_name="Staff")
+    db_session.add(staff)
+    await db_session.flush()
+    service = FileService(db_session, InMemoryObjectStorage())
+    owner = Actor(active_owner.id, Role.OWNER)
+    roots = {folder.name: folder for folder in await service.list_folders(owner)}
+    created = await service.create_folder(
+        owner, FolderCreate(parent_id=roots["公司"].id, name="制度")
+    )
+    assert created.visibility is FolderVisibility.MANAGEMENT
+    assert created.parent_id == roots["公司"].id
+    with pytest.raises(ForbiddenError) as error:
+        await service.create_folder(
+            Actor(staff.id, Role.STAFF),
+            FolderCreate(parent_id=roots["项目"].id, name="nope"),
+        )
+    assert error.value.code == "FORBIDDEN"
+
+
+@pytest.mark.asyncio
+async def test_staff_cannot_list_owner_only_files(db_session, active_owner) -> None:
+    from superboss.core.errors import ForbiddenError
+    from superboss.modules.files.service import FileService
+
+    staff = local_user("list-staff", display_name="Staff")
+    db_session.add(staff)
+    await db_session.flush()
+    private = await add_folder(
+        db_session, active_owner.id, name="老板私有", visibility=FolderVisibility.OWNER_ONLY
+    )
+    with pytest.raises(ForbiddenError) as error:
+        await FileService(db_session, InMemoryObjectStorage()).list_files(
+            Actor(staff.id, Role.STAFF), private.id
+        )
+    assert error.value.code == "FOLDER_FORBIDDEN"
+
+
+@pytest.mark.asyncio
+async def test_owner_renames_moves_and_deletes_file(db_session, active_owner) -> None:
+    from superboss.modules.files.schemas import FilePatch
+    from superboss.modules.files.service import FileService
+
+    shared = await add_folder(db_session, active_owner.id, name="项目")
+    dest = await add_folder(
+        db_session, active_owner.id, name="公司", visibility=FolderVisibility.MANAGEMENT
+    )
+    file = make_file(
+        folder_id=shared.id,
         uploader_id=active_owner.id,
-        uploader_kind="user",
-        content_type="application/pdf",
-        state=FileState.CLEAN,
+        filename="old.pdf",
     )
     db_session.add(file)
     await db_session.flush()
     storage = InMemoryObjectStorage()
+    service = FileService(db_session, storage)
+    owner = Actor(active_owner.id, Role.OWNER)
+    renamed = await service.patch_file(owner, file.id, FilePatch(filename="new.pdf"))
+    assert renamed.filename == "new.pdf"
+    moved = await service.patch_file(owner, file.id, FilePatch(folder_id=dest.id))
+    assert moved.folder_id == dest.id
+    await service.delete_file(owner, file.id)
+    assert await db_session.get(File, file.id) is None
+    assert file.object_key in storage.deleted
+
+
+@pytest.mark.asyncio
+async def test_staff_cannot_patch_or_delete_file(db_session, active_owner) -> None:
+    from superboss.core.errors import ForbiddenError
+    from superboss.modules.files.schemas import FilePatch
+    from superboss.modules.files.service import FileService
+
+    staff = local_user("mutate-staff", display_name="Staff")
+    db_session.add(staff)
+    await db_session.flush()
+    folder = await add_folder(db_session, active_owner.id)
+    file = make_file(folder_id=folder.id, uploader_id=active_owner.id)
+    db_session.add(file)
+    await db_session.flush()
+    service = FileService(db_session, InMemoryObjectStorage())
+    staff_actor = Actor(staff.id, Role.STAFF)
+    with pytest.raises(ForbiddenError) as error:
+        await service.patch_file(staff_actor, file.id, FilePatch(filename="nope.pdf"))
+    assert error.value.code == "FORBIDDEN"
     with pytest.raises(ForbiddenError):
-        await FileService(db_session, storage).presign_download(
-            Actor(kind, active_owner.id, role, frozenset(), frozenset()), file.id
-        )
-    assert storage.expiries == []
+        await service.delete_file(staff_actor, file.id)
+    assert await db_session.get(File, file.id) is not None

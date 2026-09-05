@@ -62,13 +62,13 @@ def _set_session_cookies(response: Response, pair: SessionPair) -> None:
 
 
 def _actor(completed: CompletedLogin) -> Actor:
-    return Actor("user", completed.user.id, completed.user.role, frozenset(), frozenset())
+    return Actor(completed.user.id, completed.user.role)
 
 
 async def _stage_auth_audit(session: AsyncSession, event: AuditEventInput) -> None:
     session.add(
         AuditLog(
-            actor_kind=event.actor.kind,
+            actor_kind="user" if event.actor.role is not None else "system",
             actor_id=event.actor.subject_id,
             action=event.action,
             object_type=event.object_type,
@@ -92,11 +92,8 @@ def _failure_actor(failure: LoginFailure) -> tuple[Actor, UUID | None]:
     user = failure.user
     return (
         Actor(
-            "user" if user is not None else "system",
             user.id if user is not None else _SYSTEM_ACTOR_ID,
             user.role if user is not None else None,
-            frozenset(),
-            frozenset(),
         ),
         user.id if user is not None else None,
     )

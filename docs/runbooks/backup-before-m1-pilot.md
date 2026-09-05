@@ -1,7 +1,8 @@
 # Backup and restore before the M1 pilot
 
-Take and verify both PostgreSQL and object-store backups before pilot data is admitted. Commands use
-placeholders only. Keep backup media encrypted and access-controlled.
+Take and verify both PostgreSQL and object-store backups before pilot data is admitted. The dump
+covers `users`, `sessions`, `projects`, `folders`, `files`, `finance_*`, `agent_*`, `knowledge_*`,
+and `audit_logs`. Commands use placeholders only. Keep backup media encrypted and access-controlled.
 
 ## Quiesce writes and back up
 

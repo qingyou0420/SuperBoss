@@ -123,6 +123,7 @@ services:
         condition: service_completed_successfully
       clamav:
         condition: service_healthy
+        required: false
     volumes:
       - celery-scheduler-data:/var/lib/celery
     networks:
@@ -210,6 +211,7 @@ services:
 
   clamav:
     image: clamav/clamav@sha256:d06c1d6a451d616e1dd79b42f44c8c8c291bba9cf4e75ebc4d0e43c1c6dd87bb # clamav/clamav:1.5.3
+    profiles: ["scan"]
     volumes:
       - clamav-database:/var/lib/clamav
       - ./server/config/clamd.conf:/etc/clamav/clamd.conf:ro

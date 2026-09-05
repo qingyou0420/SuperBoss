@@ -17,6 +17,12 @@ interface FilesModule {
         partUrl(uploadId: string, partNumber: number): Promise<string>
         complete(uploadId: string, parts: unknown[]): Promise<unknown>
         download(fileId: string): Promise<string>
+        listFolders(): Promise<unknown>
+        createFolder(parentId: string, name: string): Promise<unknown>
+        listFiles(folderId: string): Promise<unknown>
+        rename(fileId: string, filename: string): Promise<unknown>
+        move(fileId: string, folderId: string): Promise<unknown>
+        remove(fileId: string): Promise<void>
     }
     fileErrorMessage(error: unknown): string
 }
@@ -46,21 +52,25 @@ function clientWith(steps: Array<{ data: unknown; status: number }>) {
     return {
         calls,
         client: Object.freeze({
-            get: vi.fn((url: string) => take('get', url)),
+            get: vi.fn((url: string, options?: unknown) =>
+                take('get', url, undefined, options),
+            ),
             post: vi.fn((url: string, data?: unknown, options?: unknown) =>
                 take('post', url, data, options),
             ),
+            patch: vi.fn((url: string, data?: unknown) =>
+                take('patch', url, data),
+            ),
+            delete: vi.fn((url: string) => take('delete', url)),
         }),
     }
 }
 
 const startCommand = {
-    category: '客户方案',
     content_type:
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    file_date: '2026-08-10',
     filename: '客户方案.docx',
-    project_id: PROJECT_ID,
+    folder_id: PROJECT_ID,
     sha256: 'a'.repeat(64),
     size_bytes: 8_388_609,
 }
@@ -85,8 +95,14 @@ describe('strict browser file API', () => {
 
         expect(Object.keys(api).sort()).toEqual([
             'complete',
+            'createFolder',
             'download',
+            'listFiles',
+            'listFolders',
+            'move',
             'partUrl',
+            'remove',
+            'rename',
             'start',
         ])
 
@@ -193,7 +209,7 @@ describe('strict browser file API', () => {
                 key: idempotencyKey,
             },
             {
-                command: { ...startCommand, file_date: '2026-02-31' },
+                command: { ...startCommand, folder_id: 'not-a-uuid' },
                 key: idempotencyKey,
             },
             { command: startCommand, key: '' },
@@ -335,4 +351,85 @@ describe('strict browser file API', () => {
             ).rejects.toBe(failure)
         },
     )
+
+    test('uses folder and file list routes with canonical bodies', async () => {
+        const mod = await filesModule()
+        const folder = {
+            id: PROJECT_ID,
+            parent_id: null,
+            name: '项目',
+            visibility: 'ALL',
+        }
+        const driveFile = {
+            id: FILE_ID,
+            folder_id: PROJECT_ID,
+            project_id: null,
+            filename: '方案.pdf',
+            size_bytes: 12,
+            content_type: 'application/pdf',
+            state: 'CLEAN',
+            created_at: '2026-09-05T00:00:00Z',
+        }
+        const { calls, client } = clientWith([
+            { data: [folder], status: 200 },
+            { data: folder, status: 201 },
+            { data: [driveFile], status: 200 },
+            { data: { ...driveFile, filename: '新方案.pdf' }, status: 200 },
+            { data: { ...driveFile, folder_id: FILE_ID }, status: 200 },
+            { data: null, status: 204 },
+        ])
+        const api = mod.createFilesApi(client)
+
+        await expect(api.listFolders()).resolves.toEqual([folder])
+        await expect(api.createFolder(PROJECT_ID, '子目录')).resolves.toEqual(
+            folder,
+        )
+        await expect(api.listFiles(PROJECT_ID)).resolves.toEqual([driveFile])
+        await expect(api.rename(FILE_ID, '新方案.pdf')).resolves.toMatchObject({
+            filename: '新方案.pdf',
+        })
+        await expect(api.move(FILE_ID, FILE_ID)).resolves.toMatchObject({
+            folder_id: FILE_ID,
+        })
+        await expect(api.remove(FILE_ID)).resolves.toBeUndefined()
+
+        expect(calls).toEqual([
+            {
+                data: undefined,
+                method: 'get',
+                options: undefined,
+                url: '/folders',
+            },
+            {
+                data: { parent_id: PROJECT_ID, name: '子目录' },
+                method: 'post',
+                options: undefined,
+                url: '/folders',
+            },
+            {
+                data: undefined,
+                method: 'get',
+                options: { params: { folder_id: PROJECT_ID } },
+                url: '/files',
+            },
+            {
+                data: { filename: '新方案.pdf' },
+                method: 'patch',
+                options: undefined,
+                url: `/files/${FILE_ID}`,
+            },
+            {
+                data: { folder_id: FILE_ID },
+                method: 'patch',
+                options: undefined,
+                url: `/files/${FILE_ID}`,
+            },
+            {
+                data: undefined,
+                method: 'delete',
+                options: undefined,
+                url: `/files/${FILE_ID}`,
+            },
+        ])
+    })
 })

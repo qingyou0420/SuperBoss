@@ -18,13 +18,7 @@ def assigned_project_id() -> UUID:
 
 @pytest.fixture
 def staff_actor(assigned_project_id: UUID) -> Actor:
-    return Actor(
-        kind="user",
-        subject_id=uuid4(),
-        role=Role.STAFF,
-        project_ids=frozenset({assigned_project_id}),
-        scopes=frozenset(),
-    )
+    return Actor(uuid4(), Role.STAFF, frozenset({assigned_project_id}))
 
 
 def test_staff_cannot_use_owner_policy(staff_actor: Actor) -> None:
@@ -33,61 +27,35 @@ def test_staff_cannot_use_owner_policy(staff_actor: Actor) -> None:
         require_owner(staff_actor)
 
 
-def test_staff_can_only_access_assigned_projects(
-    staff_actor: Actor, assigned_project_id: UUID
-) -> None:
-    """Dropping membership enforcement would expose an unassigned project."""
-    require_project_access(staff_actor, assigned_project_id)
+def test_manager_cannot_use_owner_policy() -> None:
     with pytest.raises(ForbiddenError):
-        require_project_access(staff_actor, uuid4())
+        require_owner(Actor(uuid4(), Role.MANAGER))
 
 
-def test_owner_can_access_any_project_without_materialized_membership() -> None:
-    """Replacing role access with memberships would deny an OWNER's project."""
+def test_owner_and_manager_can_access_any_project(assigned_project_id: UUID) -> None:
+    foreign = uuid4()
+    require_project_access(Actor(uuid4(), Role.OWNER), foreign)
+    require_project_access(Actor(uuid4(), Role.MANAGER), foreign)
     require_project_access(
-        Actor("user", uuid4(), Role.OWNER, frozenset(), frozenset()), uuid4()
+        Actor(uuid4(), Role.STAFF, frozenset({assigned_project_id})),
+        assigned_project_id,
     )
+    with pytest.raises(ForbiddenError):
+        require_project_access(
+            Actor(uuid4(), Role.STAFF, frozenset({assigned_project_id})),
+            foreign,
+        )
 
 
-@pytest.mark.parametrize(
-    ("kind", "role"),
-    [
-        ("user", None),
-        ("device", Role.STAFF),
-        ("device", None),
-        ("system", None),
-        ("device", Role.OWNER),
-        ("system", Role.OWNER),
-        ("system", Role.STAFF),
-    ],
-)
-def test_only_user_staff_membership_can_access_assigned_project(
-    assigned_project_id: UUID, kind: str, role: Role | None
-) -> None:
-    """Removing the complete actor-shape check grants synthetic actors project access."""
-    actor = Actor(kind, uuid4(), role, frozenset({assigned_project_id}), frozenset())  # type: ignore[arg-type]
+def test_missing_role_cannot_access_assigned_project(assigned_project_id: UUID) -> None:
+    actor = Actor(uuid4(), None, frozenset({assigned_project_id}))
     with pytest.raises(ForbiddenError):
         require_project_access(actor, assigned_project_id)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("kind", "role"),
-    [
-        ("user", None),
-        ("device", None),
-        ("device", Role.OWNER),
-        ("device", Role.STAFF),
-        ("system", None),
-        ("system", Role.OWNER),
-        ("system", Role.STAFF),
-    ],
-)
-async def test_invalid_actor_cannot_reach_project_queries(
-    kind: str, role: Role | None
-) -> None:
-    """Dropping service-boundary checks lets device/system IDs query user projects."""
-    actor = Actor(kind, uuid4(), role, frozenset(), frozenset())  # type: ignore[arg-type]
+async def test_missing_role_cannot_reach_project_queries() -> None:
+    actor = Actor(uuid4(), None)
     service = ProjectService(None)  # type: ignore[arg-type]
     with pytest.raises(ForbiddenError):
         await service.list(actor)

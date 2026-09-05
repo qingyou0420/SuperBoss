@@ -87,10 +87,9 @@ async def test_owner_sees_all_projects_and_create_preserves_is_test(
 
 
 @pytest.mark.asyncio
-async def test_staff_sees_only_memberships_and_cannot_create(
+async def test_staff_sees_all_projects_and_cannot_create(
     api_client: TestClient, db_session: AsyncSession
 ) -> None:
-    """Removing the membership join would reveal Hidden to an unrelated STAFF account."""
     staff = local_user("staff-1", display_name="Staff")
     assigned = Project(name="Assigned")
     hidden = Project(name="Hidden")
@@ -102,14 +101,14 @@ async def test_staff_sees_only_memberships_and_cannot_create(
 
     listed = api_client.get("/api/v1/projects")
     assert listed.status_code == 200
-    assert [project["id"] for project in listed.json()] == [str(assigned.id)]
+    assert {project["name"] for project in listed.json()} == {"Assigned", "Hidden"}
     assigned_detail = api_client.get(f"/api/v1/projects/{assigned.id}")
     assert assigned_detail.status_code == 200
-    assert assigned_detail.json()["name"] == "Assigned"
-    _assert_error(api_client.get(f"/api/v1/projects/{hidden.id}"), 403, "PROJECT_FORBIDDEN", "You cannot access this project")
+    hidden_detail = api_client.get(f"/api/v1/projects/{hidden.id}")
+    assert hidden_detail.status_code == 200
     _assert_error(api_client.post(
         "/api/v1/projects", json={"name": "Denied"}, headers=_csrf_headers(api_client)
-    ), 403, "PROJECT_CREATE_FORBIDDEN", "You cannot create projects")
+    ), 403, "FORBIDDEN", "You cannot perform this action")
 
 
 @pytest.mark.asyncio
@@ -139,7 +138,7 @@ async def test_cookie_actor_precedes_bearer_without_fallback(
     api_client.cookies.clear()
     api_client.cookies.set("access_token", staff_token, domain="testserver.local", path="/")
     staff_cookie = api_client.get("/api/v1/projects", headers={"Authorization": f"Bearer {owner_token}"})
-    assert [item["name"] for item in staff_cookie.json()] == ["Source Assigned"]
+    assert {item["name"] for item in staff_cookie.json()} == {"Source Assigned", "Source Hidden"}
 
     api_client.cookies.set("access_token", "invalid", domain="testserver.local", path="/")
     invalid_cookie = api_client.get("/api/v1/projects", headers={"Authorization": f"Bearer {owner_token}"})
@@ -147,7 +146,7 @@ async def test_cookie_actor_precedes_bearer_without_fallback(
 
     api_client.cookies.clear()
     header_only = api_client.get("/api/v1/projects", headers={"Authorization": f"Bearer {owner_token}"})
-    assert {item["name"] for item in header_only.json()} == {"Source Assigned", "Source Hidden"}
+    assert header_only.status_code == 401
 
 
 def test_project_errors_have_safe_correlatable_bodies(api_client: TestClient) -> None:
@@ -284,13 +283,17 @@ async def test_concurrent_canonical_name_creates_have_one_winner(
     ).access_token
     await db_session.commit()
     transport = httpx.ASGITransport(app=create_app(test_settings))
+    csrf = "concurrent-csrf"
 
     async def create(name: str) -> int:
         async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
             response = await client.post(
                 "/api/v1/projects",
                 json={"name": name},
-                headers={"Authorization": f"Bearer {token}"},
+                headers={
+                    "X-CSRF-Token": csrf,
+                    "Cookie": f"access_token={token}; XSRF-TOKEN={csrf}",
+                },
             )
             return response.status_code
 

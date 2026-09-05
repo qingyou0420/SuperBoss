@@ -1,28 +1,28 @@
 # SuperBoss
 
-SuperBoss M1 provides a local OWNER/STAFF identity boundary, project and quarantined-file flow,
-OWNER device management, and the least-privilege Kimi connector import boundary. M1 `RECEIVED`
-imports do not create M2 document versions.
+内部运营工作台：一个老板 + 约 10 名员工。同一登录页，三层账号，霜月只出建议卡片，老板确认后才入库。
 
-The current supported acceptance target is private single-owner testing on the owner's Windows
-computer at `https://app.localhost`. Follow [local HTTPS](docs/runbooks/local-https.md) from a
-clone. Public domains, Tencent Cloud, company-network multi-user access, and the Moonbox entry
-portal are deferred until filing and a separate deployment review.
+仓库按私有内部系统维护，不对外发布，不提供设备配对或 Kimi 连接器。
 
-Packaged Windows connector updates come from GitHub Releases (`qingyou0420/SuperBoss`), not from a
-local file copy. Installed clients run `superboss --check-update` to detect a newer `superboss.exe`
-and `superboss --update` to download, verify the published SHA-256, and replace the executable.
+Supported origin for local acceptance: `https://app.localhost`.
+
+## Roles
+
+| Role | After login | Can do |
+|---|---|---|
+| OWNER（老板） | `/chat` 霜月 | 对话与卡片确认、财务读写、项目读写、网盘全部目录、SOUL/记忆、账号、审计 |
+| MANAGER（管理层） | `/projects` | 公司+项目财务只读、项目进度、公司/项目网盘 |
+| STAFF（员工） | `/projects` | 仅项目成本、项目进度、`项目` 网盘目录 |
 
 ## Operator map
 
-- [Local account bootstrap and recovery](docs/runbooks/local-auth-setup.md)
+- [Local account bootstrap and recovery](docs/runbooks/local-auth-setup.md)（含创建 MANAGER）
+- [LLM setup for 霜月](docs/runbooks/llm-setup.md)
 - [Local HTTPS from clone to login](docs/runbooks/local-https.md)
 - [Local start, migrate, verify, logs, and stop](docs/runbooks/m1-local-development.md)
-- [OWNER/STAFF live acceptance and blank sign-off](docs/runbooks/m1-owner-acceptance.md)
-- [Kimi connector build, pair, submit, retry, cloud update, and revoke](docs/runbooks/kimi-connector-installation.md)
-- [Pre-pilot PostgreSQL and object backup/restore](docs/runbooks/backup-before-m1-pilot.md)
-- [Iteration plan (slim and repair)](docs/迭代方案.md)
-- [Frozen technical baseline (archived)](docs/archive/superpowers/specs/2026-08-09-technical-foundation-design.md)
+- [Live acceptance](docs/runbooks/m1-owner-acceptance.md)
+- [PostgreSQL and object backup/restore](docs/runbooks/backup-before-m1-pilot.md)
+- [Current iteration plan](SuperBoss-迭代方案-三层账号与霜月.md)
 
 ## Local stack
 
@@ -33,12 +33,13 @@ docker compose --env-file .env -f docker-compose.dev.yml exec -T api alembic upg
 docker compose --env-file .env -f docker-compose.dev.yml ps
 ```
 
-The development stack includes API, PostgreSQL, Redis, MinIO, ClamAV, dedicated scan and maintenance
-workers, and Celery beat. ClamAV is private to the Compose network; never publish its unauthenticated
-protocol. Initial signature loading can take several minutes and roughly 4 GiB of memory.
+Deploy on the internal host is `git pull` (deploy key) → `docker compose build` → `alembic upgrade head` → restart. There is no public Release or client self-update.
 
-Bootstrap the OWNER through the interactive command in `local-auth-setup.md`, then sign in at
-`https://app.localhost/login`. Never put a password in `.env` or a command argument.
+Bootstrap the OWNER through the interactive command in `local-auth-setup.md`, then sign in at `https://app.localhost/login`. Never put a password in `.env` or a command argument.
+
+Optional 霜月: set `SUPERBOSS_LLM_*` as in `llm-setup.md`. Empty values keep the rest of the app working.
+
+Optional ClamAV: `SUPERBOSS_SCAN_ENABLED=false` skips scanning; start ClamAV with `--profile scan` when you want it.
 
 Stop safely without deleting volumes:
 
@@ -46,12 +47,6 @@ Stop safely without deleting volumes:
 docker compose --env-file .env -f docker-compose.dev.yml down
 ```
 
-## Verification truthfulness
+## Verification
 
-Live E2E requires a running local origin, external OWNER/STAFF credentials, and a runnable connector.
-Missing prerequisites fail fast. Static contracts, type checks, lint, `playwright test --list`, and
-mocked tests are not live E2E evidence.
-
-Docker production smoke, live ClamAV clean/EICAR, a real connector/keyring, manual browser profiles,
-backup restore, public-domain deployment, company-network access, and signed OWNER acceptance remain
-NOT RUN until an operator actually performs and records them.
+Live E2E needs the local origin and OWNER/STAFF/MANAGER credentials. Static contracts, type checks, lint, and mocked tests are not live evidence.

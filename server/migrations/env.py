@@ -12,11 +12,12 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from superboss.core.db import Base
+from superboss.modules.agent import models as agent_models
 from superboss.modules.audit import models as audit_models
 from superboss.modules.auth import models as auth_models
-from superboss.modules.devices import models as device_models
 from superboss.modules.files import models as file_models
-from superboss.modules.imports import models as import_models
+from superboss.modules.finance import models as finance_models
+from superboss.modules.knowledge import models as knowledge_models
 from superboss.modules.projects import models as project_models
 from superboss.modules.users import models as user_models
 
@@ -26,8 +27,9 @@ model_modules = (
     user_models,
     auth_models,
     file_models,
-    device_models,
-    import_models,
+    finance_models,
+    agent_models,
+    knowledge_models,
 )
 
 config = context.config

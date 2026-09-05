@@ -2,7 +2,7 @@
 import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { safePostLoginPath } from '../app/router'
+import { homePath, safePostLoginPath } from '../app/router'
 import { useAuthStore } from '../stores/auth'
 
 const username = ref('')
@@ -27,8 +27,10 @@ async function login(): Promise<void> {
                 name: 'password-change',
                 query: { redirect: target },
             })
-        } else {
+        } else if (route.query.redirect) {
             await router.replace(target)
+        } else {
+            await router.replace(homePath(auth.user?.role))
         }
     } catch {
         password.value = ''

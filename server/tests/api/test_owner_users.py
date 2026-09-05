@@ -166,7 +166,7 @@ async def test_concurrent_project_replaces_are_serialized_to_one_complete_member
     db_session.add_all([staff, *projects])
     await db_session.commit()
     staff_id = staff.id
-    actor = Actor("user", active_owner.id, Role.OWNER, frozenset(), frozenset())
+    actor = Actor(active_owner.id, Role.OWNER)
     session_factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
     assignments = ([projects[0].id, projects[1].id], [projects[2].id])
     request_ids = (uuid4(), uuid4())

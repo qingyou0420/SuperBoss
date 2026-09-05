@@ -11,8 +11,8 @@ test('真实上传先显示扫描中、CLEAN 前拒绝下载、CLEAN 后可下�
     page,
 }, testInfo) => {
     await loginThroughLocalAccount(page, 'OWNER', e2e.ownerCredentials)
-    await page.goto('/owner/drive')
-    await page.getByLabel('项目').selectOption({ label: '验收测试' })
+    await page.goto('/drive')
+    await expect(page.getByRole('heading', { name: '网盘' })).toBeVisible()
 
     const cleanPath = testInfo.outputPath('clean-16MiB.txt')
     const cleanBytes = Buffer.alloc(16 * 1024 * 1024, 0x41)

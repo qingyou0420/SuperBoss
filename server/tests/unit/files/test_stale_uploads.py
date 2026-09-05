@@ -10,8 +10,9 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from superboss.modules.files.models import File, FileState
-from superboss.modules.projects.models import Project
+from tests.files.factory import add_folder
 from tests.files.storage import InMemoryObjectStorage
+from tests.identity import local_user
 
 
 def stale_contract() -> tuple[type[Any], Any, Any]:
@@ -31,24 +32,21 @@ async def seed_upload(
     multipart_id: str | None = "multipart-known",
 ) -> tuple[UUID, UUID, str]:
     file_id = uuid4()
-    project_id = uuid4()
-    project = Project(id=project_id, name=f"Stale {file_id}")
-    session.add(project)
+    owner = local_user(f"stale{file_id.hex[:12]}", display_name="Stale")
+    session.add(owner)
     await session.flush()
-    object_key = f"projects/{project_id}/docs/{file_id}/report.pdf"
+    folder = await add_folder(session, owner.id)
+    object_key = f"folders/{folder.id}/docs/{file_id}/report.pdf"
     created_at = now - age
     file = File(
         id=file_id,
-        project_id=project_id,
+        folder_id=folder.id,
         filename="report.pdf",
-        category="docs",
-        file_date=created_at.date(),
         object_key=object_key,
         size_bytes=1,
         sha256="0" * 64,
         state=state,
-        uploader_id=project_id,
-        uploader_kind="system",
+        uploader_id=owner.id,
         content_type="application/pdf",
         created_at=created_at,
         updated_at=created_at,

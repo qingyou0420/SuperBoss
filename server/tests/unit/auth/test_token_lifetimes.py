@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core import security
 from superboss.core.config import Settings
-from superboss.core.security import hash_token, issue_access_token, issue_device_access_token
+from superboss.core.security import hash_token, issue_access_token
 from superboss.modules.auth import service as auth_service_module
 from superboss.modules.auth.models import AuthSession
 from superboss.modules.auth.service import AuthService
@@ -121,22 +121,3 @@ async def test_refresh_rotation_reissues_exact_browser_lifetimes(
     assert stored.access_expires_at == rotated.access_expires_at
     assert rotated.refresh_expires_at == rotation_time + timedelta(days=14)
     assert stored.refresh_expires_at == rotated.refresh_expires_at
-
-
-def test_device_access_token_remains_exactly_two_hours() -> None:
-    """Browser lifetime changes must not alter the device access-token contract."""
-    issued_at = datetime(2030, 4, 5, 6, 7, 8, tzinfo=UTC)
-    settings = _settings()
-
-    token, returned_expires_at = issue_device_access_token(
-        settings,
-        device_id=uuid4(),
-        owner_id=uuid4(),
-        session_id=uuid4(),
-        access_jti=uuid4(),
-        issued_at=issued_at,
-    )
-
-    claims = _claims(token, settings)
-    assert int(claims["exp"]) - int(claims["iat"]) == 7200
-    assert returned_expires_at == issued_at + timedelta(hours=2)

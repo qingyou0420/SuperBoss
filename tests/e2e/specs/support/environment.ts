@@ -1,8 +1,3 @@
-import { existsSync, statSync } from 'node:fs'
-import { resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
-
-const E2E_ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)))
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1'])
 
 function canonicalHostname(hostname: string): string {
@@ -17,8 +12,6 @@ function isLoopbackHostname(hostname: string): boolean {
 
 export interface E2eEnvironment {
     readonly baseUrl: string
-    readonly connectorCommand: readonly string[]
-    readonly connectorFixtureDir: string
     readonly ignoreHTTPSErrors: boolean
     readonly ownerCredentials: LocalCredentials
     readonly scanTimeoutMs: number
@@ -43,13 +36,6 @@ function required(source: EnvironmentSource, name: string): string {
     return value
 }
 
-function regularFile(path: string, label: string): string {
-    if (!existsSync(path) || !statSync(path).isFile()) {
-        throw new Error(`${label} must point to an existing regular file.`)
-    }
-    return path
-}
-
 function credentials(
     source: EnvironmentSource,
     prefix: 'OWNER' | 'STAFF',
@@ -72,33 +58,6 @@ function credentials(
         throw new Error(`E2E_${prefix}_PASSWORD is invalid.`)
     }
     return Object.freeze({ username, password })
-}
-
-function connectorCommand(source: EnvironmentSource): readonly string[] {
-    const raw = required(source, 'E2E_CONNECTOR_COMMAND_JSON')
-    let parsed: unknown
-    try {
-        parsed = JSON.parse(raw)
-    } catch {
-        throw new Error(
-            'E2E_CONNECTOR_COMMAND_JSON must be a JSON string array.',
-        )
-    }
-    if (
-        !Array.isArray(parsed) ||
-        parsed.length < 1 ||
-        parsed.some(
-            (part) =>
-                typeof part !== 'string' ||
-                !part ||
-                [...part].some((character) => character.charCodeAt(0) < 32),
-        )
-    ) {
-        throw new Error(
-            'E2E_CONNECTOR_COMMAND_JSON must be a non-empty JSON string array.',
-        )
-    }
-    return Object.freeze(parsed as string[])
 }
 
 function boundedMilliseconds(
@@ -164,19 +123,6 @@ export function loadE2eEnvironment(source: EnvironmentSource): E2eEnvironment {
         )
     }
 
-    const fixtureDir = resolve(
-        source.E2E_CONNECTOR_FIXTURE_DIR ??
-            resolve(E2E_ROOT, 'fixtures/connector'),
-    )
-    regularFile(
-        resolve(fixtureDir, 'manifest.template.json'),
-        'connector manifest fixture',
-    )
-    regularFile(
-        resolve(fixtureDir, 'k3-result.json'),
-        'connector attachment fixture',
-    )
-
     const scanTimeoutMs = boundedMilliseconds(
         source,
         'E2E_SCAN_TIMEOUT_MS',
@@ -184,8 +130,6 @@ export function loadE2eEnvironment(source: EnvironmentSource): E2eEnvironment {
     )
     return Object.freeze({
         baseUrl: base.origin,
-        connectorCommand: connectorCommand(source),
-        connectorFixtureDir: fixtureDir,
         ignoreHTTPSErrors,
         ownerCredentials: credentials(source, 'OWNER'),
         scanTimeoutMs,

@@ -36,6 +36,12 @@ vi.mock('../src/api/projects', () => ({
                 name: '验收项目',
                 is_test: false,
                 status: 'ACTIVE',
+                description: '',
+                stage: 'PLANNING',
+                progress_percent: 0,
+                starts_on: null,
+                due_on: null,
+                milestones: [],
             },
         ]),
     },
@@ -116,6 +122,7 @@ describe('OWNER local user API', () => {
         expect(JSON.parse(String(seen[0]?.data))).toEqual({
             username: 'existing-staff',
             display_name: 'Existing Staff',
+            role: 'STAFF',
             project_ids: [project.id],
         })
         expect(seen[1]?.url).toBe(`/owner/users/${staff.id}/password-reset`)
@@ -162,12 +169,13 @@ describe('OWNER local user management page', () => {
             'staff-acceptance',
         )
         await fireEvent.update(screen.getByLabelText('显示名称'), 'Acceptance')
-        await fireEvent.click(screen.getByRole('button', { name: '添加员工' }))
+        await fireEvent.click(screen.getByRole('button', { name: '添加账号' }))
 
         expect(await screen.findByText(temporaryPassword)).toBeInTheDocument()
         expect(mockedUsersApi.create).toHaveBeenCalledWith({
             username: 'staff-acceptance',
             display_name: 'Acceptance',
+            role: 'STAFF',
             project_ids: [],
         })
         expect(clipboard).not.toHaveBeenCalled()
@@ -214,9 +222,7 @@ describe('OWNER local user management page', () => {
         expect(mockedUsersApi.update).toHaveBeenCalledWith(staff.id, {
             status: 'DISABLED',
         })
-        expect(
-            screen.queryByLabelText(/角色|明文密码/i),
-        ).not.toBeInTheDocument()
+        expect(screen.queryByLabelText(/明文密码/i)).not.toBeInTheDocument()
         expect(
             screen.queryByRole('button', { name: /删除/i }),
         ).not.toBeInTheDocument()

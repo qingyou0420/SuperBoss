@@ -8,13 +8,23 @@ from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
 from superboss.modules.auth.schemas import USERNAME_PATTERN
 from superboss.modules.users.models import Role, UserStatus
 
+_MANAGED_ROLES = frozenset({Role.MANAGER, Role.STAFF})
+
 
 class StaffCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     username: StrictStr = Field(min_length=3, max_length=32, pattern=USERNAME_PATTERN)
     display_name: StrictStr = Field(min_length=1, max_length=255)
+    role: Role = Role.STAFF
     project_ids: list[UUID] = Field(max_length=1000)
+
+    @field_validator("role")
+    @classmethod
+    def managed_role(cls, value: Role) -> Role:
+        if value not in _MANAGED_ROLES:
+            raise ValueError("Role must be MANAGER or STAFF")
+        return value
 
     @field_validator("project_ids")
     @classmethod
@@ -29,6 +39,14 @@ class StaffUpdate(BaseModel):
 
     display_name: StrictStr | None = Field(default=None, min_length=1, max_length=255)
     status: UserStatus | None = None
+    role: Role | None = None
+
+    @field_validator("role")
+    @classmethod
+    def managed_role(cls, value: Role | None) -> Role | None:
+        if value is not None and value not in _MANAGED_ROLES:
+            raise ValueError("Role must be MANAGER or STAFF")
+        return value
 
 
 class ProjectAssignments(BaseModel):

@@ -1,12 +1,24 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import {
     projectErrorMessage,
     projectsApi,
     type Project,
+    type ProjectStage,
 } from '../../api/projects'
+import { useAuthStore } from '../../stores/auth'
 
+const STAGE_LABEL: Record<ProjectStage, string> = {
+    PLANNING: '立项',
+    ACTIVE: '进行中',
+    DELIVERING: '交付中',
+    REVIEW: '复盘',
+    ARCHIVED: '已归档',
+}
+
+const auth = useAuthStore()
+const canCreate = computed(() => auth.user?.role === 'OWNER')
 const projects = ref<Project[]>([])
 const name = ref('')
 const isTest = ref(false)
@@ -66,11 +78,13 @@ onMounted(loadProjects)
 <template>
     <section class="projects-page" aria-labelledby="projects-title">
         <header>
-            <p class="projects-page__eyebrow">OWNER</p>
+            <p class="projects-page__eyebrow">
+                {{ auth.user?.role || '工作台' }}
+            </p>
             <h1 id="projects-title">项目管理</h1>
         </header>
 
-        <el-card shadow="never">
+        <el-card v-if="canCreate" shadow="never">
             <form class="project-form" @submit.prevent="createProject">
                 <label for="project-name">项目名称</label>
                 <el-input id="project-name" v-model="name" />
@@ -98,13 +112,14 @@ onMounted(loadProjects)
             >
                 <div class="project-row">
                     <div>
-                        <strong>{{ project.name }}</strong>
+                        <router-link
+                            :to="`/projects/${project.id}`"
+                            class="project-row__name"
+                            >{{ project.name }}</router-link
+                        >
                         <p>
-                            {{
-                                project.status === 'ACTIVE'
-                                    ? '启用中'
-                                    : '已归档'
-                            }}
+                            {{ STAGE_LABEL[project.stage] }} · 进度
+                            {{ project.progress_percent }}%
                         </p>
                     </div>
                     <el-tag v-if="project.is_test" type="warning"
@@ -149,6 +164,12 @@ onMounted(loadProjects)
     display: flex;
     align-items: center;
     justify-content: space-between;
+}
+
+.project-row__name {
+    color: #303133;
+    font-weight: 700;
+    text-decoration: none;
 }
 
 @media (max-width: 680px) {

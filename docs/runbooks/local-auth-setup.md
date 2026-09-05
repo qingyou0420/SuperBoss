@@ -34,15 +34,21 @@ docker compose --env-file .env -f docker-compose.dev.yml run --rm --no-deps `
 
 The reset revokes existing browser sessions. Sign in again at `https://app.localhost/login`.
 
-## STAFF accounts
+## STAFF and MANAGER accounts
 
-The OWNER creates STAFF accounts from **员工账号**. The generated temporary password is displayed
-once and is never recoverable. Deliver it privately; the STAFF user must change it at first login.
-The OWNER can reset a forgotten STAFF password, disable the account, and replace project access.
+The OWNER creates accounts from **账号**. Choose role **STAFF** or **MANAGER**. The generated
+temporary password is displayed once and is never recoverable. Deliver it privately; the user must
+change it at first login. The OWNER can later switch STAFF ↔ MANAGER, reset a forgotten password,
+disable the account, and replace project membership.
+
+- MANAGER sees company finance with `MANAGEMENT`/`ALL` visibility, all projects, and the company
+  drive folder. MANAGER cannot use 霜月, user admin, audit, or SOUL.
+- STAFF sees only project costs with `ALL` visibility, all project progress, and the shared `项目`
+  drive folder.
 
 ## Current access boundary
 
 - Use only the local Docker environment on the owner's Windows computer.
 - Do not publish Docker ports through router port forwarding or expose them to the public internet.
 - Do not configure `night-forest.com`, Tencent Cloud, company LAN access, or the Moonbox portal yet.
-- Keep `.env`, cookies, passwords, pairing codes, connector credentials, and local TLS keys private.
+- Keep `.env`, cookies, passwords, and local TLS keys private.

@@ -124,7 +124,7 @@ async def _acceptance_project(
         ):
             raise SeedRefusedError("Acceptance seed conflicts with an existing project.")
         return existing
-    project = Project(name=name, is_test=is_test, status=ProjectStatus.ACTIVE)
+    project = Project(name=name, description="", is_test=is_test, status=ProjectStatus.ACTIVE)
     session.add(project)
     await session.flush()
     return project

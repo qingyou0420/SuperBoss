@@ -3,6 +3,7 @@
 import json
 import math
 import unicodedata
+from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -16,7 +17,14 @@ _MAX_TEXT_BYTES = 64 * 1024
 _MAX_JSON_INTEGER = 2**53 - 1
 _FORBIDDEN_METADATA_KEYS = frozenset(
     unicodedata.normalize("NFKC", key).casefold()
-    for key in ("access_token", "refresh_token", "authorization", "cookie", "file_content", "model_input")
+    for key in (
+        "access_token",
+        "refresh_token",
+        "authorization",
+        "cookie",
+        "file_content",
+        "model_input",
+    )
 )
 
 
@@ -32,7 +40,9 @@ def sanitize_metadata(value: object) -> dict[str, object]:
     _validate_value(value, 0, set(), budget)
     result = _copy_sanitized(value)
     assert isinstance(result, dict)
-    encoded = json.dumps(result, allow_nan=False, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    encoded = json.dumps(result, allow_nan=False, ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8"
+    )
     if len(encoded) > _MAX_TEXT_BYTES:
         raise ValueError("metadata exceeds JSON size budget")
     return result
@@ -106,6 +116,22 @@ def _copy_sanitized(value: object) -> object:
             for key, item in value.items()
         }
     return value
+
+
+class AuditRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    actor_kind: str
+    actor_id: UUID | None
+    action: str
+    object_type: str
+    object_id: UUID | None
+    project_id: UUID | None
+    outcome: str
+    metadata_json: dict[str, object]
+    request_id: UUID | None
+    created_at: datetime
 
 
 class AuditEventInput(BaseModel):

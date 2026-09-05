@@ -11,10 +11,11 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from superboss.api.router import api_router
-from superboss.core.actors import get_actor
 from superboss.core.config import Settings, get_settings
 from superboss.core.errors import DomainError, UnauthenticatedError
+from superboss.core.llm import LLMClient, llm_from_settings
 from superboss.infrastructure.s3 import Boto3ObjectStorage
+from superboss.modules.agent.tasks import enqueue_memory_extract as celery_enqueue_memory_extract
 from superboss.modules.files.storage import ObjectStorage
 from superboss.modules.files.tasks import enqueue_file_scan as celery_enqueue_file_scan
 
@@ -24,9 +25,12 @@ def create_app(
     *,
     object_storage: ObjectStorage | None = None,
     enqueue_file_scan: Callable[[UUID, UUID], Awaitable[None] | None] | None = None,
+    llm_client: LLMClient | None = None,
+    enqueue_memory_extract: Callable[[UUID], Awaitable[None] | None] | None = None,
 ) -> FastAPI:
     active_settings = settings or get_settings()
     engine = create_async_engine(active_settings.database_url, pool_pre_ping=True)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         del app
@@ -48,6 +52,8 @@ def create_app(
         public_endpoint_url=active_settings.s3_public_endpoint_url,
     )
     app.state.enqueue_file_scan = enqueue_file_scan or celery_enqueue_file_scan
+    app.state.llm_client = llm_client or llm_from_settings(active_settings)
+    app.state.enqueue_memory_extract = enqueue_memory_extract or celery_enqueue_memory_extract
 
     def request_id(request: Request) -> str:
         candidate = request.headers.get("X-Request-ID", "")
@@ -76,21 +82,6 @@ def create_app(
     def finalize_response(request: Request, response: Response) -> Response:
         response.headers["X-Request-ID"] = request.state.request_id
         return response
-
-    def is_authenticated_write_path(path: str) -> bool:
-        return path in {
-            "/api/v1/projects",
-            "/api/v1/files",
-            "/api/v1/device/import-jobs",
-        } or path.startswith(
-            (
-                "/api/v1/projects/",
-                "/api/v1/files/",
-                "/api/v1/owner/devices",
-                "/api/v1/owner/users",
-                "/api/v1/device/import-jobs/",
-            )
-        )
 
     @app.exception_handler(DomainError)
     async def handle_domain_error(request: Request, error: DomainError) -> JSONResponse:
@@ -123,35 +114,20 @@ def create_app(
     ) -> Response:
         request.state.request_id = request_id(request)
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
-            if request.method == "POST" and request.url.path in {
-                "/api/v1/device-auth/pair",
-                "/api/v1/device-auth/refresh",
-            }:
-                return finalize_response(request, await call_next(request))
-            authorization = request.headers.get("Authorization")
             has_browser_credentials = bool(
                 request.cookies.get("access_token") or request.cookies.get("refresh_token")
             )
-            if authorization is not None and not has_browser_credentials:
-                try:
-                    await get_actor(request)
-                except UnauthenticatedError:
+            if has_browser_credentials or request.url.path.startswith("/api/v1/auth/"):
+                csrf_cookie = request.cookies.get("XSRF-TOKEN")
+                csrf_header = request.headers.get("X-CSRF-Token")
+                if (
+                    not csrf_cookie
+                    or not csrf_header
+                    or not secrets.compare_digest(csrf_cookie, csrf_header)
+                ):
                     return error_response(
-                        request, "AUTHENTICATION_REQUIRED", "Authentication required", 401
+                        request, "CSRF_VALIDATION_FAILED", "CSRF validation failed", 403
                     )
-                return finalize_response(request, await call_next(request))
-            if not has_browser_credentials and is_authenticated_write_path(request.url.path):
-                return finalize_response(request, await call_next(request))
-            csrf_cookie = request.cookies.get("XSRF-TOKEN")
-            csrf_header = request.headers.get("X-CSRF-Token")
-            if (
-                not csrf_cookie
-                or not csrf_header
-                or not secrets.compare_digest(csrf_cookie, csrf_header)
-            ):
-                return error_response(
-                    request, "CSRF_VALIDATION_FAILED", "CSRF validation failed", 403
-                )
         return finalize_response(request, await call_next(request))
 
     app.include_router(api_router, prefix="/api/v1")

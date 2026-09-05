@@ -14,16 +14,14 @@ import {
 
 const props = defineProps<{
     allowedObjectOrigin: string
-    projectId: string
+    folderId: string
 }>()
 
 const emit = defineEmits<{
     completed: [result: FileUploadCompleted]
 }>()
 
-const category = ref('\u6587\u6863')
 const file = ref<globalThis.File>()
-const fileDate = ref(new Date().toISOString().slice(0, 10))
 const pending = ref(false)
 const status = ref('')
 const errorMessage = ref('')
@@ -69,10 +67,8 @@ async function submit(): Promise<void> {
             uploadPart: transport.put,
         })
         const result = await activeUploader.upload({
-            category: category.value,
             file: file.value,
-            file_date: fileDate.value,
-            project_id: props.projectId,
+            folder_id: props.folderId,
         })
         status.value = '\u626b\u63cf\u4e2d'
         emit('completed', result)
@@ -102,14 +98,6 @@ onBeforeUnmount(cancel)
         <label>
             文件
             <input type="file" :disabled="pending" @change="selectFile" />
-        </label>
-        <label>
-            分类
-            <input v-model="category" :disabled="pending" maxlength="255" />
-        </label>
-        <label>
-            文件日期
-            <input v-model="fileDate" :disabled="pending" type="date" />
         </label>
         <div class="multipart-uploader__actions">
             <button type="button" :disabled="pending || !file" @click="submit">

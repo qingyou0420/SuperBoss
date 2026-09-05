@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     clamav_max_response_bytes: int = 1024
     scan_soft_time_limit_seconds: int = 660
     scan_hard_time_limit_seconds: int = 720
+    llm_base_url: str = ""
+    llm_api_key: str = ""
+    llm_model: str = ""
+    llm_timeout_seconds: float = 60.0
+    scan_enabled: bool = True
 
     model_config = SettingsConfigDict(env_prefix="SUPERBOSS_", extra="forbid", hide_input_in_errors=True)
 
@@ -40,14 +45,21 @@ class Settings(BaseSettings):
                 parsed = urlsplit(public_endpoint)
             except ValueError:
                 raise ValueError("public S3 endpoint must be an HTTPS origin") from None
+            host = parsed.hostname or ""
             if (
-                parsed.scheme != "https"
-                or not parsed.hostname
+                public_endpoint != f"https://{host}"
+                or parsed.scheme != "https"
                 or parsed.username is not None
                 or parsed.password is not None
+                or parsed.port is not None
                 or parsed.path
                 or parsed.query
                 or parsed.fragment
+                or not re.fullmatch(
+                    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+                    r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*",
+                    host,
+                )
             ):
                 raise ValueError("public S3 endpoint must be an HTTPS origin")
         if not self.redis_url.startswith(("redis://", "rediss://")):

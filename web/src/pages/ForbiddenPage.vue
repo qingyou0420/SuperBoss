@@ -2,7 +2,7 @@
     <main class="message-page">
         <h1>无权访问</h1>
         <p>当前账号没有访问此页面的权限。</p>
-        <router-link to="/">返回首页</router-link>
+        <router-link to="/projects">返回首页</router-link>
     </main>
 </template>
 

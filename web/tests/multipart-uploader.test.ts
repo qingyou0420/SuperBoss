@@ -61,10 +61,8 @@ function uploaderFixture(options?: { fileSize?: number }) {
 
 function uploadCommand(file: File) {
     return {
-        category: '客户方案',
         file,
-        file_date: '2026-08-10',
-        project_id: PROJECT_ID,
+        folder_id: PROJECT_ID,
     }
 }
 
@@ -121,7 +119,7 @@ describe('multipart upload orchestration', () => {
         expect(fixture.hashFile).toHaveBeenCalledTimes(1)
     })
 
-    test('rejects an impossible calendar date before hashing or network', async () => {
+    test('rejects a malformed folder id before hashing or network', async () => {
         const mod = await multipartModule()
         const fixture = uploaderFixture({ fileSize: 1 })
         const uploader = mod.createMultipartUploader({
@@ -133,7 +131,7 @@ describe('multipart upload orchestration', () => {
         await expect(
             uploader.upload({
                 ...uploadCommand(fixture.file),
-                file_date: '2026-02-31',
+                folder_id: 'not-a-folder',
             }),
         ).rejects.toBeInstanceOf(mod.UploadContractError)
         expect(fixture.hashFile).not.toHaveBeenCalled()
@@ -173,7 +171,7 @@ describe('multipart upload orchestration', () => {
         })
         await changedUploader.upload({
             ...uploadCommand(changed.file),
-            category: '另一分类',
+            folder_id: '019f2b8e-18f0-7f31-9f42-3e6a76b9f899',
         })
         const changedKey = changed.filesApi.start.mock.calls[0]?.[1]
 

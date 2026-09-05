@@ -5,8 +5,9 @@ import { defineComponent } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
-import { createAppRouter } from '../src/app/router'
+import { createAppRouter, homePath } from '../src/app/router'
 import AppLayout from '../src/layouts/AppLayout.vue'
+import { useAuthStore } from '../src/stores/auth'
 
 const DRIVE_PATH = '../src/pages/owner/DrivePage.vue'
 const PROJECT_ID = '019f2b8e-18f0-7f31-9f42-3e6a76b9f810'
@@ -23,7 +24,15 @@ const mocks = vi.hoisted(() => {
     }
     return {
         FileDownloadUnavailableError,
-        filesApi: { download: vi.fn() },
+        filesApi: {
+            download: vi.fn(),
+            listFolders: vi.fn(),
+            listFiles: vi.fn(),
+            createFolder: vi.fn(),
+            rename: vi.fn(),
+            move: vi.fn(),
+            remove: vi.fn(),
+        },
         projectsApi: { list: vi.fn() },
     }
 })
@@ -38,6 +47,15 @@ vi.mock('../src/api/projects', () => ({ projectsApi: mocks.projectsApi }))
 beforeEach(() => {
     vi.clearAllMocks()
     mocks.filesApi.download.mockReset()
+    mocks.filesApi.listFolders.mockResolvedValue([
+        {
+            id: PROJECT_ID,
+            parent_id: null,
+            name: '项目',
+            visibility: 'ALL',
+        },
+    ])
+    mocks.filesApi.listFiles.mockResolvedValue([])
     localStorage.clear()
     sessionStorage.clear()
     setActivePinia(createPinia())
@@ -47,6 +65,12 @@ beforeEach(() => {
             is_test: false,
             name: '客户方案',
             status: 'ACTIVE',
+            description: '',
+            stage: 'PLANNING',
+            progress_percent: 0,
+            starts_on: null,
+            due_on: null,
+            milestones: [],
         },
     ])
 })
@@ -56,20 +80,26 @@ afterEach(() => {
 })
 
 describe('Task13 OWNER navigation and Drive integration', () => {
+    test('OWNER lands on chat and other roles land on projects', () => {
+        expect(homePath('OWNER')).toBe('/chat')
+        expect(homePath('MANAGER')).toBe('/projects')
+        expect(homePath('STAFF')).toBe('/projects')
+    })
+
     test.each([
-        ['/owner/drive', 'owner-drive'],
-        ['/owner/devices', 'owner-devices'],
-        ['/owner/import-jobs', 'owner-import-jobs'],
-    ])('registers %s under the OWNER-only layout', (path, name) => {
+        ['/drive', 'drive'],
+        ['/finance', 'finance'],
+        ['/chat', 'chat'],
+    ])('registers %s for signed-in roles', (path, name) => {
         const router = createAppRouter(createMemoryHistory())
         const resolved = router.resolve(path)
 
         expect(resolved.name).toBe(name)
         expect(resolved.matched).toHaveLength(2)
-        expect(resolved.matched[0]?.path).toBe('/owner')
+        expect(resolved.matched[0]?.path).toBe('/')
         expect(resolved.matched[0]?.meta).toMatchObject({
             requiresAuth: true,
-            roles: ['OWNER'],
+            roles: ['OWNER', 'MANAGER', 'STAFF'],
         })
     })
 
@@ -89,7 +119,7 @@ describe('Task13 OWNER navigation and Drive integration', () => {
             global: { plugins: [createPinia(), router, ElementPlus] },
         })
 
-        for (const label of ['项目', '文件上传', '设备', '导入任务']) {
+        for (const label of ['项目', '财务', '网盘']) {
             expect(
                 screen.getByRole('link', { name: label }),
             ).toBeInTheDocument()
@@ -103,9 +133,9 @@ describe('Task13 OWNER navigation and Drive integration', () => {
         const module = await import(/* @vite-ignore */ DRIVE_PATH)
         const MultipartStub = defineComponent({
             emits: ['completed'],
-            props: ['allowedObjectOrigin', 'projectId'],
+            props: ['allowedObjectOrigin', 'folderId'],
             template:
-                "<div><span data-testid=\"upload-boundary\">{{ allowedObjectOrigin }}|{{ projectId }}</span><button @click=\"$emit('completed', { file_id: 'file-1', state: 'QUARANTINED' })\">完成上传</button></div>",
+                "<div><span data-testid=\"upload-boundary\">{{ allowedObjectOrigin }}|{{ folderId }}</span><button @click=\"$emit('completed', { file_id: 'file-1', state: 'QUARANTINED' })\">完成上传</button></div>",
         })
         render(module.default, {
             props: { allowedObjectOrigin: 'https://objects.example' },
@@ -116,7 +146,7 @@ describe('Task13 OWNER navigation and Drive integration', () => {
         })
 
         expect(
-            screen.getByRole('heading', { name: '文件上传' }),
+            screen.getByRole('heading', { name: '网盘' }),
         ).toBeInTheDocument()
         expect(await screen.findByTestId('upload-boundary')).toHaveTextContent(
             `https://objects.example|${PROJECT_ID}`,
@@ -154,7 +184,7 @@ describe('Task13 OWNER navigation and Drive integration', () => {
                 stubs: { MultipartUploader: MultipartStub },
             },
         })
-        await screen.findByText('客户方案')
+        await screen.findByText('项目')
         await fireEvent.click(screen.getByRole('button', { name: '完成上传' }))
 
         const check = screen.getByRole('button', {
@@ -209,7 +239,7 @@ describe('Task13 OWNER navigation and Drive integration', () => {
                     stubs: { MultipartUploader: MultipartStub },
                 },
             })
-            await screen.findByText('客户方案')
+            await screen.findByText('项目')
             await fireEvent.click(
                 screen.getByRole('button', { name: '完成上传' }),
             )
@@ -250,7 +280,7 @@ describe('Task13 OWNER navigation and Drive integration', () => {
                     stubs: { MultipartUploader: MultipartStub },
                 },
             })
-            await screen.findByText('客户方案')
+            await screen.findByText('项目')
             await fireEvent.click(
                 screen.getByRole('button', { name: '完成上传' }),
             )
@@ -273,4 +303,139 @@ describe('Task13 OWNER navigation and Drive integration', () => {
             ).not.toBeInTheDocument()
         },
     )
+
+    test('OWNER can create folders and rename, move, or delete files', async () => {
+        const pinia = createPinia()
+        setActivePinia(pinia)
+        useAuthStore().user = {
+            username: 'owner',
+            display_name: 'Owner',
+            role: 'OWNER',
+            must_change_password: false,
+        }
+        const destId = '019f2b8e-18f0-7f31-9f42-3e6a76b9f813'
+        mocks.filesApi.listFolders.mockResolvedValue([
+            {
+                id: PROJECT_ID,
+                parent_id: null,
+                name: '项目',
+                visibility: 'ALL',
+            },
+            {
+                id: destId,
+                parent_id: null,
+                name: '公司',
+                visibility: 'MANAGEMENT',
+            },
+        ])
+        const driveFile = {
+            id: FILE_ID,
+            folder_id: PROJECT_ID,
+            project_id: null,
+            filename: '方案.pdf',
+            size_bytes: 12,
+            content_type: 'application/pdf',
+            state: 'CLEAN',
+            created_at: '2026-09-05T00:00:00Z',
+        }
+        mocks.filesApi.listFiles.mockResolvedValue([driveFile])
+        mocks.filesApi.createFolder.mockResolvedValue({
+            id: '019f2b8e-18f0-7f31-9f42-3e6a76b9f814',
+            parent_id: PROJECT_ID,
+            name: '子目录',
+            visibility: 'ALL',
+        })
+        mocks.filesApi.rename.mockResolvedValue({
+            ...driveFile,
+            filename: '新方案.pdf',
+        })
+        mocks.filesApi.move.mockResolvedValue({
+            ...driveFile,
+            folder_id: destId,
+        })
+        const module = await import(/* @vite-ignore */ DRIVE_PATH)
+        render(module.default, {
+            props: { allowedObjectOrigin: 'https://objects.example' },
+            global: {
+                plugins: [pinia, ElementPlus],
+                stubs: { MultipartUploader: true },
+            },
+        })
+
+        expect(await screen.findByText('方案.pdf')).toBeInTheDocument()
+        await fireEvent.update(screen.getByLabelText('新建子目录'), '子目录')
+        await fireEvent.click(screen.getByRole('button', { name: '创建' }))
+        expect(mocks.filesApi.createFolder).toHaveBeenCalledWith(
+            PROJECT_ID,
+            '子目录',
+        )
+        expect(
+            await screen.findByRole('button', { name: '子目录' }),
+        ).toBeInTheDocument()
+
+        await fireEvent.click(screen.getByRole('button', { name: '重命名' }))
+        await fireEvent.update(
+            screen.getByDisplayValue('方案.pdf'),
+            '新方案.pdf',
+        )
+        await fireEvent.click(screen.getByRole('button', { name: '确定' }))
+        expect(mocks.filesApi.rename).toHaveBeenCalledWith(
+            FILE_ID,
+            '新方案.pdf',
+        )
+        expect(await screen.findByText('新方案.pdf')).toBeInTheDocument()
+
+        expect(screen.getByRole('button', { name: '删除' })).toBeInTheDocument()
+        await fireEvent.click(screen.getByRole('button', { name: '移动' }))
+        await fireEvent.update(screen.getByLabelText('目标目录'), destId)
+        await fireEvent.click(screen.getByRole('button', { name: '确定移动' }))
+        expect(mocks.filesApi.move).toHaveBeenCalledWith(FILE_ID, destId)
+        expect(screen.queryByText('新方案.pdf')).not.toBeInTheDocument()
+    })
+
+    test('STAFF can download but cannot manage folders or files', async () => {
+        const pinia = createPinia()
+        setActivePinia(pinia)
+        useAuthStore().user = {
+            username: 'staff',
+            display_name: 'Staff',
+            role: 'STAFF',
+            must_change_password: false,
+        }
+        mocks.filesApi.listFiles.mockResolvedValue([
+            {
+                id: FILE_ID,
+                folder_id: PROJECT_ID,
+                project_id: null,
+                filename: '方案.pdf',
+                size_bytes: 12,
+                content_type: 'application/pdf',
+                state: 'CLEAN',
+                created_at: '2026-09-05T00:00:00Z',
+            },
+        ])
+        const module = await import(/* @vite-ignore */ DRIVE_PATH)
+        render(module.default, {
+            props: { allowedObjectOrigin: 'https://objects.example' },
+            global: {
+                plugins: [pinia, ElementPlus],
+                stubs: { MultipartUploader: true },
+            },
+        })
+
+        expect(await screen.findByText('方案.pdf')).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: '下载' })).toBeInTheDocument()
+        expect(
+            screen.queryByRole('button', { name: '创建' }),
+        ).not.toBeInTheDocument()
+        expect(
+            screen.queryByRole('button', { name: '重命名' }),
+        ).not.toBeInTheDocument()
+        expect(
+            screen.queryByRole('button', { name: '移动' }),
+        ).not.toBeInTheDocument()
+        expect(
+            screen.queryByRole('button', { name: '删除' }),
+        ).not.toBeInTheDocument()
+    })
 })

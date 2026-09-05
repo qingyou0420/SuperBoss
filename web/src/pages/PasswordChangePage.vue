@@ -2,7 +2,7 @@
 import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { safePostLoginPath } from '../app/router'
+import { homePath, safePostLoginPath } from '../app/router'
 import { useAuthStore } from '../stores/auth'
 
 const currentPassword = ref('')
@@ -34,7 +34,11 @@ async function changePassword(): Promise<void> {
             new_password: newPassword.value,
         })
         clearPasswords()
-        await router.replace(safePostLoginPath(route.query.redirect))
+        await router.replace(
+            route.query.redirect
+                ? safePostLoginPath(route.query.redirect)
+                : homePath(auth.user?.role),
+        )
     } catch {
         clearPasswords()
         errorMessage.value = '密码更新失败，请检查当前密码和新密码。'

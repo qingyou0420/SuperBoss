@@ -14,13 +14,9 @@ const UUID =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const SHA256 = /^[0-9a-f]{64}$/
 const MIME = /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/
-const DATE = /^\d{4}-\d{2}-\d{2}$/
-
 export interface UploadCommand {
-    readonly category: string
     readonly file: File
-    readonly file_date: string
-    readonly project_id: string
+    readonly folder_id: string
 }
 
 interface FilesApi {
@@ -108,15 +104,6 @@ function isEtag(value: unknown): value is string {
     )
 }
 
-function isCalendarDate(value: string): boolean {
-    if (!DATE.test(value) || value.slice(0, 4) === '0000') return false
-    const parsed = new Date(`${value}T00:00:00.000Z`)
-    return (
-        Number.isFinite(parsed.getTime()) &&
-        parsed.toISOString().slice(0, 10) === value
-    )
-}
-
 function canonicalCommand(value: unknown): UploadCommand {
     if (
         !isRecord(value) ||
@@ -124,11 +111,8 @@ function canonicalCommand(value: unknown): UploadCommand {
         !isSafeText(value.file.name, 1024) ||
         !Number.isSafeInteger(value.file.lastModified) ||
         value.file.lastModified < 0 ||
-        !isSafeText(value.category, 255) ||
-        typeof value.file_date !== 'string' ||
-        !isCalendarDate(value.file_date) ||
-        typeof value.project_id !== 'string' ||
-        !UUID.test(value.project_id)
+        typeof value.folder_id !== 'string' ||
+        !UUID.test(value.folder_id)
     ) {
         throw new UploadContractError()
     }
@@ -138,10 +122,8 @@ function canonicalCommand(value: unknown): UploadCommand {
     if (contentType.length > 255 || !MIME.test(contentType))
         throw new UploadUserError('BAD_TYPE')
     return {
-        category: value.category,
         file: value.file,
-        file_date: value.file_date,
-        project_id: value.project_id,
+        folder_id: value.folder_id,
     }
 }
 
@@ -183,12 +165,10 @@ async function uploadIdempotencyKey(
 ): Promise<string> {
     const contentType = command.file.type || 'application/octet-stream'
     const canonical = JSON.stringify({
-        category: command.category,
         content_type: contentType,
-        file_date: command.file_date,
         filename: command.file.name,
+        folder_id: command.folder_id,
         last_modified: command.file.lastModified,
-        project_id: command.project_id,
         sha256,
         size_bytes: command.file.size,
     })
@@ -235,11 +215,9 @@ async function runUpload(
     try {
         started = await dependencies.filesApi.start(
             {
-                category: command.category,
                 content_type: command.file.type || 'application/octet-stream',
-                file_date: command.file_date,
                 filename: command.file.name,
-                project_id: command.project_id,
+                folder_id: command.folder_id,
                 sha256,
                 size_bytes: command.file.size,
             },

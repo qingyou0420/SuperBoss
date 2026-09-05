@@ -3,7 +3,6 @@
 import importlib
 import socket
 from collections.abc import AsyncIterator
-from datetime import date
 from typing import Any
 from uuid import uuid4
 
@@ -11,7 +10,8 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from superboss.modules.files.models import File, FileState
-from superboss.modules.projects.models import Project
+from tests.files.factory import add_folder
+from tests.identity import local_user
 
 
 def celery_contract() -> tuple[Any, Any]:
@@ -97,20 +97,18 @@ async def test_execution_layer_preserves_terminal_replay_noop(
 ) -> None:
     """Task wiring must retain FileScanService's no-I/O terminal replay contract."""
     tasks, _app = celery_contract()
-    project = Project(name="Celery terminal replay")
-    db_session.add(project)
+    owner = local_user("celery-scan", display_name="Celery")
+    db_session.add(owner)
     await db_session.flush()
+    folder = await add_folder(db_session, owner.id)
     file = File(
-        project_id=project.id,
+        folder_id=folder.id,
         filename="clean.pdf",
-        category="docs",
-        file_date=date(2026, 8, 9),
-        object_key=f"projects/{project.id}/docs/clean.pdf",
+        object_key=f"folders/{folder.id}/docs/clean.pdf",
         size_bytes=1,
         sha256="0" * 64,
         state=FileState.CLEAN,
-        uploader_id=project.id,
-        uploader_kind="system",
+        uploader_id=owner.id,
         content_type="application/pdf",
         scan_result="CLEAN",
     )
@@ -149,9 +147,7 @@ async def test_execution_layer_preserves_terminal_replay_noop(
     assert scanner.calls == 0
 
 
-def test_import_and_injected_app_construction_open_no_network(
-    monkeypatch, test_settings
-) -> None:
+def test_import_and_injected_app_construction_open_no_network(monkeypatch, test_settings) -> None:
     """Importing workers or constructing an injected API must not dial dependencies."""
     attempted: list[object] = []
 

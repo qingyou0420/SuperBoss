@@ -10,26 +10,34 @@ import {
     setAuthenticationLostHandler,
     setSessionRefreshedHandler,
 } from '../api/http'
+import type { UserRole } from '../api/auth'
 import AppLayout from '../layouts/AppLayout.vue'
 import ForbiddenPage from '../pages/ForbiddenPage.vue'
 import HealthPage from '../pages/HealthPage.vue'
 import LoginPage from '../pages/LoginPage.vue'
 import PasswordChangePage from '../pages/PasswordChangePage.vue'
-import OwnerHomePage from '../pages/owner/OwnerHomePage.vue'
-import OwnerDevicesPage from '../pages/owner/DevicesPage.vue'
-import OwnerDrivePage from '../pages/owner/DrivePage.vue'
-import OwnerImportJobsPage from '../pages/owner/ImportJobsPage.vue'
-import OwnerProjectsPage from '../pages/owner/ProjectsPage.vue'
-import OwnerUsersPage from '../pages/owner/UsersPage.vue'
+import ProjectDetailPage from '../pages/ProjectDetailPage.vue'
+import AuditPage from '../pages/AuditPage.vue'
+import ChatPage from '../pages/ChatPage.vue'
+import FinancePage from '../pages/FinancePage.vue'
+import KnowledgePage from '../pages/KnowledgePage.vue'
+import MemoryPage from '../pages/MemoryPage.vue'
+import SoulPage from '../pages/SoulPage.vue'
+import DrivePage from '../pages/owner/DrivePage.vue'
+import ProjectsPage from '../pages/owner/ProjectsPage.vue'
+import UsersPage from '../pages/owner/UsersPage.vue'
+
+export type AppRole = UserRole
 
 declare module 'vue-router' {
     interface RouteMeta {
         requiresAuth?: boolean
-        roles?: Array<'OWNER' | 'STAFF'>
+        roles?: AppRole[]
     }
 }
 
-const FALLBACK_OWNER_PATH = '/owner'
+const ALL_ROLES: AppRole[] = ['OWNER', 'MANAGER', 'STAFF']
+const FALLBACK_PATH = '/projects'
 const objectOriginEnvironmentValue = (
     import.meta as ImportMeta & {
         readonly env?: Readonly<Record<string, unknown>>
@@ -55,6 +63,11 @@ function hasUnsafePathText(value: string): boolean {
     return false
 }
 
+export function homePath(role: AppRole | undefined): string {
+    if (role === 'OWNER') return '/chat'
+    return FALLBACK_PATH
+}
+
 export function safePostLoginPath(value: unknown): string {
     if (
         typeof value !== 'string' ||
@@ -63,13 +76,13 @@ export function safePostLoginPath(value: unknown): string {
         value.includes('\\') ||
         hasUnsafePathText(value)
     ) {
-        return FALLBACK_OWNER_PATH
+        return FALLBACK_PATH
     }
     let parsed: URL
     try {
         parsed = new URL(value, 'https://superboss.invalid')
     } catch {
-        return FALLBACK_OWNER_PATH
+        return FALLBACK_PATH
     }
     let decodedPath = parsed.pathname
     try {
@@ -79,7 +92,7 @@ export function safePostLoginPath(value: unknown): string {
             decodedPath = next
         }
     } catch {
-        return FALLBACK_OWNER_PATH
+        return FALLBACK_PATH
     }
     if (
         parsed.origin !== 'https://superboss.invalid' ||
@@ -92,7 +105,7 @@ export function safePostLoginPath(value: unknown): string {
         parsed.pathname === '/auth/callback' ||
         parsed.pathname === '/password/change'
     ) {
-        return FALLBACK_OWNER_PATH
+        return FALLBACK_PATH
     }
     return `${parsed.pathname}${parsed.search}${parsed.hash}`
 }
@@ -103,7 +116,6 @@ export function createAppRouter(
     const router = createRouter({
         history,
         routes: [
-            { path: '/', redirect: '/owner' },
             { path: '/health', name: 'health', component: HealthPage },
             { path: '/login', name: 'login', component: LoginPage },
             {
@@ -114,40 +126,105 @@ export function createAppRouter(
             },
             { path: '/forbidden', name: 'forbidden', component: ForbiddenPage },
             {
-                path: '/owner',
+                path: '/',
                 component: AppLayout,
-                meta: { requiresAuth: true, roles: ['OWNER'] },
+                meta: { requiresAuth: true, roles: ALL_ROLES },
                 children: [
-                    { path: '', name: 'owner-home', component: OwnerHomePage },
+                    { path: '', redirect: FALLBACK_PATH },
                     {
-                        path: 'projects',
-                        name: 'owner-projects',
-                        component: OwnerProjectsPage,
-                    },
-                    {
-                        path: 'users',
-                        name: 'owner-users',
-                        component: OwnerUsersPage,
-                    },
-                    {
-                        path: 'drive',
-                        name: 'owner-drive',
-                        component: OwnerDrivePage,
+                        path: 'chat',
+                        name: 'chat',
+                        component: ChatPage,
+                        meta: { roles: ['OWNER'] },
                         props: {
                             allowedObjectOrigin: configuredObjectOrigin,
                         },
                     },
                     {
-                        path: 'devices',
-                        name: 'owner-devices',
-                        component: OwnerDevicesPage,
+                        path: 'soul',
+                        name: 'soul',
+                        component: SoulPage,
+                        meta: { roles: ['OWNER'] },
                     },
                     {
-                        path: 'import-jobs',
-                        name: 'owner-import-jobs',
-                        component: OwnerImportJobsPage,
+                        path: 'memory',
+                        name: 'memory',
+                        component: MemoryPage,
+                        meta: { roles: ['OWNER'] },
+                    },
+                    {
+                        path: 'projects',
+                        name: 'projects',
+                        component: ProjectsPage,
+                    },
+                    {
+                        path: 'projects/:projectId',
+                        name: 'project-detail',
+                        component: ProjectDetailPage,
+                    },
+                    {
+                        path: 'drive',
+                        name: 'drive',
+                        component: DrivePage,
+                        props: {
+                            allowedObjectOrigin: configuredObjectOrigin,
+                        },
+                    },
+                    {
+                        path: 'finance',
+                        name: 'finance',
+                        component: FinancePage,
+                    },
+                    {
+                        path: 'knowledge',
+                        name: 'knowledge',
+                        component: KnowledgePage,
+                    },
+                    {
+                        path: 'audit',
+                        name: 'audit',
+                        component: AuditPage,
+                        meta: { roles: ['OWNER'] },
+                    },
+                    {
+                        path: 'users',
+                        name: 'users',
+                        component: UsersPage,
+                        meta: { roles: ['OWNER'] },
                     },
                 ],
+            },
+            {
+                path: '/owner',
+                redirect: (to) => ({
+                    path: FALLBACK_PATH,
+                    query: to.query,
+                    hash: to.hash,
+                }),
+            },
+            {
+                path: '/owner/projects',
+                redirect: (to) => ({
+                    path: '/projects',
+                    query: to.query,
+                    hash: to.hash,
+                }),
+            },
+            {
+                path: '/owner/drive',
+                redirect: (to) => ({
+                    path: '/drive',
+                    query: to.query,
+                    hash: to.hash,
+                }),
+            },
+            {
+                path: '/owner/users',
+                redirect: (to) => ({
+                    path: '/users',
+                    query: to.query,
+                    hash: to.hash,
+                }),
             },
         ],
     })
@@ -173,9 +250,7 @@ export function createAppRouter(
             }
         }
         if (to.name === 'login' || to.name === 'password-change') {
-            return auth.user?.role === 'OWNER'
-                ? FALLBACK_OWNER_PATH
-                : '/forbidden'
+            return homePath(auth.user?.role)
         }
         if (
             to.meta.roles &&
@@ -239,8 +314,8 @@ export function createAppRouter(
             !current.meta.roles.includes(auth.user.role)
         ) {
             await router.replace({ name: 'forbidden' })
-        } else if (current.name === 'forbidden' && auth.user.role === 'OWNER') {
-            await router.replace({ name: 'owner-home' })
+        } else if (current.name === 'forbidden') {
+            await router.replace(homePath(auth.user.role))
         }
     })
 

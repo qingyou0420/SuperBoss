@@ -9,11 +9,12 @@ from collections.abc import Sequence
 from alembic import op
 
 from superboss.core.db import Base
+from superboss.modules.agent import models as agent_models  # noqa: F401
 from superboss.modules.audit import models as audit_models  # noqa: F401
 from superboss.modules.auth import models as auth_models  # noqa: F401
-from superboss.modules.devices import models as device_models  # noqa: F401
 from superboss.modules.files import models as file_models  # noqa: F401
-from superboss.modules.imports import models as import_models  # noqa: F401
+from superboss.modules.finance import models as finance_models  # noqa: F401
+from superboss.modules.knowledge import models as knowledge_models  # noqa: F401
 from superboss.modules.projects import models as project_models  # noqa: F401
 from superboss.modules.users import models as user_models  # noqa: F401
 

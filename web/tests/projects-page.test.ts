@@ -1,9 +1,12 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/vue'
 import ElementPlus from 'element-plus'
+import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { createMemoryHistory, createRouter } from 'vue-router'
 
 import { projectsApi } from '../src/api/projects'
 import ProjectsPage from '../src/pages/owner/ProjectsPage.vue'
+import { useAuthStore } from '../src/stores/auth'
 
 vi.mock('../src/api/projects', () => ({
     projectsApi: {
@@ -13,21 +16,50 @@ vi.mock('../src/api/projects', () => ({
 }))
 
 const mockedProjects = vi.mocked(projectsApi)
+const extras = {
+    description: '',
+    stage: 'PLANNING' as const,
+    progress_percent: 0,
+    starts_on: null,
+    due_on: null,
+    milestones: [],
+}
 const regular = {
     id: '019f2b8e-18f0-7f31-9f42-3e6a76b9f810',
     name: '正式项目',
     is_test: false,
     status: 'ACTIVE' as const,
+    ...extras,
 }
 const acceptance = {
     id: '019f2b8e-18f0-7f31-9f42-3e6a76b9f811',
     name: '员工验收沙盒',
     is_test: true,
     status: 'ACTIVE' as const,
+    ...extras,
 }
 
 function renderPage() {
-    return render(ProjectsPage, { global: { plugins: [ElementPlus] } })
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const auth = useAuthStore()
+    auth.user = {
+        username: 'owner',
+        display_name: 'Owner',
+        role: 'OWNER',
+        must_change_password: false,
+    }
+    const router = createRouter({
+        history: createMemoryHistory(),
+        routes: [
+            { path: '/projects', component: ProjectsPage },
+            { path: '/projects/:projectId', component: ProjectsPage },
+        ],
+    })
+    void router.push('/projects')
+    return render(ProjectsPage, {
+        global: { plugins: [pinia, router, ElementPlus] },
+    })
 }
 
 beforeEach(() => {

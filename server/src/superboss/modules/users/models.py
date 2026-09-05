@@ -24,6 +24,7 @@ from superboss.core.db import Base
 
 class Role(StrEnum):
     OWNER = "OWNER"
+    MANAGER = "MANAGER"
     STAFF = "STAFF"
 
 
@@ -35,7 +36,7 @@ class UserStatus(StrEnum):
 class User(Base):
     __tablename__ = "users"
     __table_args__ = (
-        CheckConstraint("role IN ('OWNER', 'STAFF')", name="ck_users_role"),
+        CheckConstraint("role IN ('OWNER', 'MANAGER', 'STAFF')", name="ck_users_role"),
         CheckConstraint("status IN ('ACTIVE', 'DISABLED')", name="ck_users_status"),
         CheckConstraint(
             "username ~ '^[a-z][a-z0-9._-]{2,31}$'", name="ck_users_username"

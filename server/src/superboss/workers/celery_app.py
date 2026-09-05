@@ -10,7 +10,11 @@ celery_app = Celery(
     "superboss",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["superboss.modules.files.tasks", "superboss.workers.schedules"],
+    include=[
+        "superboss.modules.files.tasks",
+        "superboss.modules.agent.tasks",
+        "superboss.workers.schedules",
+    ],
 )
 celery_app.conf.update(
     accept_content=["json"],
@@ -19,7 +23,12 @@ celery_app.conf.update(
             "task": "superboss.files.recover_stale_uploads",
             "schedule": 3600.0,
             "options": {"queue": "file-scan"},
-        }
+        },
+        "agent-daily-digest": {
+            "task": "superboss.agent.daily_digest",
+            "schedule": 86400.0,
+            "options": {"queue": "file-scan"},
+        },
     },
     broker_connection_retry_on_startup=True,
     result_serializer="json",
@@ -29,6 +38,8 @@ celery_app.conf.update(
     task_routes={
         "superboss.files.recover_stale_uploads": {"queue": "file-scan"},
         "superboss.files.scan": {"queue": "file-scan"},
+        "superboss.agent.extract_memories": {"queue": "file-scan"},
+        "superboss.agent.daily_digest": {"queue": "file-scan"},
     },
     task_serializer="json",
     timezone="UTC",

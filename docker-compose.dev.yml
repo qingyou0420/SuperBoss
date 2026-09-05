@@ -124,6 +124,7 @@ services:
 
   clamav:
     image: clamav/clamav:1.5.3
+    profiles: ["scan"]
     volumes:
       - clamav-database:/var/lib/clamav
       - ./server/config/clamd.conf:/etc/clamav/clamd.conf:ro
@@ -202,6 +203,7 @@ services:
         condition: service_completed_successfully
       clamav:
         condition: service_healthy
+        required: false
     volumes:
       - celery-beat-data:/var/lib/celery
     networks:

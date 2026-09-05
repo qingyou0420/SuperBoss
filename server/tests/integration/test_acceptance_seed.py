@@ -130,8 +130,8 @@ def test_seed_rolls_back_users_on_project_conflict(postgres_database: str) -> No
     _run(
         _execute(
             postgres_database,
-            "INSERT INTO projects (id,name,is_test,status) "
-            "VALUES (gen_random_uuid(),$1,false,'ACTIVE')",
+            "INSERT INTO projects (id,name,description,is_test,status,stage,progress_percent) "
+            "VALUES (gen_random_uuid(),$1,'',false,'ACTIVE','PLANNING',0)",
             NORMAL_PROJECT_NAME.lower(),
         )
     )

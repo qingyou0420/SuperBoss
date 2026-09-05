@@ -19,7 +19,7 @@ export interface OwnerUser {
     id: string
     username: string
     display_name: string
-    role: 'OWNER' | 'STAFF'
+    role: 'OWNER' | 'MANAGER' | 'STAFF'
     status: 'ACTIVE' | 'DISABLED'
     last_login_at: string | null
     projects: UserProject[]
@@ -28,6 +28,7 @@ export interface OwnerUser {
 export interface StaffCreate {
     username: string
     display_name: string
+    role?: 'MANAGER' | 'STAFF'
     project_ids: string[]
 }
 
@@ -43,6 +44,7 @@ export interface PasswordResetResult {
 export interface StaffUpdate {
     display_name?: string
     status?: 'ACTIVE' | 'DISABLED'
+    role?: 'MANAGER' | 'STAFF'
 }
 
 export interface UsersApi {
@@ -128,7 +130,9 @@ function user(value: unknown): OwnerUser {
         !UUID.test(value.id) ||
         !username(value.username) ||
         !text(value.display_name) ||
-        (value.role !== 'OWNER' && value.role !== 'STAFF') ||
+        (value.role !== 'OWNER' &&
+            value.role !== 'MANAGER' &&
+            value.role !== 'STAFF') ||
         (value.status !== 'ACTIVE' && value.status !== 'DISABLED') ||
         (value.last_login_at !== null &&
             (typeof value.last_login_at !== 'string' ||
@@ -166,9 +170,12 @@ function createCommand(value: StaffCreate): StaffCreate {
         !text(value.display_name)
     )
         throw new UserContractError()
+    const role = value.role ?? 'STAFF'
+    if (role !== 'STAFF' && role !== 'MANAGER') throw new UserContractError()
     return {
         username: value.username,
         display_name: value.display_name,
+        role,
         project_ids: ids(value.project_ids),
     }
 }
@@ -205,6 +212,8 @@ function update(value: StaffUpdate): StaffUpdate {
         value.status !== 'ACTIVE' &&
         value.status !== 'DISABLED'
     )
+        throw new UserContractError()
+    if ('role' in value && value.role !== 'STAFF' && value.role !== 'MANAGER')
         throw new UserContractError()
     return value
 }

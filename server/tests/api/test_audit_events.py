@@ -54,29 +54,33 @@ async def _latest_event(session: AsyncSession) -> AuditLog:
 
 
 @pytest.mark.asyncio
-async def test_records_denied_foreign_project_read_with_response_request_id(
+async def test_records_denied_staff_project_update_with_response_request_id(
     client: TestClient, db_session: AsyncSession
 ) -> None:
-    """Dropping denied evidence would hide staff attempts to access other projects."""
+    """Dropping denied evidence would hide staff attempts to change projects."""
     staff = local_user("staff-1", display_name="Staff")
     foreign_project = Project(name="Foreign")
     db_session.add_all([staff, foreign_project])
     await db_session.commit()
     _login(client, "staff-code")
 
-    response = client.get(f"/api/v1/projects/{foreign_project.id}")
+    response = client.patch(
+        f"/api/v1/projects/{foreign_project.id}",
+        json={"name": "Nope"},
+        headers={"X-CSRF-Token": str(client.cookies.get("XSRF-TOKEN"))},
+    )
 
     assert response.status_code == 403
     events = list(
         (
             await db_session.scalars(
-                select(AuditLog).where(AuditLog.action == "project.read")
+                select(AuditLog).where(AuditLog.action == "project.update")
             )
         ).all()
     )
     assert len(events) == 1
     event = events[0]
-    assert event.action == "project.read"
+    assert event.action == "project.update"
     assert event.outcome == "DENIED"
     assert event.project_id == foreign_project.id
     assert event.object_type == "project"

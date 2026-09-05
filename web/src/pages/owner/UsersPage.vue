@@ -7,6 +7,7 @@ const users = ref<OwnerUser[]>([])
 const projects = ref<Project[]>([])
 const username = ref('')
 const displayName = ref('')
+const createRole = ref<'STAFF' | 'MANAGER'>('STAFF')
 const temporaryPassword = ref('')
 const credentialDialogOpen = ref(false)
 const loading = ref(false)
@@ -68,11 +69,13 @@ async function add(): Promise<void> {
         const created = await usersApi.create({
             username: username.value,
             display_name: displayName.value,
+            role: createRole.value,
             project_ids: [],
         })
         users.value.push(created.user)
         username.value = ''
         displayName.value = ''
+        createRole.value = 'STAFF'
         showTemporaryPassword(created.temporary_password)
     } catch (error) {
         errorMessage.value = userErrorMessage(error)
@@ -115,6 +118,18 @@ async function assign(user: OwnerUser, projectIds: string[]): Promise<void> {
     }
 }
 
+async function setRole(
+    user: OwnerUser,
+    role: 'MANAGER' | 'STAFF',
+): Promise<void> {
+    if (user.role === role) return
+    try {
+        replace(await usersApi.update(user.id, { role }))
+    } catch (error) {
+        errorMessage.value = userErrorMessage(error)
+    }
+}
+
 onMounted(load)
 onBeforeUnmount(clearTemporaryPassword)
 </script>
@@ -123,7 +138,7 @@ onBeforeUnmount(clearTemporaryPassword)
     <section class="users-page" aria-labelledby="users-title">
         <header>
             <p class="eyebrow">OWNER</p>
-            <h1 id="users-title">员工账号</h1>
+            <h1 id="users-title">账号管理</h1>
         </header>
         <el-card shadow="never">
             <form class="add-form" @submit.prevent="add">
@@ -136,12 +151,17 @@ onBeforeUnmount(clearTemporaryPassword)
                 />
                 <label for="display-name">显示名称</label>
                 <el-input id="display-name" v-model="displayName" />
+                <label for="create-role">角色</label>
+                <select id="create-role" v-model="createRole">
+                    <option value="STAFF">员工</option>
+                    <option value="MANAGER">管理层</option>
+                </select>
                 <el-button
                     native-type="submit"
                     type="primary"
                     :loading="saving"
                     :disabled="saving"
-                    >添加员工</el-button
+                    >添加账号</el-button
                 >
             </form>
         </el-card>
@@ -172,9 +192,19 @@ onBeforeUnmount(clearTemporaryPassword)
                     </div>
                     <div class="user-actions">
                         <el-button
-                            v-if="user.role === 'STAFF'"
+                            v-if="user.role !== 'OWNER'"
                             @click="resetPassword(user)"
                             >重置密码</el-button
+                        >
+                        <el-button
+                            v-if="user.role === 'STAFF'"
+                            @click="setRole(user, 'MANAGER')"
+                            >设为管理层</el-button
+                        >
+                        <el-button
+                            v-if="user.role === 'MANAGER'"
+                            @click="setRole(user, 'STAFF')"
+                            >设为员工</el-button
                         >
                         <el-button
                             :type="
@@ -188,7 +218,7 @@ onBeforeUnmount(clearTemporaryPassword)
                     </div>
                 </div>
                 <el-checkbox-group
-                    v-if="user.role === 'STAFF'"
+                    v-if="user.role !== 'OWNER'"
                     :model-value="user.projects.map((project) => project.id)"
                     @change="
                         (ids: unknown[]) =>
@@ -246,9 +276,17 @@ onBeforeUnmount(clearTemporaryPassword)
 }
 .add-form {
     display: grid;
-    grid-template-columns: 1fr 1fr auto;
+    grid-template-columns: 1fr 1fr auto auto;
     gap: 10px;
     align-items: end;
+}
+.add-form select {
+    min-height: 2.5rem;
+    padding: 0.45rem 0.6rem;
+    color: #303133;
+    background: #fff;
+    border: 1px solid #dcdfe6;
+    border-radius: 6px;
 }
 .user-row,
 .user-actions {

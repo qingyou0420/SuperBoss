@@ -193,11 +193,11 @@ async def test_recovery_replaces_hash_and_revokes_every_owner_session(
         AuthSession(
             user_id=created.user_id,
             access_jti=uuid4().hex,
-            refresh_token_hash=uuid4().hex,
+            refresh_token_hash=f"{index:02x}" * 32,
             access_expires_at=now + timedelta(hours=2),
             refresh_expires_at=now + timedelta(days=14),
         )
-        for _ in range(2)
+        for index in range(2)
     ]
     db_session.add_all(sessions)
     await db_session.commit()

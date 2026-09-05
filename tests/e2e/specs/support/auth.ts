@@ -18,7 +18,7 @@ export async function csrfHeaders(
 
 export async function loginThroughLocalAccount(
     page: Page,
-    expectedRole: 'OWNER' | 'STAFF',
+    expectedRole: 'OWNER' | 'MANAGER' | 'STAFF',
     credentials: LocalCredentials,
 ): Promise<void> {
     const appCookies = (await page.context().cookies(e2e.baseUrl)).filter(
@@ -35,19 +35,14 @@ export async function loginThroughLocalAccount(
     await page.getByLabel('用户名').fill(credentials.username)
     await page.getByLabel('密码').fill(credentials.password)
     await page.getByRole('button', { name: '登录' }).click()
+    const homePath = expectedRole === 'OWNER' ? '/chat' : '/projects'
     await page.waitForURL(
-        (url) =>
-            url.origin === e2e.baseUrl &&
-            (url.pathname === '/owner' || url.pathname === '/forbidden'),
+        (url) => url.origin === e2e.baseUrl && url.pathname === homePath,
         { timeout: 120_000 },
     )
     const me = await page.request.get('/api/v1/auth/me')
     expect(me.status()).toBe(200)
     const identity = (await me.json()) as { role: string }
     expect(identity.role).toBe(expectedRole)
-    if (expectedRole === 'OWNER') {
-        await expect(page).toHaveURL(`${e2e.baseUrl}/owner`)
-    } else {
-        await expect(page).toHaveURL(`${e2e.baseUrl}/forbidden`)
-    }
+    await expect(page).toHaveURL(`${e2e.baseUrl}${homePath}`)
 }

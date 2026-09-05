@@ -13,19 +13,19 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from testcontainers.community.postgres import PostgresContainer
 
 from superboss.core.config import Settings
+from superboss.modules.agent.models import (
+    AgentCard,
+    AgentConversation,
+    AgentMemory,
+    AgentMessage,
+    AgentSoulVersion,
+)
 from superboss.modules.audit.models import AuditLog
 from superboss.modules.auth.models import AuthSession
-from superboss.modules.devices.models import (
-    DeviceConnection,
-    DevicePairingCode,
-    DevicePairingProject,
-    DeviceProjectGrant,
-    DeviceScopeGrant,
-)
-from superboss.modules.files.models import (
-    File,
-)
-from superboss.modules.projects.models import Project, ProjectMember
+from superboss.modules.files.models import File, Folder
+from superboss.modules.finance.models import FinanceAdjustment, FinanceEntry
+from superboss.modules.knowledge.models import KnowledgeDoc, KnowledgePoint
+from superboss.modules.projects.models import Project, ProjectMember, ProjectMilestone
 from superboss.modules.users.models import Role, User
 from tests.identity import local_user
 
@@ -62,21 +62,19 @@ async def db_session(postgres_database: str) -> AsyncIterator[AsyncSession]:
     async def clear() -> None:
         async with engine.begin() as connection:
             await connection.execute(delete(AuditLog))
-            try:
-                from superboss.modules.imports import models as import_models
-            except ModuleNotFoundError:
-                # Stage-1 RED intentionally runs before Task 10 production modules exist.
-                pass
-            else:
-                await connection.execute(delete(import_models.ImportAttachment))
-                await connection.execute(delete(import_models.ImportJob))
-            await connection.execute(delete(DeviceScopeGrant))
-            await connection.execute(delete(DeviceProjectGrant))
             await connection.execute(delete(AuthSession))
-            await connection.execute(delete(DeviceConnection))
-            await connection.execute(delete(DevicePairingProject))
-            await connection.execute(delete(DevicePairingCode))
+            await connection.execute(delete(AgentCard))
+            await connection.execute(delete(AgentMessage))
+            await connection.execute(delete(AgentConversation))
+            await connection.execute(delete(AgentMemory))
+            await connection.execute(delete(AgentSoulVersion))
+            await connection.execute(delete(FinanceAdjustment))
+            await connection.execute(delete(FinanceEntry))
+            await connection.execute(delete(KnowledgePoint))
+            await connection.execute(delete(KnowledgeDoc))
             await connection.execute(delete(File))
+            await connection.execute(delete(Folder))
+            await connection.execute(delete(ProjectMilestone))
             await connection.execute(delete(ProjectMember))
             await connection.execute(delete(Project))
             await connection.execute(delete(User))

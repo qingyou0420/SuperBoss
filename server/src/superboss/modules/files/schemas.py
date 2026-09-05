@@ -1,18 +1,19 @@
 import re
-from datetime import date
+from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from superboss.modules.files.models import FileState, FolderVisibility
 
 
 class UploadStart(BaseModel):
-    project_id: UUID
+    folder_id: UUID
     filename: str = Field(min_length=1, max_length=1024)
     size_bytes: int = Field(ge=1, le=100 * 1024 * 1024)
     sha256: str
-    category: str = Field(min_length=1, max_length=255)
-    file_date: date
     content_type: str = Field(default="application/octet-stream", max_length=255)
+    project_id: UUID | None = None
 
     @field_validator("sha256")
     @classmethod
@@ -21,7 +22,7 @@ class UploadStart(BaseModel):
             raise ValueError("sha256 must be 64 lowercase hexadecimal characters")
         return v
 
-    @field_validator("filename", "category")
+    @field_validator("filename")
     @classmethod
     def safe_text(cls, value: str) -> str:
         if not value.strip() or any(ord(char) < 32 or ord(char) == 127 for char in value):
@@ -58,3 +59,56 @@ class UploadComplete(BaseModel):
         if len({part.part_number for part in value}) != len(value):
             raise ValueError("part numbers must be unique")
         return sorted(value, key=lambda part: part.part_number)
+
+
+class FolderCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    parent_id: UUID
+    name: str = Field(min_length=1, max_length=128)
+
+    @field_validator("name")
+    @classmethod
+    def canonical_name(cls, value: str) -> str:
+        normalized = value.strip(" \t\r\n\u00a0")
+        if not 1 <= len(normalized) <= 128:
+            raise ValueError("folder name must contain 1 to 128 characters")
+        return normalized
+
+
+class FolderRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    parent_id: UUID | None
+    name: str
+    visibility: FolderVisibility
+
+
+class FileRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    folder_id: UUID
+    project_id: UUID | None
+    filename: str
+    size_bytes: int
+    content_type: str
+    state: FileState
+    created_at: datetime
+
+
+class FilePatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    filename: str | None = Field(default=None, min_length=1, max_length=1024)
+    folder_id: UUID | None = None
+
+    @field_validator("filename")
+    @classmethod
+    def safe_filename(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.strip() or any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ValueError("filename must contain no control characters")
+        return value.strip()

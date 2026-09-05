@@ -9,17 +9,35 @@ const UUID =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const SHA256 = /^[0-9a-f]{64}$/
 const MIME = /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/
-const DATE = /^\d{4}-\d{2}-\d{2}$/
 const MAX_FILE_BYTES = 100 * 1024 * 1024
 
+export type FolderVisibility = 'ALL' | 'MANAGEMENT' | 'OWNER_ONLY'
+
+export interface DriveFolder {
+    readonly id: string
+    readonly parent_id: string | null
+    readonly name: string
+    readonly visibility: FolderVisibility
+}
+
+export interface DriveFile {
+    readonly id: string
+    readonly folder_id: string
+    readonly project_id: string | null
+    readonly filename: string
+    readonly size_bytes: number
+    readonly content_type: string
+    readonly state: FileUploadCompleted['state'] | 'UPLOADING'
+    readonly created_at: string
+}
+
 export interface FileUploadStart {
-    readonly project_id: string
+    readonly folder_id: string
     readonly filename: string
     readonly size_bytes: number
     readonly sha256: string
-    readonly category: string
-    readonly file_date: string
     readonly content_type: string
+    readonly project_id?: string | null
 }
 
 export interface FileUploadStarted {
@@ -99,37 +117,23 @@ function idempotencyKey(value: unknown): value is string {
     })
 }
 
-function calendarDate(value: string): boolean {
-    if (!DATE.test(value) || value.slice(0, 4) === '0000') return false
-    const parsed = new Date(`${value}T00:00:00.000Z`)
-    return (
-        Number.isFinite(parsed.getTime()) &&
-        parsed.toISOString().slice(0, 10) === value
-    )
-}
-
 function canonicalStart(value: unknown): FileUploadStart {
     if (
         !isRecord(value) ||
         !hasRequiredKeys(value, [
-            'category',
             'content_type',
-            'file_date',
             'filename',
-            'project_id',
+            'folder_id',
             'sha256',
             'size_bytes',
         ]) ||
-        !uuid(value.project_id) ||
+        !uuid(value.folder_id) ||
         !safeText(value.filename, 1024) ||
         !Number.isSafeInteger(value.size_bytes) ||
         (value.size_bytes as number) < 1 ||
         (value.size_bytes as number) > MAX_FILE_BYTES ||
         typeof value.sha256 !== 'string' ||
         !SHA256.test(value.sha256) ||
-        !safeText(value.category, 255) ||
-        typeof value.file_date !== 'string' ||
-        !calendarDate(value.file_date) ||
         typeof value.content_type !== 'string' ||
         value.content_type.length > 255 ||
         !MIME.test(value.content_type)
@@ -137,11 +141,9 @@ function canonicalStart(value: unknown): FileUploadStart {
         throw new FileContractError()
     }
     return {
-        category: value.category,
         content_type: value.content_type,
-        file_date: value.file_date,
         filename: value.filename,
-        project_id: value.project_id,
+        folder_id: value.folder_id,
         sha256: value.sha256,
         size_bytes: value.size_bytes as number,
     }
@@ -214,6 +216,62 @@ function terminalDownloadState(
     if (failure.data.error.code === 'FILE_INFECTED') return 'INFECTED'
     if (failure.data.error.code === 'FILE_SCAN_FAILED') return 'FAILED'
     return undefined
+}
+
+function parseFolder(value: unknown): DriveFolder {
+    if (
+        !isRecord(value) ||
+        !hasRequiredKeys(value, ['id', 'name', 'parent_id', 'visibility']) ||
+        !uuid(value.id) ||
+        !safeText(value.name, 128) ||
+        (value.parent_id !== null && !uuid(value.parent_id)) ||
+        (value.visibility !== 'ALL' &&
+            value.visibility !== 'MANAGEMENT' &&
+            value.visibility !== 'OWNER_ONLY')
+    ) {
+        throw new FileContractError()
+    }
+    return {
+        id: value.id,
+        parent_id: value.parent_id,
+        name: value.name,
+        visibility: value.visibility,
+    }
+}
+
+function parseDriveFile(value: unknown): DriveFile {
+    if (
+        !isRecord(value) ||
+        !hasRequiredKeys(value, [
+            'content_type',
+            'created_at',
+            'filename',
+            'folder_id',
+            'id',
+            'project_id',
+            'size_bytes',
+            'state',
+        ]) ||
+        !uuid(value.id) ||
+        !uuid(value.folder_id) ||
+        (value.project_id !== null && !uuid(value.project_id)) ||
+        !safeText(value.filename, 1024) ||
+        !Number.isSafeInteger(value.size_bytes) ||
+        typeof value.content_type !== 'string' ||
+        typeof value.created_at !== 'string'
+    ) {
+        throw new FileContractError()
+    }
+    return {
+        id: value.id,
+        folder_id: value.folder_id,
+        project_id: value.project_id,
+        filename: value.filename,
+        size_bytes: value.size_bytes as number,
+        content_type: value.content_type,
+        state: value.state as DriveFile['state'],
+        created_at: value.created_at,
+    }
 }
 
 function parseUrl(value: unknown): string {
@@ -299,6 +357,53 @@ export function createFilesApi(client: BrowserHttpClient) {
             }
             if (response.status !== 200) throw new FileContractError()
             return parseUrl(response.data)
+        },
+        async listFolders(): Promise<DriveFolder[]> {
+            const response = await client.get('/folders')
+            if (response.status !== 200 || !Array.isArray(response.data)) {
+                throw new FileContractError()
+            }
+            return response.data.map(parseFolder)
+        },
+        async createFolder(parentId: string, name: string): Promise<DriveFolder> {
+            if (!uuid(parentId) || !safeText(name, 128)) throw new FileContractError()
+            const response = await client.post('/folders', {
+                parent_id: parentId,
+                name,
+            })
+            if (response.status !== 201) throw new FileContractError()
+            return parseFolder(response.data)
+        },
+        async listFiles(folderId: string): Promise<DriveFile[]> {
+            if (!uuid(folderId)) throw new FileContractError()
+            const response = await client.get('/files', {
+                params: { folder_id: folderId },
+            })
+            if (response.status !== 200 || !Array.isArray(response.data)) {
+                throw new FileContractError()
+            }
+            return response.data.map(parseDriveFile)
+        },
+        async rename(fileId: string, filename: string): Promise<DriveFile> {
+            if (!uuid(fileId) || !safeText(filename, 1024)) {
+                throw new FileContractError()
+            }
+            const response = await client.patch(`/files/${fileId}`, { filename })
+            if (response.status !== 200) throw new FileContractError()
+            return parseDriveFile(response.data)
+        },
+        async move(fileId: string, folderId: string): Promise<DriveFile> {
+            if (!uuid(fileId) || !uuid(folderId)) throw new FileContractError()
+            const response = await client.patch(`/files/${fileId}`, {
+                folder_id: folderId,
+            })
+            if (response.status !== 200) throw new FileContractError()
+            return parseDriveFile(response.data)
+        },
+        async remove(fileId: string): Promise<void> {
+            if (!uuid(fileId)) throw new FileContractError()
+            const response = await client.delete(`/files/${fileId}`)
+            if (response.status !== 204) throw new FileContractError()
         },
     })
 }

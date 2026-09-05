@@ -28,7 +28,7 @@ async def test_record_redacts_forbidden_metadata_keys_at_every_depth(
     assert db_session.bind is not None
     event_id = await AuditService(async_sessionmaker(db_session.bind, expire_on_commit=False)).record(
         AuditEventInput(
-            actor=Actor("user", actor_id, Role.OWNER, frozenset(), frozenset()),
+            actor=Actor(actor_id, Role.OWNER),
             action="project.read",
             object_type="project",
             object_id=project.id,
@@ -69,7 +69,7 @@ async def test_record_reuses_identical_event_key_without_second_audit_row(
     db_session: AsyncSession,
 ) -> None:
     """A durable delivery retry must be append-only and exactly once."""
-    actor = Actor("user", uuid4(), Role.OWNER, frozenset(), frozenset())
+    actor = Actor(uuid4(), Role.OWNER)
     event_key = uuid4()
     event = AuditEventInput(
         actor=actor,
@@ -95,7 +95,7 @@ def test_audit_metadata_rejects_non_json_objects() -> None:
     """Coercing arbitrary objects can persist opaque, non-portable audit metadata."""
     with pytest.raises(ValidationError, match="invalid audit metadata"):
         AuditEventInput(
-            actor=Actor("user", uuid4(), Role.OWNER, frozenset(), frozenset()),
+            actor=Actor(uuid4(), Role.OWNER),
             action="project.read",
             object_type="project",
             outcome="SUCCESS",
@@ -115,7 +115,7 @@ def test_audit_metadata_rejects_non_json_objects() -> None:
 def test_audit_metadata_redacts_unicode_equivalent_sensitive_keys(key: str) -> None:
     """Unicode compatibility spellings must not bypass credential redaction."""
     event = AuditEventInput(
-        actor=Actor("user", uuid4(), Role.OWNER, frozenset(), frozenset()),
+        actor=Actor(uuid4(), Role.OWNER),
         action="project.read",
         object_type="project",
         outcome="SUCCESS",
@@ -139,7 +139,7 @@ def test_audit_metadata_rejects_cycles_and_excessive_depth(metadata: dict[str, o
             cursor = next_value
     with pytest.raises(ValidationError):
         AuditEventInput(
-            actor=Actor("user", uuid4(), Role.OWNER, frozenset(), frozenset()),
+            actor=Actor(uuid4(), Role.OWNER),
             action="project.read",
             object_type="project",
             outcome="SUCCESS",
@@ -156,7 +156,7 @@ def test_forbidden_metadata_values_are_still_validated(key: str, invalid: object
     """Redaction must not make malformed sensitive values silently acceptable."""
     with pytest.raises(ValidationError, match="invalid audit metadata") as error:
         AuditEventInput(
-            actor=Actor("user", uuid4(), Role.OWNER, frozenset(), frozenset()),
+            actor=Actor(uuid4(), Role.OWNER),
             action="project.read",
             object_type="project",
             outcome="SUCCESS",
@@ -175,7 +175,7 @@ def test_forbidden_metadata_cycles_are_still_rejected(key: str) -> None:
     cycle[key] = cycle
     with pytest.raises(ValidationError, match="invalid audit metadata"):
         AuditEventInput(
-            actor=Actor("user", uuid4(), Role.OWNER, frozenset(), frozenset()),
+            actor=Actor(uuid4(), Role.OWNER),
             action="project.read",
             object_type="project",
             outcome="SUCCESS",
@@ -189,7 +189,7 @@ def test_audit_metadata_rejects_values_that_exceed_json_size_budget(metadata: di
     """Oversized accepted values would otherwise fail later in the database JSON serializer."""
     with pytest.raises(ValidationError, match="invalid audit metadata"):
         AuditEventInput(
-            actor=Actor("user", uuid4(), Role.OWNER, frozenset(), frozenset()),
+            actor=Actor(uuid4(), Role.OWNER),
             action="project.read",
             object_type="project",
             outcome="SUCCESS",
@@ -203,7 +203,7 @@ def test_audit_metadata_copy_and_redaction_do_not_mutate_caller() -> None:
     metadata: dict[str, object] = {"nested": [{"access_token": "ORIGINAL-SECRET"}]}
     original = copy.deepcopy(metadata)
     event = AuditEventInput(
-        actor=Actor("user", uuid4(), Role.OWNER, frozenset(), frozenset()),
+        actor=Actor(uuid4(), Role.OWNER),
         action="project.read",
         object_type="project",
         outcome="SUCCESS",

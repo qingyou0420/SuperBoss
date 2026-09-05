@@ -1,27 +1,54 @@
 <script setup lang="ts">
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
+import { apiClient } from '../api/http'
 import { useAuthStore } from '../stores/auth'
+import { homePath } from '../app/router'
 
 const auth = useAuthStore()
 const router = useRouter()
+const home = computed(() => homePath(auth.user?.role))
+const isOwner = computed(() => auth.user?.role === 'OWNER')
+const reminders = ref<string[]>([])
 
 async function logout(): Promise<void> {
     await auth.logout()
     await router.replace('/login')
 }
+
+onMounted(async () => {
+    try {
+        const response = await apiClient.get('/projects/reminders')
+        if (response.status === 200 && Array.isArray(response.data)) {
+            reminders.value = response.data
+                .map((item) =>
+                    typeof item === 'object' && item && 'message' in item
+                        ? String((item as { message: unknown }).message)
+                        : '',
+                )
+                .filter(Boolean)
+        }
+    } catch {
+        reminders.value = []
+    }
+})
 </script>
 
 <template>
     <div class="app-layout">
         <header class="app-layout__header">
-            <router-link to="/owner">SuperBoss</router-link>
-            <nav class="app-layout__navigation" aria-label="OWNER 导航">
-                <router-link to="/owner/projects">项目</router-link>
-                <router-link to="/owner/drive">文件上传</router-link>
-                <router-link to="/owner/devices">设备</router-link>
-                <router-link to="/owner/import-jobs">导入任务</router-link>
-                <router-link to="/owner/users">Users</router-link>
+            <router-link :to="home">SuperBoss</router-link>
+            <nav class="app-layout__navigation" aria-label="工作台导航">
+                <router-link v-if="isOwner" to="/chat">霜月</router-link>
+                <router-link to="/projects">项目</router-link>
+                <router-link to="/finance">财务</router-link>
+                <router-link to="/drive">网盘</router-link>
+                <router-link to="/knowledge">知识库</router-link>
+                <router-link v-if="isOwner" to="/memory">记忆</router-link>
+                <router-link v-if="isOwner" to="/soul">SOUL</router-link>
+                <router-link v-if="isOwner" to="/audit">审计</router-link>
+                <router-link v-if="isOwner" to="/users">账号</router-link>
             </nav>
             <div class="app-layout__account">
                 <span>{{
@@ -31,6 +58,16 @@ async function logout(): Promise<void> {
             </div>
         </header>
         <main class="app-layout__content">
+            <el-alert
+                v-for="item in reminders"
+                :key="item"
+                type="warning"
+                :closable="false"
+                show-icon
+                style="margin-bottom: 12px"
+            >
+                {{ item }}
+            </el-alert>
             <router-view />
         </main>
     </div>

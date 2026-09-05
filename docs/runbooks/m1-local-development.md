@@ -69,12 +69,6 @@ npm run typecheck
 npm run build
 Pop-Location
 
-Push-Location integrations/kimi-superboss/connector
-uv run pytest -v
-uv run ruff check .
-uv run mypy src
-Pop-Location
-
 npm --prefix tests/e2e ci
 npm --prefix tests/e2e run test:contracts
 npm --prefix tests/e2e run typecheck

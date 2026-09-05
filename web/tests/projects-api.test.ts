@@ -37,8 +37,14 @@ function clientReturning(data: unknown, status = 200) {
 const project = {
     id: '019f2b8e-18f0-7f31-9f42-3e6a76b9f810',
     name: '客户方案',
+    description: '',
     is_test: true,
     status: 'ACTIVE' as const,
+    stage: 'PLANNING' as const,
+    progress_percent: 0,
+    starts_on: null,
+    due_on: null,
+    milestones: [],
 }
 
 const projectConflictBody = {

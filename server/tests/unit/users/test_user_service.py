@@ -22,11 +22,11 @@ from tests.identity import local_user
 
 
 def owner_actor(user: User) -> Actor:
-    return Actor("user", user.id, Role.OWNER, frozenset(), frozenset())
+    return Actor(user.id, Role.OWNER)
 
 
 def staff_actor(user: User) -> Actor:
-    return Actor("user", user.id, Role.STAFF, frozenset(), frozenset())
+    return Actor(user.id, Role.STAFF)
 
 
 @pytest.mark.asyncio
@@ -133,10 +133,10 @@ async def test_denied_events_are_bounded_and_success_audit_is_only_written_after
     service = OwnerUserService(db_session, AuditService(async_sessionmaker(db_session.bind, expire_on_commit=False)))
     request_id = uuid4()
     with pytest.raises(ForbiddenError):
-        await service.list_users(Actor("device", uuid4(), None, frozenset(), frozenset()), request_id)
+        await service.list_users(Actor(uuid4(), Role.STAFF), request_id)
     denied = await db_session.scalar(select(AuditLog).where(AuditLog.request_id == request_id))
     assert denied is not None and denied.outcome == "DENIED"
-    assert denied.metadata_json == {"actor_role": None, "reason": "OWNER_REQUIRED"}
+    assert denied.metadata_json == {"actor_role": "STAFF", "reason": "OWNER_REQUIRED"}
 
     created = await service.create_staff(owner_actor(active_owner), StaffCreate(username="staff-audit", display_name="Audit", project_ids=[]), uuid4())
     await service.commit_and_record_success(owner_actor(active_owner), "user.create", uuid4(), created.user.id)

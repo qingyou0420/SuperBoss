@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from datetime import date
 from typing import Any
 from uuid import UUID
 
@@ -12,7 +11,8 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from superboss.modules.files.models import File, FileState
-from superboss.modules.projects.models import Project
+from tests.files.factory import add_folder
+from tests.identity import local_user
 
 
 @dataclass
@@ -94,20 +94,18 @@ async def quarantined_file(
     state: FileState = FileState.QUARANTINED,
     content: bytes = b"safe document",
 ) -> File:
-    project = Project(name=f"Scan {state.value} {id(content)}")
-    session.add(project)
+    owner = local_user(f"scan{id(content) % 10_000_000:07d}", display_name="Scan")
+    session.add(owner)
     await session.flush()
+    folder = await add_folder(session, owner.id)
     file = File(
-        project_id=project.id,
+        folder_id=folder.id,
         filename="report.pdf",
-        category="docs",
-        file_date=date(2026, 8, 9),
-        object_key=f"projects/{project.id}/docs/report.pdf",
+        object_key=f"folders/{folder.id}/docs/report.pdf",
         size_bytes=len(content),
         sha256=hashlib.sha256(content).hexdigest(),
         state=state,
-        uploader_id=project.id,
-        uploader_kind="system",
+        uploader_id=owner.id,
         content_type="application/pdf",
     )
     session.add(file)
@@ -115,9 +113,7 @@ async def quarantined_file(
     return file
 
 
-async def persisted_file(
-    factory: async_sessionmaker[AsyncSession], file_id: UUID
-) -> File:
+async def persisted_file(factory: async_sessionmaker[AsyncSession], file_id: UUID) -> File:
     async with factory() as session:
         file = await session.get(File, file_id)
         assert file is not None

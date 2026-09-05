@@ -1,12 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
 
 import { expect, test } from '@playwright/test'
 
 import { csrfHeaders, loginThroughLocalAccount } from './support/auth'
 import { e2e } from './support/runtime'
 
-test('独立 STAFF 直接请求项目、设备、导入列表与外项目文件均返回 403', async ({
+test('独立 STAFF 直接请求项目、用户管理、外项目文件与公司财务均被拒绝', async ({
     browser,
     page,
 }, testInfo) => {
@@ -18,27 +17,23 @@ test('独立 STAFF 直接请求项目、设备、导入列表与外项目文件�
     try {
         const ownerPage = await ownerContext.newPage()
         await loginThroughLocalAccount(ownerPage, 'OWNER', e2e.ownerCredentials)
-        const projectResponse = await ownerPage.request.get('/api/v1/projects')
-        expect(projectResponse.status()).toBe(200)
-        const projects = (await projectResponse.json()) as Array<{
+        const foldersResponse = await ownerPage.request.get('/api/v1/folders')
+        expect(foldersResponse.status()).toBe(200)
+        const folders = (await foldersResponse.json()) as Array<{
             id: string
-            is_test: boolean
+            name: string
         }>
-        const acceptanceProject = projects.find((project) => project.is_test)
-        expect(acceptanceProject).toBeDefined()
-        if (acceptanceProject === undefined) {
-            throw new Error('Acceptance project fixture is missing.')
+        const privateFolder = folders.find((folder) => folder.name === '老板私有')
+        expect(privateFolder).toBeDefined()
+        if (privateFolder === undefined) {
+            throw new Error('Private folder fixture is missing.')
         }
-        const fixture = await readFile(
-            e2e.connectorFixtureDir + '/k3-result.json',
-        )
+        const fixture = Buffer.from('SuperBoss staff-denial probe')
         const started = await ownerPage.request.post('/api/v1/files/uploads', {
             data: {
-                category: 'E2E',
-                content_type: 'application/json',
-                file_date: new Date().toISOString().slice(0, 10),
-                filename: 'staff-foreign-probe.json',
-                project_id: acceptanceProject.id,
+                content_type: 'text/plain',
+                filename: 'staff-foreign-probe.txt',
+                folder_id: privateFolder.id,
                 sha256: createHash('sha256').update(fixture).digest('hex'),
                 size_bytes: fixture.byteLength,
             },
@@ -68,22 +63,42 @@ test('独立 STAFF 直接请求项目、设备、导入列表与外项目文件�
         data: { is_test: true, name: `STAFF forbidden ${randomUUID()}` },
         headers,
     })
-    const deviceCreate = await page.request.post(
-        '/api/v1/owner/devices/pairing-codes',
-        {
-            data: { project_ids: [randomUUID()] },
-            headers,
-        },
-    )
-    const importList = await page.request.get(
-        '/api/v1/owner/import-jobs?limit=1',
-    )
+    const userList = await page.request.get('/api/v1/owner/users')
     const foreignFile = await page.request.get(
         `/api/v1/files/${foreignFileId}/download`,
     )
+    const financeSummary = await page.request.get(
+        '/api/v1/finance/summary?month=2026-09',
+    )
+    const agentList = await page.request.get('/api/v1/agent/conversations')
+    const auditList = await page.request.get('/api/v1/audit')
+    const financeCreate = await page.request.post('/api/v1/finance/entries', {
+        data: {
+            amount_cents: 1,
+            category: 'forbidden',
+            kind: 'COST',
+            occurred_on: '2026-09-01',
+            scope: 'COMPANY',
+        },
+        headers,
+    })
 
     expect(projectCreate.status()).toBe(403)
-    expect(deviceCreate.status()).toBe(403)
-    expect(importList.status()).toBe(403)
+    expect(userList.status()).toBe(403)
     expect(foreignFile.status()).toBe(403)
+    expect(financeSummary.status()).toBe(200)
+    const summaryBody = (await financeSummary.json()) as {
+        company?: unknown
+        projects?: Array<Record<string, unknown>>
+    }
+    expect(JSON.stringify(summaryBody)).not.toMatch(/"INCOME"|"COMPANY"/)
+    expect(summaryBody.company).toBeUndefined()
+    expect(
+        (summaryBody.projects ?? []).some(
+            (item) => item.income_cents !== undefined,
+        ),
+    ).toBe(false)
+    expect(financeCreate.status()).toBe(403)
+    expect(agentList.status()).toBe(403)
+    expect(auditList.status()).toBe(403)
 })

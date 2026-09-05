@@ -1,15 +1,15 @@
-"""File upload persistence state."""
+"""File and folder persistence."""
 
-from datetime import date, datetime
+from datetime import datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
     CheckConstraint,
-    Date,
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -17,7 +17,7 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from superboss.core.db import Base
 
@@ -31,13 +31,53 @@ class FileState(StrEnum):
     FAILED = "FAILED"
 
 
+class FolderVisibility(StrEnum):
+    ALL = "ALL"
+    MANAGEMENT = "MANAGEMENT"
+    OWNER_ONLY = "OWNER_ONLY"
+
+
+class Folder(Base):
+    __tablename__ = "folders"
+    __table_args__ = (
+        CheckConstraint(
+            "visibility IN ('ALL','MANAGEMENT','OWNER_ONLY')",
+            name="ck_folders_visibility",
+        ),
+        CheckConstraint(
+            "name = btrim(name, E' \\t\\r\\n' || chr(160))",
+            name="ck_folders_name_trimmed",
+        ),
+        CheckConstraint("char_length(name) BETWEEN 1 AND 128", name="ck_folders_name_length"),
+        Index("ix_folders_parent", "parent_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    parent_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("folders.id", ondelete="CASCADE"), nullable=True
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    visibility: Mapped[FolderVisibility] = mapped_column(
+        Enum(FolderVisibility, name="folder_visibility", native_enum=False),
+        nullable=False,
+    )
+    created_by: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    parent: Mapped["Folder | None"] = relationship(
+        remote_side="Folder.id", back_populates="children"
+    )
+    children: Mapped[list["Folder"]] = relationship(back_populates="parent")
+
+
 class File(Base):
     __tablename__ = "files"
     __table_args__ = (
-        UniqueConstraint("id", "project_id", name="uq_files_id_project"),
         UniqueConstraint(
-            "project_id",
-            "uploader_kind",
+            "folder_id",
             "uploader_id",
             "idempotency_key",
             name="uq_files_upload_idempotency",
@@ -48,9 +88,7 @@ class File(Base):
         ),
         CheckConstraint("size_bytes BETWEEN 1 AND 104857600", name="ck_files_size"),
         CheckConstraint("sha256 ~ '^[0-9a-f]{64}$'", name="ck_files_sha256"),
-        CheckConstraint("uploader_kind IN ('user','device','system')", name="ck_files_uploader_kind"),
         CheckConstraint("char_length(filename) > 0", name="ck_files_filename"),
-        CheckConstraint("char_length(category) > 0", name="ck_files_category"),
         CheckConstraint("char_length(object_key) > 0", name="ck_files_object_key"),
         CheckConstraint("char_length(content_type) > 0", name="ck_files_content_type"),
         CheckConstraint(
@@ -67,12 +105,13 @@ class File(Base):
         ),
     )
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    project_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    folder_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("folders.id", ondelete="RESTRICT"), nullable=False
+    )
+    project_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("projects.id", ondelete="SET NULL"), nullable=True
     )
     filename: Mapped[str] = mapped_column(String(1024), nullable=False)
-    category: Mapped[str] = mapped_column(String(255), nullable=False)
-    file_date: Mapped[date] = mapped_column(Date, nullable=False)
     object_key: Mapped[str] = mapped_column(String(2048), unique=True, nullable=False)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -82,7 +121,6 @@ class File(Base):
         nullable=False,
     )
     uploader_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
-    uploader_kind: Mapped[str] = mapped_column(String(16), default="user", nullable=False)
     content_type: Mapped[str] = mapped_column(String(255), nullable=False)
     scan_result: Mapped[str | None] = mapped_column(Text, nullable=True)
     metadata_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -94,3 +132,4 @@ class File(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+    folder: Mapped[Folder] = relationship()
