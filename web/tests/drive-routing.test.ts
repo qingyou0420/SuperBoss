@@ -309,7 +309,7 @@ describe('Task13 OWNER navigation and Drive integration', () => {
         await fireEvent.click(
             await screen.findByRole('menuitem', { name: '新建子目录' }),
         )
-        await fireEvent.update(screen.getByRole('textbox'), '子目录')
+        await fireEvent.update(await screen.findByLabelText('名称'), '子目录')
         await fireEvent.click(screen.getByRole('button', { name: '创建' }))
         expect(mocks.filesApi.createFolder).toHaveBeenCalledWith(
             PROJECT_ID,
@@ -345,6 +345,47 @@ describe('Task13 OWNER navigation and Drive integration', () => {
         await fireEvent.click(screen.getByRole('button', { name: '放到这里' }))
         expect(mocks.filesApi.move).toHaveBeenCalledWith(FILE_ID, destId)
         expect(screen.queryByText('新方案.pdf')).not.toBeInTheDocument()
+    })
+
+    test('OWNER confirms before deleting a file', async () => {
+        const pinia = createPinia()
+        setActivePinia(pinia)
+        useAuthStore().user = {
+            username: 'owner',
+            display_name: 'Owner',
+            role: 'OWNER',
+            must_change_password: false,
+        }
+        mocks.filesApi.listFiles.mockResolvedValue([
+            {
+                id: FILE_ID,
+                folder_id: PROJECT_ID,
+                project_id: null,
+                filename: '方案.pdf',
+                size_bytes: 12,
+                content_type: 'application/pdf',
+                state: 'CLEAN',
+                created_at: '2026-09-05T00:00:00Z',
+                uploader_name: '',
+            },
+        ])
+        mocks.filesApi.remove.mockResolvedValue(undefined)
+        const module = await import(/* @vite-ignore */ DRIVE_PATH)
+        render(module.default, {
+            props: { allowedObjectOrigin: 'https://objects.example' },
+            global: {
+                plugins: [pinia, ElementPlus],
+                stubs: { MultipartUploader: true },
+            },
+        })
+        expect(await screen.findByText('方案.pdf')).toBeInTheDocument()
+        await fireEvent.click(screen.getAllByRole('button', { name: '···' })[1])
+        await fireEvent.click(
+            await screen.findByRole('menuitem', { name: '删除' }),
+        )
+        expect(mocks.filesApi.remove).not.toHaveBeenCalled()
+        await fireEvent.click(screen.getByRole('button', { name: '确定' }))
+        expect(mocks.filesApi.remove).toHaveBeenCalledWith(FILE_ID)
     })
 
     test('STAFF can download but cannot manage folders or files', async () => {
@@ -395,4 +436,48 @@ describe('Task13 OWNER navigation and Drive integration', () => {
             screen.queryByRole('menuitem', { name: '新建子目录' }),
         ).not.toBeInTheDocument()
     })
+
+    test.each([
+        ['INFECTED', '检测到风险，文件不可下载'],
+        ['FAILED', '扫描失败，文件不可下载，请重新上传'],
+        ['SCANNING', '文件仍在扫描中。'],
+    ] as const)(
+        'downloadFile surfaces %s as a safe message',
+        async (state, message) => {
+            const module = await import(/* @vite-ignore */ DRIVE_PATH)
+            mocks.filesApi.listFiles.mockResolvedValue([
+                {
+                    id: FILE_ID,
+                    folder_id: PROJECT_ID,
+                    project_id: null,
+                    filename: '方案.pdf',
+                    size_bytes: 12,
+                    content_type: 'application/pdf',
+                    state: 'CLEAN',
+                    created_at: '2026-09-05T00:00:00Z',
+                    uploader_name: '',
+                },
+            ])
+            if (state === 'SCANNING') {
+                mocks.filesApi.download.mockRejectedValueOnce(new Error('busy'))
+            } else {
+                mocks.filesApi.download.mockRejectedValueOnce(
+                    new mocks.FileDownloadUnavailableError(state),
+                )
+            }
+            render(module.default, {
+                props: { allowedObjectOrigin: 'https://objects.example' },
+                global: {
+                    plugins: [ElementPlus],
+                    stubs: { MultipartUploader: true },
+                },
+            })
+            expect(await screen.findByText('方案.pdf')).toBeInTheDocument()
+            await fireEvent.click(screen.getByRole('button', { name: '···' }))
+            await fireEvent.click(
+                await screen.findByRole('menuitem', { name: '下载' }),
+            )
+            expect(await screen.findByText(message)).toBeInTheDocument()
+        },
+    )
 })

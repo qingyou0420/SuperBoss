@@ -197,13 +197,12 @@ class FileService:
             idempotency_key=idempotency_key,
             multipart_id=None,
         )
-        self.session.add(file)
         try:
-            await self.session.flush()
+            async with self.session.begin_nested():
+                self.session.add(file)
+                await self.session.flush()
         except IntegrityError as error:
-            is_idempotency = self._is_idempotency_conflict(error)
-            await self.session.rollback()
-            if not is_idempotency:
+            if not self._is_idempotency_conflict(error):
                 raise
             winner = await self.session.scalar(
                 select(File).where(
@@ -226,7 +225,6 @@ class FileService:
             .execution_options(populate_existing=True)
         )
         if fresh_file is None or fresh_file.state != FileState.UPLOADING:
-            await self.session.rollback()
             raise FileProvisioningPendingError()
         if fresh_file.multipart_id is not None:
             return fresh_file
@@ -236,7 +234,6 @@ class FileService:
                 timeout=self._STORAGE_TIMEOUT_SECONDS,
             )
         except Exception as error:
-            await self.session.rollback()
             raise FileProvisioningPendingError() from error
         if len(existing) == 1:
             fresh_file.multipart_id = existing[0]
@@ -253,7 +250,6 @@ class FileService:
                 timeout=self._STORAGE_TIMEOUT_SECONDS,
             )
         except Exception as error:
-            await self.session.rollback()
             raise FileProvisioningPendingError() from error
         fresh_file.multipart_id = multipart_id
         await self.session.commit()
@@ -338,7 +334,6 @@ class FileService:
                 timeout=self._STORAGE_TIMEOUT_SECONDS,
             )
         except Exception as error:
-            await self.session.rollback()
             raise FileCompletionPendingError() from error
         if metadata.size_bytes != file.size_bytes:
             file.state = FileState.FAILED

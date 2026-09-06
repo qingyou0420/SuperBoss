@@ -23,7 +23,7 @@ TURNS = (
     "给星野加个 10 月 20 日交付节点",
     "这个月房租 8000",
 )
-RECALL = "昨天那个合作项目"
+RECALLS = ("昨天那个合作项目", "看一下星野项目")
 OFFLINE = "霜月暂时离线"
 
 
@@ -166,17 +166,24 @@ def main() -> int:
         report["recall_conversation_id"] = recall_id
         memories = _wait_memories(client, timeout=120.0)
         report["memories"] = [item.get("content") for item in memories[:12]]
-        recall = _send(client, recall_id, RECALL)
-        recall_content = str((recall.get("message") or {}).get("content") or "")
-        report["recall"] = {
-            "offline": bool(recall.get("offline")),
-            "content_preview": recall_content[:400],
-            "mentions_xingye": "星野" in recall_content,
-        }
-        if recall.get("offline") or OFFLINE in recall_content:
-            failed = True
-        if "星野" not in recall_content and not any("星野" in str(item) for item in report["memories"]):
-            failed = True
+        recalls: list[dict[str, Any]] = []
+        for prompt in RECALLS:
+            recall = _send(client, recall_id, prompt)
+            recall_content = str((recall.get("message") or {}).get("content") or "")
+            entry = {
+                "prompt": prompt,
+                "offline": bool(recall.get("offline")),
+                "content_preview": recall_content[:400],
+                "mentions_xingye": "星野" in recall_content,
+            }
+            recalls.append(entry)
+            if recall.get("offline") or OFFLINE in recall_content:
+                failed = True
+            if "星野" not in recall_content and not any(
+                "星野" in str(item) for item in report["memories"]
+            ):
+                failed = True
+        report["recall"] = recalls
 
     report["ok"] = not failed
     json.dump(report, sys.stdout, ensure_ascii=False, indent=2)

@@ -15,6 +15,8 @@ export const driveCopy = {
     unconfigured: '上传未配置',
     create: '创建',
     confirm: '确定',
+    confirmRemove: '确定',
+    close: '关闭',
     confirmMove: '放到这里',
     download: '下载',
     newSubfolder: '新建子目录',

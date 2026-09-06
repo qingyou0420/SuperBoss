@@ -126,7 +126,7 @@ def recall_needles(query: str) -> list[str]:
     tokens = re.findall(r"[A-Za-z0-9]+|[\u4e00-\u9fff]{2,}", text)
     needles: list[str] = []
     for token in tokens:
-        if token not in _STOPWORDS:
+        if token not in _STOPWORDS and len(token) <= 8:
             needles.append(token)
         if len(token) >= 2:
             for index in range(len(token) - 1):
@@ -134,11 +134,9 @@ def recall_needles(query: str) -> list[str]:
                 if piece not in _STOPWORDS:
                     needles.append(piece)
     unique: list[str] = []
-    for needle in sorted(needles, key=len, reverse=True):
+    for needle in needles:
         if needle not in unique:
             unique.append(needle)
-        if len(unique) == 8:
-            break
     return unique
 
 
@@ -924,7 +922,7 @@ class AgentService:
         included: list[AgentMessage] = []
         used = 0
         for item in older:
-            line = f"{item.role.value}: {item.content or ''}".strip()
+            line = f"{item.role.value}: {item.content or ''}".strip()[:4000]
             if not line:
                 continue
             extra = len(line) + (1 if included else 0)
@@ -935,7 +933,9 @@ class AgentService:
         if not included:
             return
         new_text = "\n".join(
-            f"{item.role.value}: {item.content}" for item in included if (item.content or "").strip()
+            f"{item.role.value}: {item.content or ''}".strip()[:4000]
+            for item in included
+            if (item.content or "").strip()
         )
         prior = (conversation.summary or "").strip()
         payload = f"已有摘要：{prior}\n新增：{new_text}" if prior else new_text

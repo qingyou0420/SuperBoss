@@ -84,3 +84,31 @@ async def test_recall_hits_odd_offset_keywords(
     xingye = next(i for i, item in enumerate(glance) if "星野合作" in item["content"])
     later = [i for i, item in enumerate(glance) if "按季度复盘" in item["content"]]
     assert not later or xingye < later[0]
+
+
+@pytest.mark.asyncio
+async def test_recall_keeps_late_keywords_in_long_sentences(
+    db_session: AsyncSession, active_owner: User
+) -> None:
+    db_session.add(
+        AgentMemory(
+            kind=MemoryKind.FACT,
+            content="星野合作是合作类项目",
+            importance=4,
+            status=MemoryStatus.ACTIVE,
+        )
+    )
+    db_session.add(
+        AgentMemory(
+            kind=MemoryKind.PREFERENCE,
+            content="老板偏好项目按季度复盘",
+            importance=3,
+            status=MemoryStatus.ACTIVE,
+        )
+    )
+    await db_session.flush()
+    service = AgentService(db_session, Actor(active_owner.id, Role.OWNER))
+    brief = await service.recall("把上季度的复盘纪要发给星野的对接人")
+    assert any("星野合作" in item["content"] for item in brief)
+    status = await service.recall("帮我看看星野合作项目这个月的交付节点怎么样了")
+    assert any("星野合作" in item["content"] for item in status)

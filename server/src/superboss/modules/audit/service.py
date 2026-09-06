@@ -117,13 +117,13 @@ class AuditService:
 
         async with self.session_factory() as session:
             try:
-                audit_id = await persist(session)
-                await session.commit()
+                async with session.begin_nested():
+                    audit_id = await persist(session)
             except IntegrityError:
-                await session.rollback()
                 if event.event_key is None:
                     raise
-                return await persist(session)
+                audit_id = await persist(session)
+            await session.commit()
             return audit_id
 
     async def list_events(self, *, limit: int = 100, action: str | None = None) -> list[AuditLog]:

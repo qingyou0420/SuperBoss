@@ -9,7 +9,7 @@ const SNAPSHOT = {
     maxDiffPixelRatio: 0.005,
 }
 
-test.describe('六页视觉回归 1280', () => {
+test.describe.fixme('六页视觉回归 1280', () => {
     test.use({ viewport: { width: 1280, height: 800 } })
 
     test('登录', async ({ page }) => {

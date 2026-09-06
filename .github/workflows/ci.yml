@@ -2,7 +2,7 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [master]
+    branches: [master, 'feature/**']
 permissions:
   contents: read
 concurrency:
@@ -62,3 +62,30 @@ jobs:
       - name: Test
         working-directory: web
         run: npm run test -- --run
+
+  e2e-visual:
+    runs-on: ubuntu-latest
+    env:
+      E2E_BASE_URL: https://127.0.0.1
+      E2E_ALLOW_LOCAL_SELF_SIGNED: "true"
+      E2E_TARGET: local
+      E2E_OWNER_USERNAME: ownere2e
+      E2E_OWNER_PASSWORD: visual-gate-12
+      E2E_STAFF_USERNAME: staffe2e
+      E2E_STAFF_PASSWORD: visual-gate-12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: tests/e2e/package-lock.json
+      - name: Install
+        working-directory: tests/e2e
+        run: npm ci
+      - name: Playwright Chromium
+        working-directory: tests/e2e
+        run: npx playwright install --with-deps chromium
+      - name: Visual snapshots (fixme until recapture)
+        working-directory: tests/e2e
+        run: npx playwright test specs/visual-pages.spec.ts

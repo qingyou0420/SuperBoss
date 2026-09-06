@@ -40,6 +40,13 @@ const renamingId = ref('')
 const renameValue = ref('')
 const movingFile = ref<DriveFile>()
 const moveTarget = ref('')
+const pendingRemove = ref<DriveFile>()
+const removeOpen = computed({
+    get: () => pendingRemove.value !== undefined,
+    set: (open: boolean) => {
+        if (!open) pendingRemove.value = undefined
+    },
+})
 
 const current = computed(
     () => folders.value.find((folder) => folder.id === currentId.value) ?? null,
@@ -165,10 +172,17 @@ async function renameFile(file: DriveFile): Promise<void> {
     }
 }
 
-async function removeFile(file: DriveFile): Promise<void> {
+function requestRemove(file: DriveFile): void {
+    pendingRemove.value = file
+}
+
+async function confirmRemove(): Promise<void> {
+    const file = pendingRemove.value
+    if (!file) return
     try {
         await filesApi.remove(file.id)
         files.value = files.value.filter((item) => item.id !== file.id)
+        pendingRemove.value = undefined
     } catch {
         errorMessage.value = driveCopy.deleteFailed
     }
@@ -222,6 +236,14 @@ onMounted(loadFolders)
                 <span v-if="!validObjectOrigin" class="hint">{{
                     driveCopy.unconfigured
                 }}</span>
+                <MultipartUploader
+                    v-if="validObjectOrigin && currentId"
+                    compact
+                    text-button
+                    :allowed-object-origin="allowedObjectOrigin"
+                    :folder-id="currentId"
+                    @completed="() => showCompleted()"
+                />
                 <el-dropdown v-if="canManage && currentId" trigger="click">
                     <el-button text>···</el-button>
                     <template #dropdown>
@@ -241,7 +263,10 @@ onMounted(loadFolders)
                     :key="folder.id"
                 >
                     <span v-if="index"> / </span>
-                    <a href="#" @click.prevent="currentId = folder.id">{{
+                    <span v-if="index === breadcrumbs.length - 1">{{
+                        folder.name
+                    }}</span>
+                    <a v-else href="#" @click.prevent="currentId = folder.id">{{
                         folder.name
                     }}</a>
                 </template>
@@ -365,7 +390,7 @@ onMounted(loadFolders)
                                             >
                                             <el-dropdown-item
                                                 v-if="canManage"
-                                                @click="removeFile(row)"
+                                                @click="requestRemove(row)"
                                                 >{{
                                                     driveCopy.remove
                                                 }}</el-dropdown-item
@@ -376,21 +401,32 @@ onMounted(loadFolders)
                             </template>
                         </el-table-column>
                     </el-table>
-                    <MultipartUploader
-                        v-if="validObjectOrigin && currentId"
-                        :allowed-object-origin="allowedObjectOrigin"
-                        :folder-id="currentId"
-                        @completed="() => showCompleted()"
-                    />
                 </div>
             </div>
             <UploadTray :items="tray" />
+            <el-dialog
+                v-model="removeOpen"
+                :title="driveCopy.remove"
+                width="360px"
+                :close-on-click-modal="false"
+            >
+                <p>{{ driveCopy.removeConfirm }}</p>
+                <template #footer>
+                    <el-button @click="pendingRemove = undefined">{{
+                        driveCopy.close
+                    }}</el-button>
+                    <el-button type="primary" @click="confirmRemove">{{
+                        driveCopy.confirmRemove
+                    }}</el-button>
+                </template>
+            </el-dialog>
             <el-drawer
                 v-model="folderDrawerOpen"
                 :title="driveCopy.newSubfolder"
                 size="400px"
             >
                 <form class="drawer-form" @submit.prevent="createFolder">
+                    <label for="new-folder">{{ driveCopy.name }}</label>
                     <el-input id="new-folder" v-model="newFolderName" />
                     <el-button native-type="submit">{{
                         driveCopy.create

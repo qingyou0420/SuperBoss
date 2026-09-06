@@ -60,16 +60,10 @@ export const CARD_ERROR_LABEL: Record<string, string> = {
     CARD_COMMIT_FAILED: '入库失败',
     FOLDER_FORBIDDEN: '没有权限',
     FILE_NOT_FOUND: '文件不存在',
+    FINANCE_ENTRY_NOT_FOUND: '账目不存在',
+    FOLDER_NOT_FOUND: '目录不存在',
+    VALIDATION_ERROR: '内容不完整',
 }
-
-export const CARD_STATUS_LABEL = {
-    PROPOSED: '待确认',
-    CONFIRMED: '入库中',
-    COMMITTED: '已入库',
-    REVISED: '已改写',
-    REJECTED: '已放弃',
-    FAILED: '入库失败',
-} as const
 
 export const MEMORY_KIND_LABEL = {
     FACT: '事实',

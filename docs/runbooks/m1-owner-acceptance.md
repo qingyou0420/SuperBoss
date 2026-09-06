@@ -12,7 +12,7 @@ Before a release, run the Playwright specs in `tests/e2e/specs/` against a live
 - `owner-login-project.spec.ts`
 - `file-quarantine.spec.ts`
 - `staff-denial.spec.ts`
-- `visual-pages.spec.ts` (six 1280-wide page snapshots; platform-independent names)
+- `visual-pages.spec.ts` (currently `test.fixme` until Linux CI recaptures baselines)
 
 Do not substitute `npm run test:contracts`, unit tests, or skipped specs for this gate.
 

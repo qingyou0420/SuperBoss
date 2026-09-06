@@ -125,9 +125,6 @@ async def chat_stream(
                 )
                 yield f"event: {kind}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
             await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
         finally:
             await session.close()
 
