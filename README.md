@@ -22,6 +22,7 @@ and `superboss --update` to download, verify the published SHA-256, and replace 
 - [Kimi connector build, pair, submit, retry, cloud update, and revoke](docs/runbooks/kimi-connector-installation.md)
 - [Pre-pilot PostgreSQL and object backup/restore](docs/runbooks/backup-before-m1-pilot.md)
 - [Iteration plan (three-tier accounts and 霜月 agent, current)](docs/迭代方案-三层账号与霜月.md)
+- [Review and iteration plan (product quality and UI system, companion to the three-tier plan)](docs/审查与迭代方案-Fable51-UI.md)
 - [Iteration plan (slim and repair, completed, historical)](docs/迭代方案.md)
 - [Frozen technical baseline (archived)](docs/archive/superpowers/specs/2026-08-09-technical-foundation-design.md)
 
