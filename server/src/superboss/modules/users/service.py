@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import cast
 from uuid import UUID
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,9 +17,8 @@ from superboss.modules.audit.schemas import AuditEventInput
 from superboss.modules.audit.service import AuditService
 from superboss.modules.auth.models import AuthSession
 from superboss.modules.auth.passwords import hash_password, new_temporary_password
-from superboss.modules.projects.models import Project, ProjectMember
 from superboss.modules.users.models import Role, User, UserStatus
-from superboss.modules.users.schemas import ProjectAssignments, StaffCreate, StaffUpdate
+from superboss.modules.users.schemas import StaffCreate, StaffUpdate
 
 
 @dataclass(frozen=True)
@@ -30,7 +29,6 @@ class OwnerUserView:
     role: Role
     status: UserStatus
     last_login_at: datetime | None
-    projects: tuple[Project, ...]
 
 
 @dataclass(frozen=True)
@@ -82,33 +80,6 @@ class OwnerUserService:
             raise ConflictError("OWNER_PROTECTED", "The OWNER account is protected")
         return user
 
-    async def _projects_for_user(self, user_id: UUID) -> list[Project]:
-        statement = (
-            select(Project)
-            .join(ProjectMember, ProjectMember.project_id == Project.id)
-            .where(ProjectMember.user_id == user_id)
-            .order_by(Project.name, Project.id)
-        )
-        return list((await self.session.scalars(statement)).all())
-
-    async def _projects_for_update(self, project_ids: list[UUID]) -> list[Project]:
-        if not project_ids:
-            return []
-        statement = (
-            select(Project)
-            .where(Project.id.in_(project_ids))
-            .order_by(Project.id)
-            .with_for_update()
-        )
-        return list((await self.session.scalars(statement)).all())
-
-    async def _replace_project_memberships(self, user_id: UUID, project_ids: list[UUID]) -> None:
-        await self.session.execute(delete(ProjectMember).where(ProjectMember.user_id == user_id))
-        self.session.add_all(
-            [ProjectMember(user_id=user_id, project_id=project_id) for project_id in project_ids]
-        )
-        await self.session.flush()
-
     async def _revoke_browser_sessions(self, user_id: UUID, at: datetime) -> None:
         await self.session.execute(
             update(AuthSession)
@@ -121,7 +92,6 @@ class OwnerUserService:
         return OwnerUserView(
             id=user.id, username=user.username, display_name=user.display_name,
             role=user.role, status=user.status, last_login_at=user.last_login_at,
-            projects=tuple(await self._projects_for_user(user.id)),
         )
 
     async def list_users(self, actor: Actor, request_id: UUID) -> list[OwnerUserView]:
@@ -133,11 +103,6 @@ class OwnerUserService:
         self, actor: Actor, command: StaffCreate, request_id: UUID
     ) -> StaffCredentialResult:
         await self._require_owner(actor, "user.create", request_id)
-        project_ids = sorted(command.project_ids)
-        projects = await self._projects_for_update(project_ids)
-        if len(projects) != len(project_ids):
-            await self._record(actor, "user.create", "DENIED", request_id, reason="PROJECT_NOT_FOUND")
-            raise NotFoundError("PROJECT_NOT_FOUND", "Project not found")
         temporary_password = new_temporary_password()
         user = User(
             username=command.username,
@@ -151,23 +116,11 @@ class OwnerUserService:
         try:
             self.session.add(user)
             await self.session.flush()
-            await self._replace_project_memberships(user.id, project_ids)
         except IntegrityError as error:
             await self.session.rollback()
             await self._record(actor, "user.create", "DENIED", request_id, reason="USERNAME_CONFLICT")
             raise ConflictError("USERNAME_CONFLICT", "Username already exists") from error
-        return StaffCredentialResult(
-            OwnerUserView(
-                user.id,
-                user.username,
-                user.display_name,
-                user.role,
-                user.status,
-                user.last_login_at,
-                tuple(projects),
-            ),
-            temporary_password,
-        )
+        return StaffCredentialResult(await self._view(user), temporary_password)
 
     async def update_staff(self, actor: Actor, user_id: UUID, command: StaffUpdate, request_id: UUID) -> OwnerUserView:
         user = await self._staff_for_update(actor, "user.update", user_id, request_id)
@@ -186,16 +139,6 @@ class OwnerUserService:
             user.status = UserStatus.ACTIVE
         await self.session.flush()
         return await self._view(user)
-
-    async def replace_projects(self, actor: Actor, user_id: UUID, command: ProjectAssignments, request_id: UUID) -> OwnerUserView:
-        user = await self._staff_for_update(actor, "user.projects.replace", user_id, request_id)
-        project_ids = sorted(command.project_ids)
-        projects = await self._projects_for_update(project_ids)
-        if len(projects) != len(project_ids):
-            await self._record(actor, "user.projects.replace", "DENIED", request_id, user_id, reason="PROJECT_NOT_FOUND")
-            raise NotFoundError("PROJECT_NOT_FOUND", "Project not found")
-        await self._replace_project_memberships(user.id, project_ids)
-        return OwnerUserView(user.id, user.username, user.display_name, user.role, user.status, user.last_login_at, tuple(projects))
 
     async def reset_staff_password(
         self, actor: Actor, user_id: UUID, request_id: UUID

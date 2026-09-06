@@ -109,6 +109,18 @@ function addMilestone(): void {
     draftMilestones.value.push({ title: '', due_on: '', done: false })
 }
 
+async function toggleMilestone(index: number): Promise<void> {
+    const current = draftMilestones.value[index]
+    if (!current) return
+    current.done = !current.done
+    await saveMilestones()
+}
+
+async function removeMilestone(index: number): Promise<void> {
+    draftMilestones.value.splice(index, 1)
+    await saveMilestones()
+}
+
 watch(projectId, load)
 onMounted(load)
 </script>
@@ -147,7 +159,7 @@ onMounted(load)
             <h2>{{ projectsCopy.milestones }}</h2>
             <ol class="timeline">
                 <li
-                    v-for="item in project?.milestones ?? []"
+                    v-for="(item, index) in project?.milestones ?? []"
                     :key="item.id"
                     :class="{ done: item.done_at }"
                 >
@@ -155,6 +167,21 @@ onMounted(load)
                         item.due_on ? dateShort(item.due_on) : '—'
                     }}</span>
                     <strong>{{ item.title }}</strong>
+                    <el-dropdown v-if="canEdit" trigger="click">
+                        <el-button text>···</el-button>
+                        <template #dropdown>
+                            <el-dropdown-menu>
+                                <el-dropdown-item
+                                    @click="toggleMilestone(index)"
+                                    >{{ projectsCopy.done }}</el-dropdown-item
+                                >
+                                <el-dropdown-item
+                                    @click="removeMilestone(index)"
+                                    >{{ projectsCopy.remove }}</el-dropdown-item
+                                >
+                            </el-dropdown-menu>
+                        </template>
+                    </el-dropdown>
                 </li>
             </ol>
             <EmptyLine

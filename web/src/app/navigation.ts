@@ -1,4 +1,5 @@
 import type { UserRole } from '../api/auth'
+import { shellCopy } from '../copy/pages/shell'
 
 export interface NavItem {
     to: string
@@ -11,24 +12,25 @@ export function homePath(role: UserRole | undefined): string {
 
 export function mainNav(role: UserRole | undefined): NavItem[] {
     const shared: NavItem[] = [
-        { to: '/finance', label: '财务' },
-        { to: '/projects', label: '项目' },
-        { to: '/drive', label: '网盘' },
-        { to: '/knowledge', label: '知识库' },
+        { to: '/finance', label: shellCopy.finance },
+        { to: '/projects', label: shellCopy.projects },
+        { to: '/drive', label: shellCopy.drive },
+        { to: '/knowledge', label: shellCopy.knowledge },
     ]
-    if (role === 'OWNER') return [{ to: '/chat', label: '霜月' }, ...shared]
+    if (role === 'OWNER')
+        return [{ to: '/chat', label: shellCopy.chat }, ...shared]
     return shared
 }
 
 export function accountNav(role: UserRole | undefined): NavItem[] {
     if (role === 'OWNER') {
         return [
-            { to: '/members', label: '成员' },
-            { to: '/audit', label: '审计' },
-            { to: '/soul', label: '霜月设置' },
-            { to: '/memory', label: '记忆' },
-            { to: '/password/change', label: '修改密码' },
+            { to: '/members', label: shellCopy.members },
+            { to: '/audit', label: shellCopy.audit },
+            { to: '/soul', label: shellCopy.soul },
+            { to: '/memory', label: shellCopy.memory },
+            { to: '/password/change', label: shellCopy.password },
         ]
     }
-    return [{ to: '/password/change', label: '修改密码' }]
+    return [{ to: '/password/change', label: shellCopy.password }]
 }

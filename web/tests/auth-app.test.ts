@@ -65,7 +65,6 @@ vi.mock('../src/api/users', () => ({
         list: vi.fn().mockResolvedValue([]),
         create: vi.fn(),
         update: vi.fn(),
-        replaceProjects: vi.fn(),
         resetPassword: vi.fn(),
     },
     userErrorMessage: () => '员工操作暂时无法完成，请稍后重试。',
@@ -415,7 +414,7 @@ describe('LoginPage', () => {
         )
         await fireEvent.click(screen.getByRole('button', { name: '登录' }))
         expect(
-            await screen.findByText('用户名或密码错误，请重试。'),
+            await screen.findByText('用户名或密码不正确'),
         ).toBeInTheDocument()
         expect(document.body.textContent).not.toMatch(/sentinel|traceback/i)
     })

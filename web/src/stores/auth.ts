@@ -8,6 +8,7 @@ import {
     type PasswordChangeCommand,
 } from '../api/auth'
 import { ApiContractError, responseStatus } from '../api/http'
+import { authCopy } from '../copy/pages/auth'
 
 export const useAuthStore = defineStore('auth', () => {
     const user = ref<AuthUser | null>(null)
@@ -90,7 +91,7 @@ export const useAuthStore = defineStore('auth', () => {
         try {
             await authApi.logout()
         } catch {
-            errorMessage.value = '退出请求未完成，本机已退出。'
+            errorMessage.value = authCopy.logoutIncomplete
         } finally {
             markAuthenticationLost()
         }

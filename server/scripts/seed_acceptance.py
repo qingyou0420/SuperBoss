@@ -111,20 +111,15 @@ async def _acceptance_project(
     session: AsyncSession,
     *,
     name: str,
-    is_test: bool,
 ) -> Project:
     existing = await session.scalar(
         select(Project).where(func.lower(Project.name) == name.lower()).with_for_update()
     )
     if existing is not None:
-        if (
-            existing.name != name
-            or existing.is_test is not is_test
-            or existing.status != ProjectStatus.ACTIVE
-        ):
+        if existing.name != name or existing.status != ProjectStatus.ACTIVE:
             raise SeedRefusedError("Acceptance seed conflicts with an existing project.")
         return existing
-    project = Project(name=name, description="", is_test=is_test, status=ProjectStatus.ACTIVE)
+    project = Project(name=name, description="", status=ProjectStatus.ACTIVE)
     session.add(project)
     await session.flush()
     return project
@@ -160,10 +155,10 @@ async def seed(
                 role=Role.STAFF,
             )
             normal_project = await _acceptance_project(
-                session, name=NORMAL_PROJECT_NAME, is_test=False
+                session, name=NORMAL_PROJECT_NAME
             )
             test_project = await _acceptance_project(
-                session, name=TEST_PROJECT_NAME, is_test=True
+                session, name=TEST_PROJECT_NAME
             )
         return SeedIds(owner.id, staff.id, normal_project.id, test_project.id)
     finally:

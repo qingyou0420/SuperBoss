@@ -1,3 +1,4 @@
+import { errorCopy } from '../copy/errors'
 import { apiClient, formatRequestError, type BrowserHttpClient } from './http'
 import { isRecord, uuid } from './parse'
 
@@ -176,11 +177,7 @@ function parseTurn(value: unknown): ChatTurn {
 }
 
 export function agentErrorMessage(error: unknown): string {
-    return formatRequestError(
-        '霜月暂时无法完成操作',
-        error,
-        '霜月暂时无法完成操作，请稍后重试。',
-    )
+    return formatRequestError('霜月操作失败', error, errorCopy.generic)
 }
 
 export function createAgentApi(client: BrowserHttpClient) {

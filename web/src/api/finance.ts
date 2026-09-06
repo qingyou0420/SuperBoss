@@ -1,3 +1,4 @@
+import { errorCopy } from '../copy/errors'
 import { apiClient, formatRequestError, type BrowserHttpClient } from './http'
 import { hasRequiredKeys, isRecord, uuid } from './parse'
 
@@ -225,11 +226,7 @@ function parseSummary(value: unknown): FinanceSummary {
 }
 
 export function financeErrorMessage(error: unknown): string {
-    return formatRequestError(
-        '财务操作失败',
-        error,
-        '财务操作失败，请稍后重试。',
-    )
+    return formatRequestError('财务操作失败', error, errorCopy.generic)
 }
 
 export function yuanFromCents(centsValue: number): string {

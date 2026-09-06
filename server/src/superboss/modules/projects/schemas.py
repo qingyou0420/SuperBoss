@@ -3,7 +3,7 @@
 from datetime import date, datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from superboss.modules.projects.models import ProjectStage, ProjectStatus
 
@@ -49,7 +49,6 @@ class MilestoneRead(BaseModel):
 
 class ProjectCreate(BaseModel):
     name: str
-    is_test: StrictBool = False
     description: str = ""
     stage: ProjectStage = ProjectStage.PLANNING
     starts_on: date | None = None
@@ -97,7 +96,6 @@ class ProjectRead(BaseModel):
     id: UUID
     name: str
     description: str
-    is_test: bool
     status: ProjectStatus
     stage: ProjectStage
     progress_percent: int

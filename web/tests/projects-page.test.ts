@@ -27,14 +27,12 @@ const extras = {
 const regular = {
     id: '019f2b8e-18f0-7f31-9f42-3e6a76b9f810',
     name: '正式项目',
-    is_test: false,
     status: 'ACTIVE' as const,
     ...extras,
 }
 const acceptance = {
     id: '019f2b8e-18f0-7f31-9f42-3e6a76b9f811',
     name: '员工验收沙盒',
-    is_test: true,
     status: 'ACTIVE' as const,
     ...extras,
 }
@@ -81,7 +79,6 @@ describe('OWNER project management page', () => {
         mockedProjects.create.mockResolvedValue({
             ...acceptance,
             name: '新验收项目',
-            is_test: false,
         })
         renderPage()
         await screen.findByText('正式项目')
@@ -96,9 +93,10 @@ describe('OWNER project management page', () => {
         await waitFor(() =>
             expect(mockedProjects.create).toHaveBeenCalledWith({
                 name: '新验收项目',
-                is_test: false,
                 description: '',
                 stage: 'PLANNING',
+                starts_on: null,
+                due_on: null,
             }),
         )
         expect(await screen.findByText('新验收项目')).toBeInTheDocument()
@@ -151,9 +149,10 @@ describe('OWNER project management page', () => {
         await waitFor(() =>
             expect(mockedProjects.create).toHaveBeenCalledWith({
                 name: boundary,
-                is_test: false,
                 description: '',
                 stage: 'PLANNING',
+                starts_on: null,
+                due_on: null,
             }),
         )
     })

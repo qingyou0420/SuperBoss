@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core.config import Settings
 from superboss.main import create_app
-from superboss.modules.projects.models import Project, ProjectMember
+from superboss.modules.projects.models import Project
 from superboss.modules.users.models import Role, User
 from tests.files.storage import InMemoryObjectStorage
 from tests.identity import LOCAL_TEST_PASSWORD, local_user
@@ -109,8 +109,6 @@ async def test_foreign_staff_cannot_start_upload(file_client, db_session: AsyncS
     staff = local_user("staff-1", display_name="Staff")
     target, assigned = Project(name="Foreign target"), Project(name="Foreign assigned")
     db_session.add_all([staff, target, assigned])
-    await db_session.flush()
-    db_session.add(ProjectMember(project_id=assigned.id, user_id=staff.id))
     await db_session.commit()
     _login(client)
     private_id = _folder_id(client, "老板私有")
@@ -633,8 +631,6 @@ async def test_foreign_staff_cannot_presign_upload_part(
     target, assigned = Project(name="Part target"), Project(name="Part assigned")
     staff = local_user("staff-1", display_name="Staff")
     db_session.add_all([target, assigned, staff])
-    await db_session.flush()
-    db_session.add(ProjectMember(project_id=assigned.id, user_id=staff.id))
     await db_session.commit()
     _login(client)
     headers = {

@@ -38,7 +38,6 @@ const project = {
     id: '019f2b8e-18f0-7f31-9f42-3e6a76b9f810',
     name: '客户方案',
     description: '',
-    is_test: true,
     status: 'ACTIVE' as const,
     stage: 'PLANNING' as const,
     progress_percent: 0,
@@ -77,7 +76,6 @@ describe('strict project API contracts', () => {
             [{ ...project, name: ' x' }],
             [{ ...project, name: 'x'.repeat(256) }],
             [{ ...project, name: 'bad\r\nname' }],
-            [{ ...project, is_test: 'true' }],
             [{ ...project, status: 'DELETED' }],
             { items: [project] },
         ]) {
@@ -101,7 +99,7 @@ describe('strict project API contracts', () => {
         ).rejects.toBeInstanceOf(ProjectContractError)
     })
 
-    test('sends the exact canonical create body including strict is_test', async () => {
+    test('sends the exact canonical create body', async () => {
         let seen: AxiosRequestConfig | undefined
         const adapter: AxiosAdapter = async (config) => {
             seen = config
@@ -110,17 +108,15 @@ describe('strict project API contracts', () => {
         const api = createProjectsApi(createHttpClient({ adapter }))
 
         await expect(
-            api.create({ name: '  验收沙盒\u00a0', is_test: true }),
+            api.create({ name: '  验收沙盒\u00a0' }),
         ).resolves.toMatchObject({
             name: '验收沙盒',
-            is_test: true,
         })
 
         expect(seen?.url).toBe('/projects')
         expect(seen?.method).toBe('post')
         expect(JSON.parse(String(seen?.data))).toEqual({
             name: '验收沙盒',
-            is_test: true,
         })
     })
 
@@ -136,7 +132,7 @@ describe('strict project API contracts', () => {
             const pending =
                 operation === 'list'
                     ? api.list()
-                    : api.create({ name: project.name, is_test: true })
+                    : api.create({ name: project.name })
 
             await expect(pending).rejects.toBeInstanceOf(ProjectContractError)
         },
@@ -151,11 +147,10 @@ describe('strict project API contracts', () => {
         const api = createProjectsApi(createHttpClient({ adapter }))
 
         for (const invalid of [
-            { name: '', is_test: false },
-            { name: ' '.repeat(3), is_test: false },
-            { name: 'x'.repeat(256), is_test: false },
-            { name: 'bad\u0000name', is_test: false },
-            { name: 'valid', is_test: 'false' },
+            { name: '' },
+            { name: ' '.repeat(3) },
+            { name: 'x'.repeat(256) },
+            { name: 'bad\u0000name' },
         ]) {
             await expect(api.create(invalid as never)).rejects.toBeInstanceOf(
                 ProjectContractError,
@@ -208,9 +203,7 @@ describe('strict project API contracts', () => {
         ({ status }) => {
             const error = new HttpClientError(status, projectConflictBody)
             if (!status) {
-                expect(projectErrorMessage(error)).toBe(
-                    '项目操作失败，请稍后重试。',
-                )
+                expect(projectErrorMessage(error)).toBe('操作失败。')
                 return
             }
             expect(projectErrorMessage(error)).toBe(

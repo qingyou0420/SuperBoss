@@ -12,6 +12,7 @@ import {
     type FinanceVisibility,
 } from '../api/finance'
 import { moneyLabel } from '../api/parse'
+import { errorCopy } from '../copy/errors'
 import { projectsApi, type Project } from '../api/projects'
 import DateText from '../components/ui/DateText.vue'
 import EmptyLine from '../components/ui/EmptyLine.vue'
@@ -19,11 +20,12 @@ import InlineError from '../components/ui/InlineError.vue'
 import Money from '../components/ui/Money.vue'
 import PageHeader from '../components/ui/PageHeader.vue'
 import {
+    FIELD_LABEL,
     FINANCE_KIND_LABEL,
     FINANCE_SCOPE_LABEL,
     VISIBILITY_LABEL,
 } from '../copy/glossary'
-import { financeCopy } from '../copy/pages/finance'
+import { financeCopy, financeMonthLabel } from '../copy/pages/finance'
 import { useAuthStore } from '../stores/auth'
 
 function currentMonth(): string {
@@ -39,7 +41,7 @@ function shiftMonth(value: string, delta: number): string {
 
 function monthLabel(value: string): string {
     const [year, month] = value.split('-')
-    return `${year}年${Number(month)}月`
+    return financeMonthLabel(year, month)
 }
 
 const auth = useAuthStore()
@@ -97,7 +99,7 @@ async function load(): Promise<void> {
         projects.value = nextProjects
         alerts.value = nextAlerts
     } catch {
-        errorMessage.value = '财务数据暂时无法加载，请稍后重试。'
+        errorMessage.value = errorCopy.generic
     } finally {
         loading.value = false
     }
@@ -107,11 +109,11 @@ async function createEntry(): Promise<void> {
     const cents = centsFromYuan(amountYuan.value)
     const canonicalCategory = category.value.trim()
     if (!cents || !canonicalCategory) {
-        errorMessage.value = '请填写金额和类别。'
+        errorMessage.value = financeCopy.amountAndCategory
         return
     }
     if (scope.value === 'PROJECT' && !projectId.value) {
-        errorMessage.value = '项目成本需要选择项目。'
+        errorMessage.value = financeCopy.projectRequired
         return
     }
     saving.value = true
@@ -143,7 +145,7 @@ async function createEntry(): Promise<void> {
 async function submitAdjustment(): Promise<void> {
     if (!adjusting.value) return
     if (!adjustValue.value.trim() || !adjustReason.value.trim()) {
-        errorMessage.value = '请填写调整后的值和原因。'
+        errorMessage.value = financeCopy.adjustRequired
         return
     }
     saving.value = true
@@ -154,7 +156,7 @@ async function submitAdjustment(): Promise<void> {
                 ? String(centsFromYuan(adjustValue.value) ?? '')
                 : adjustValue.value.trim()
         if (adjustField.value === 'amount_cents' && !newValue) {
-            errorMessage.value = '调整金额无效。'
+            errorMessage.value = financeCopy.adjustAmountInvalid
             return
         }
         await financeApi.adjust(adjusting.value.id, {
@@ -301,15 +303,27 @@ onMounted(load)
                 <label>
                     {{ financeCopy.kind }}
                     <el-select v-model="kind">
-                        <el-option label="成本" value="COST" />
-                        <el-option label="收入" value="INCOME" />
+                        <el-option
+                            :label="FINANCE_KIND_LABEL.COST"
+                            value="COST"
+                        />
+                        <el-option
+                            :label="FINANCE_KIND_LABEL.INCOME"
+                            value="INCOME"
+                        />
                     </el-select>
                 </label>
                 <label>
                     {{ financeCopy.scope }}
                     <el-select v-model="scope">
-                        <el-option label="公司运营" value="COMPANY" />
-                        <el-option label="项目" value="PROJECT" />
+                        <el-option
+                            :label="FINANCE_SCOPE_LABEL.COMPANY"
+                            value="COMPANY"
+                        />
+                        <el-option
+                            :label="FINANCE_SCOPE_LABEL.PROJECT"
+                            value="PROJECT"
+                        />
                     </el-select>
                 </label>
                 <label v-if="scope === 'PROJECT'">
@@ -323,7 +337,7 @@ onMounted(load)
                         />
                     </el-select>
                 </label>
-                <label for="amount-yuan">金额（元）</label>
+                <label for="amount-yuan">{{ financeCopy.amountYuan }}</label>
                 <el-input id="amount-yuan" v-model="amountYuan" />
                 <label for="occurred-on">{{ financeCopy.date }}</label>
                 <el-date-picker
@@ -345,9 +359,15 @@ onMounted(load)
                             :label="financeCopy.defaultVisibility"
                             value=""
                         />
-                        <el-option label="全员" value="ALL" />
-                        <el-option label="管理层" value="MANAGEMENT" />
-                        <el-option label="仅自己" value="OWNER_ONLY" />
+                        <el-option :label="VISIBILITY_LABEL.ALL" value="ALL" />
+                        <el-option
+                            :label="VISIBILITY_LABEL.MANAGEMENT"
+                            value="MANAGEMENT"
+                        />
+                        <el-option
+                            :label="VISIBILITY_LABEL.OWNER_ONLY"
+                            value="OWNER_ONLY"
+                        />
                     </el-select>
                 </label>
                 <el-button
@@ -368,18 +388,33 @@ onMounted(load)
                 <label>
                     {{ financeCopy.adjust }}
                     <el-select v-model="adjustField">
-                        <el-option label="金额" value="amount_cents" />
-                        <el-option label="日期" value="occurred_on" />
-                        <el-option label="类别" value="category" />
-                        <el-option label="备注" value="memo" />
-                        <el-option label="可见范围" value="visibility" />
+                        <el-option
+                            :label="financeCopy.amount"
+                            value="amount_cents"
+                        />
+                        <el-option
+                            :label="financeCopy.date"
+                            value="occurred_on"
+                        />
+                        <el-option
+                            :label="financeCopy.category"
+                            value="category"
+                        />
+                        <el-option :label="financeCopy.memo" value="memo" />
+                        <el-option
+                            :label="FIELD_LABEL.visibility"
+                            value="visibility"
+                        />
                     </el-select>
                 </label>
-                <el-input v-model="adjustValue" aria-label="调整后的值" />
+                <el-input
+                    v-model="adjustValue"
+                    :aria-label="financeCopy.adjustValue"
+                />
                 <el-input
                     v-model="adjustReason"
                     :placeholder="financeCopy.reason"
-                    aria-label="调整原因"
+                    :aria-label="financeCopy.adjustReason"
                 />
                 <el-button native-type="submit" type="primary">{{
                     financeCopy.save

@@ -1,3 +1,5 @@
+import { errorCopy } from '../copy/errors'
+import { membersCopy } from '../copy/pages/members'
 import {
     HttpClientError,
     apiClient,
@@ -10,11 +12,6 @@ const UUID =
 const USERNAME = /^[a-z][a-z0-9._-]{2,31}$/
 const MAX_USERS_PER_RESPONSE = 1000
 
-export interface UserProject {
-    id: string
-    name: string
-}
-
 export interface OwnerUser {
     id: string
     username: string
@@ -22,14 +19,12 @@ export interface OwnerUser {
     role: 'OWNER' | 'MANAGER' | 'STAFF'
     status: 'ACTIVE' | 'DISABLED'
     last_login_at: string | null
-    projects: UserProject[]
 }
 
 export interface StaffCreate {
     username: string
     display_name: string
     role?: 'MANAGER' | 'STAFF'
-    project_ids: string[]
 }
 
 export interface StaffCreateResult {
@@ -52,7 +47,6 @@ export interface UsersApi {
     create(command: StaffCreate): Promise<StaffCreateResult>
     resetPassword(userId: string): Promise<PasswordResetResult>
     update(userId: string, command: StaffUpdate): Promise<OwnerUser>
-    replaceProjects(userId: string, projectIds: string[]): Promise<OwnerUser>
 }
 
 export class UserContractError extends Error {
@@ -99,18 +93,6 @@ function temporaryPassword(value: unknown): value is string {
     )
 }
 
-function project(value: unknown): UserProject {
-    if (
-        !record(value) ||
-        !hasRequiredKeys(value, ['id', 'name']) ||
-        typeof value.id !== 'string' ||
-        !UUID.test(value.id) ||
-        !text(value.name)
-    )
-        throw new UserContractError()
-    return { id: value.id, name: value.name }
-}
-
 function user(value: unknown): OwnerUser {
     if (
         !record(value) ||
@@ -118,7 +100,6 @@ function user(value: unknown): OwnerUser {
             'display_name',
             'id',
             'last_login_at',
-            'projects',
             'role',
             'status',
             'username',
@@ -136,8 +117,7 @@ function user(value: unknown): OwnerUser {
         (value.status !== 'ACTIVE' && value.status !== 'DISABLED') ||
         (value.last_login_at !== null &&
             (typeof value.last_login_at !== 'string' ||
-                Number.isNaN(Date.parse(value.last_login_at)))) ||
-        !Array.isArray(value.projects)
+                Number.isNaN(Date.parse(value.last_login_at))))
     )
         throw new UserContractError()
     return {
@@ -147,25 +127,13 @@ function user(value: unknown): OwnerUser {
         role: value.role,
         status: value.status,
         last_login_at: value.last_login_at,
-        projects: value.projects.map(project),
     }
-}
-
-function ids(value: unknown): string[] {
-    if (
-        !Array.isArray(value) ||
-        value.length > MAX_USERS_PER_RESPONSE ||
-        value.some((id) => typeof id !== 'string' || !UUID.test(id)) ||
-        new Set(value).size !== value.length
-    )
-        throw new UserContractError()
-    return value
 }
 
 function createCommand(value: StaffCreate): StaffCreate {
     if (
         !record(value) ||
-        !hasRequiredKeys(value, ['display_name', 'project_ids', 'username']) ||
+        !hasRequiredKeys(value, ['display_name', 'username']) ||
         !username(value.username) ||
         !text(value.display_name)
     )
@@ -176,7 +144,6 @@ function createCommand(value: StaffCreate): StaffCreate {
         username: value.username,
         display_name: value.display_name,
         role,
-        project_ids: ids(value.project_ids),
     }
 }
 
@@ -220,11 +187,11 @@ function update(value: StaffUpdate): StaffUpdate {
 
 export function userErrorMessage(error: unknown): string {
     if (error instanceof HttpClientError && error.status === 409)
-        return '员工状态与现有记录冲突，请刷新后重试。'
+        return membersCopy.conflict
     return formatRequestError(
-        '员工操作暂时无法完成',
+        membersCopy.operateFailed,
         error,
-        '员工操作暂时无法完成，请稍后重试。',
+        errorCopy.generic,
     )
 }
 
@@ -261,18 +228,6 @@ export function createUsersApi(client: BrowserHttpClient): UsersApi {
             const response = await client.patch(
                 `/owner/users/${userId}`,
                 update(command),
-            )
-            if (response.status !== 200) throw new UserContractError()
-            return user(response.data)
-        },
-        async replaceProjects(
-            userId: string,
-            projectIds: string[],
-        ): Promise<OwnerUser> {
-            if (!UUID.test(userId)) throw new UserContractError()
-            const response = await client.put(
-                `/owner/users/${userId}/projects`,
-                { project_ids: ids(projectIds) },
             )
             if (response.status !== 200) throw new UserContractError()
             return user(response.data)

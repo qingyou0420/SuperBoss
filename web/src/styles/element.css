@@ -28,4 +28,22 @@
     --el-box-shadow: none;
     --el-box-shadow-light: none;
     --el-box-shadow-lighter: none;
+    --el-table-header-bg-color: transparent;
+    --el-table-header-text-color: var(--sb-ink-2);
+    --el-table-border-color: var(--sb-line);
+    --el-table-border: 1px solid var(--sb-line);
+    --el-table-row-hover-bg-color: var(--sb-paper);
+    --el-button-hover-bg-color: transparent;
+    --el-button-hover-text-color: var(--sb-accent);
+}
+
+.plain-table {
+    width: 100%;
+    --el-table-border: none;
+    --el-table-border-color: var(--sb-line);
+}
+
+.plain-table :deep(.el-table__inner-wrapper::before),
+.plain-table :deep(.el-table__border-left-patch) {
+    display: none;
 }

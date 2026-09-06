@@ -20,7 +20,10 @@ export const membersCopy = {
     closeHint: '关闭后不再显示。',
     create: '创建',
     close: '关闭',
-    saved: '我已保存',
+    saved: '关闭',
     displayName: '显示名称',
     addAccount: '添加账号',
+    empty: '还没有成员',
+    conflict: '员工状态与现有记录冲突，请刷新后重试。',
+    operateFailed: '员工操作失败',
 }

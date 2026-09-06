@@ -22,7 +22,6 @@ _SIGNED_IN = frozenset({Role.OWNER, Role.MANAGER, Role.STAFF})
 class Actor:
     subject_id: UUID
     role: Role | None
-    project_ids: frozenset[UUID] = frozenset()
 
 
 async def _session(request: Request) -> AsyncIterator[AsyncSession]:
@@ -71,14 +70,6 @@ def require_role(
 def require_owner(actor: Actor) -> None:
     if actor.role != Role.OWNER:
         raise ForbiddenError("FORBIDDEN", "You cannot perform this action")
-
-
-def require_project_access(actor: Actor, project_id: UUID) -> None:
-    if actor.role in {Role.OWNER, Role.MANAGER}:
-        return
-    if actor.role == Role.STAFF and project_id in actor.project_ids:
-        return
-    raise ForbiddenError()
 
 
 def require_project_actor(actor: Actor) -> None:

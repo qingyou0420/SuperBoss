@@ -43,7 +43,7 @@ async function changePassword(): Promise<void> {
         )
     } catch {
         clearPasswords()
-        errorMessage.value = '密码更新失败，请检查当前密码和新密码。'
+        errorMessage.value = authCopy.passwordUpdateFailed
     } finally {
         pending.value = false
     }

@@ -4,6 +4,8 @@ import axios, {
     type InternalAxiosRequestConfig,
 } from 'axios'
 
+import { errorCopy } from '../copy/errors'
+
 const REFRESH_PATH = '/auth/refresh'
 
 export type BrowserHttpResponse<T = unknown> = {
@@ -52,14 +54,9 @@ export class ApiContractError extends Error {
         this.name = 'ApiContractError'
     }
     static safeMessage(error: unknown): string {
-        return formatRequestError(
-            '请求失败',
-            error,
-            '服务暂时不可用，请稍后重试。',
-            {
-                unauthorized: '登录状态已失效，请重新登录。',
-            },
-        )
+        return formatRequestError('请求失败', error, errorCopy.generic, {
+            unauthorized: '登录状态已失效，请重新登录。',
+        })
     }
 }
 

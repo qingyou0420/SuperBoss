@@ -15,8 +15,10 @@ export const projectsCopy = {
     done: '完成',
     empty: '还没有项目',
     emptyMilestones: '还没有里程碑',
+    remove: '删除',
     nameLabel: '项目名称',
     tooLong: '项目名称不能超过 255 个字符。',
     loadFailed: '项目列表加载失败。',
     nameRequired: '请输入项目名称。',
+    createSubmit: '创建项目',
 }

@@ -63,7 +63,6 @@ async function add(): Promise<void> {
             username: username.value,
             display_name: displayName.value,
             role: createRole.value,
-            project_ids: [],
         })
         users.value.push(created.user)
         username.value = ''
@@ -187,35 +186,10 @@ onBeforeUnmount(clearTemporaryPassword)
                             </el-dropdown-menu>
                         </template>
                     </el-dropdown>
-                    <el-button
-                        v-if="row.role !== 'OWNER'"
-                        text
-                        @click="resetPassword(row)"
-                        >{{ membersCopy.resetPassword }}</el-button
-                    >
-                    <el-popconfirm
-                        v-if="row.role !== 'OWNER' && row.status === 'ACTIVE'"
-                        :title="membersCopy.disableConfirm"
-                        :teleported="false"
-                        confirm-button-text="确定"
-                        @confirm="toggle(row)"
-                    >
-                        <template #reference>
-                            <el-button text>{{
-                                membersCopy.disable
-                            }}</el-button>
-                        </template>
-                    </el-popconfirm>
-                    <el-button
-                        v-if="row.role !== 'OWNER' && row.status === 'DISABLED'"
-                        text
-                        @click="toggle(row)"
-                        >{{ membersCopy.enable }}</el-button
-                    >
                 </template>
             </el-table-column>
         </el-table>
-        <EmptyLine v-if="!users.length" :message="membersCopy.title" />
+        <EmptyLine v-if="!users.length" :message="membersCopy.empty" />
         <el-drawer v-model="drawerOpen" :title="membersCopy.add" size="400px">
             <form class="drawer-form" @submit.prevent="add">
                 <label for="username">{{ membersCopy.username }}</label>

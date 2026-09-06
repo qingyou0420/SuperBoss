@@ -2,7 +2,7 @@ export const authCopy = {
     login: '登录',
     username: '用户名',
     password: '密码',
-    loginFailed: '用户名或密码错误，请重试。',
+    loginFailed: '用户名或密码不正确',
     setPassword: '设置新密码',
     currentPassword: '当前密码',
     newPassword: '新密码',
@@ -12,4 +12,6 @@ export const authCopy = {
     mismatch: '两次输入的新密码不一致。',
     forbidden: '没有权限',
     backHome: '回到首页',
+    passwordUpdateFailed: '密码更新失败，请检查当前密码和新密码。',
+    logoutIncomplete: '退出请求未完成，本机已退出。',
 }

@@ -1,3 +1,4 @@
+import { errorCopy } from '../copy/errors'
 import { apiClient, formatRequestError, type BrowserHttpClient } from './http'
 import { isRecord, UUID } from './parse'
 
@@ -55,11 +56,7 @@ function parseDoc(value: unknown): KnowledgeDoc {
 }
 
 export function knowledgeErrorMessage(error: unknown): string {
-    return formatRequestError(
-        '知识库暂时无法加载',
-        error,
-        '知识库暂时无法加载，请稍后重试。',
-    )
+    return formatRequestError('知识库加载失败', error, errorCopy.generic)
 }
 
 export function createKnowledgeApi(client: BrowserHttpClient) {
@@ -75,11 +72,15 @@ export function createKnowledgeApi(client: BrowserHttpClient) {
             }
             return response.data.map(parseDoc)
         },
-        async create(title: string, body_md: string): Promise<KnowledgeDoc> {
+        async create(
+            title: string,
+            body_md: string,
+            tags: string[] = [],
+        ): Promise<KnowledgeDoc> {
             const response = await client.post('/knowledge', {
                 title,
                 body_md,
-                tags: [],
+                tags,
             })
             if (response.status !== 201) throw new KnowledgeContractError()
             return parseDoc(response.data)

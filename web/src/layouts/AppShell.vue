@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { accountNav, homePath, mainNav } from '../app/navigation'
+import { shellCopy } from '../copy/pages/shell'
 import { useAuthStore } from '../stores/auth'
 
 const auth = useAuthStore()
@@ -33,7 +34,7 @@ function onCommand(path: string): void {
     <div class="shell">
         <header class="shell__header">
             <router-link class="shell__brand" :to="home">SuperBoss</router-link>
-            <nav class="shell__nav" aria-label="工作台导航">
+            <nav class="shell__nav" :aria-label="shellCopy.nav">
                 <router-link
                     v-for="item in links"
                     :key="item.to"
@@ -53,9 +54,9 @@ function onCommand(path: string): void {
                             :command="item.to"
                             >{{ item.label }}</el-dropdown-item
                         >
-                        <el-dropdown-item divided command="__logout__"
-                            >退出</el-dropdown-item
-                        >
+                        <el-dropdown-item divided command="__logout__">{{
+                            shellCopy.logout
+                        }}</el-dropdown-item>
                     </el-dropdown-menu>
                 </template>
             </el-dropdown>

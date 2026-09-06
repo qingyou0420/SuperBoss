@@ -74,3 +74,33 @@ export const DOC_STATUS_LABEL = {
     DRAFT: '草稿',
     PUBLISHED: '已发布',
 } as const
+
+export const FOLDER_NAME = {
+    OWNER_PRIVATE: '老板私有',
+    PROJECTS: '项目',
+    COMPANY: '公司',
+} as const
+
+export const FIELD_LABEL = {
+    category: '类别',
+    amount: '金额',
+    amountYuan: '金额（元）',
+    kind: '类型',
+    scope: '范围',
+    project: '项目',
+    visibility: '可见范围',
+    visibilityWillBecome: '可见范围将变为',
+    name: '名称',
+    stage: '阶段',
+    title: '标题',
+    due: '到期',
+    date: '日期',
+    memo: '备注',
+    content: '内容',
+    file: '文件',
+    folder: '目录',
+    targetFolder: '目标目录',
+    document: '文档',
+    starts: '开始',
+    description: '说明',
+} as const

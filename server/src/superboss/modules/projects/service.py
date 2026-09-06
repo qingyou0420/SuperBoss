@@ -102,7 +102,6 @@ class ProjectService:
         project = Project(
             name=command.name,
             description=command.description,
-            is_test=command.is_test,
             starts_on=command.starts_on,
             due_on=command.due_on,
         )

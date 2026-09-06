@@ -22,7 +22,6 @@ vi.mock('../src/api/users', async () => {
             list: vi.fn(),
             create: vi.fn(),
             update: vi.fn(),
-            replaceProjects: vi.fn(),
             resetPassword: vi.fn(),
         },
         userErrorMessage: () => '员工操作暂时无法完成，请稍后重试。',
@@ -34,7 +33,6 @@ vi.mock('../src/api/projects', () => ({
             {
                 id: '019f2b8e-18f0-7f31-9f42-3e6a76b9f810',
                 name: '验收项目',
-                is_test: false,
                 status: 'ACTIVE',
                 description: '',
                 stage: 'PLANNING',
@@ -48,10 +46,6 @@ vi.mock('../src/api/projects', () => ({
 }))
 
 const mockedUsersApi = vi.mocked(usersApi)
-const project = {
-    id: '019f2b8e-18f0-7f31-9f42-3e6a76b9f810',
-    name: '验收项目',
-}
 const staff = {
     id: '019f2b8e-18f0-7f31-9f42-3e6a76b9f811',
     username: 'existing-staff',
@@ -59,7 +53,6 @@ const staff = {
     role: 'STAFF' as const,
     status: 'ACTIVE' as const,
     last_login_at: '2026-08-09T12:00:00Z',
-    projects: [project],
 }
 const temporaryPassword = 'temporary-password-sentinel'
 
@@ -110,7 +103,6 @@ describe('OWNER local user API', () => {
             api.create({
                 username: 'existing-staff',
                 display_name: 'Existing Staff',
-                project_ids: [project.id],
             }),
         ).resolves.toEqual({
             user: staff,
@@ -123,7 +115,6 @@ describe('OWNER local user API', () => {
             username: 'existing-staff',
             display_name: 'Existing Staff',
             role: 'STAFF',
-            project_ids: [project.id],
         })
         expect(seen[1]?.url).toBe(`/owner/users/${staff.id}/password-reset`)
     })
@@ -143,7 +134,6 @@ describe('OWNER local user API', () => {
                     ? api.create({
                           username: 'existing-staff',
                           display_name: 'Existing Staff',
-                          project_ids: [],
                       })
                     : api.resetPassword(staff.id),
             ).rejects.toBeInstanceOf(UserContractError)
@@ -177,12 +167,11 @@ describe('OWNER local user management page', () => {
             username: 'staff-acceptance',
             display_name: 'Acceptance',
             role: 'STAFF',
-            project_ids: [],
         })
         expect(clipboard).not.toHaveBeenCalled()
         expect(localStorage).toHaveLength(0)
         expect(sessionStorage).toHaveLength(0)
-        await fireEvent.click(screen.getByRole('button', { name: '我已保存' }))
+        await fireEvent.click(screen.getByRole('button', { name: '关闭' }))
         await waitFor(() =>
             expect(
                 screen.queryByText(temporaryPassword),
@@ -198,23 +187,25 @@ describe('OWNER local user management page', () => {
             global: { plugins: [ElementPlus] },
         })
         await screen.findByText('existing-staff')
-        await fireEvent.click(screen.getByRole('button', { name: '重置密码' }))
+        await fireEvent.click(screen.getByRole('button', { name: '···' }))
+        await fireEvent.click(
+            await screen.findByRole('menuitem', { name: '重置密码' }),
+        )
         expect(await screen.findByText(temporaryPassword)).toBeInTheDocument()
         rendered.unmount()
         expect(document.body.textContent).not.toContain(temporaryPassword)
     })
 
-    test('confirms disable by username and preserves project assignment behavior', async () => {
+    test('confirms disable by username', async () => {
         mockedUsersApi.update.mockResolvedValue({
             ...staff,
             status: 'DISABLED',
         })
-        mockedUsersApi.replaceProjects.mockResolvedValue(staff)
         render(UsersPage, { global: { plugins: [ElementPlus] } })
         await screen.findByText('existing-staff')
-        await fireEvent.click(screen.getByRole('button', { name: '禁用' }))
+        await fireEvent.click(screen.getByRole('button', { name: '···' }))
         await fireEvent.click(
-            await screen.findByRole('button', { name: '确定' }),
+            await screen.findByRole('menuitem', { name: '禁用' }),
         )
         expect(mockedUsersApi.update).toHaveBeenCalledWith(staff.id, {
             status: 'DISABLED',

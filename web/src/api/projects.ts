@@ -4,6 +4,7 @@ import {
     formatRequestError,
     type BrowserHttpClient,
 } from './http'
+import { errorCopy } from '../copy/errors'
 import { hasRequiredKeys, isRecord, UUID } from './parse'
 
 export const MAX_PROJECTS_PER_RESPONSE = 1000
@@ -32,7 +33,6 @@ export interface Project {
     id: string
     name: string
     description: string
-    is_test: boolean
     status: 'ACTIVE' | 'ARCHIVED'
     stage: ProjectStage
     progress_percent: number
@@ -43,9 +43,10 @@ export interface Project {
 
 export interface ProjectCreate {
     name: string
-    is_test: boolean
     description?: string
     stage?: ProjectStage
+    starts_on?: string | null
+    due_on?: string | null
 }
 
 export interface ProjectUpdate {
@@ -147,7 +148,6 @@ function parseProject(value: unknown): Project {
             'description',
             'due_on',
             'id',
-            'is_test',
             'milestones',
             'name',
             'progress_percent',
@@ -164,7 +164,6 @@ function parseProject(value: unknown): Project {
         !UUID.test(value.id) ||
         name !== value.name ||
         typeof value.description !== 'string' ||
-        typeof value.is_test !== 'boolean' ||
         (value.status !== 'ACTIVE' && value.status !== 'ARCHIVED') ||
         !PROJECT_STAGES.includes(value.stage as ProjectStage) ||
         typeof value.progress_percent !== 'number' ||
@@ -178,7 +177,6 @@ function parseProject(value: unknown): Project {
         id: value.id,
         name,
         description: value.description,
-        is_test: value.is_test,
         status: value.status,
         stage: value.stage as ProjectStage,
         progress_percent: value.progress_percent,
@@ -196,11 +194,21 @@ function parseProjectList(value: unknown): Project[] {
 }
 
 function validatedCreate(value: unknown): ProjectCreate {
-    if (!isRecord(value) || !hasRequiredKeys(value, ['is_test', 'name'])) {
+    if (!isRecord(value) || !hasRequiredKeys(value, ['name'])) {
         throw new ProjectContractError()
     }
-    if (typeof value.is_test !== 'boolean') throw new ProjectContractError()
-    return { name: canonicalName(value.name), is_test: value.is_test }
+    const created: ProjectCreate = { name: canonicalName(value.name) }
+    if (typeof value.description === 'string')
+        created.description = value.description
+    if (typeof value.stage === 'string')
+        created.stage = value.stage as ProjectStage
+    if (value.starts_on === null || typeof value.starts_on === 'string') {
+        created.starts_on = value.starts_on
+    }
+    if (value.due_on === null || typeof value.due_on === 'string') {
+        created.due_on = value.due_on
+    }
+    return created
 }
 
 export function projectErrorMessage(error: unknown): string {
@@ -213,11 +221,7 @@ export function projectErrorMessage(error: unknown): string {
     ) {
         return '项目名称已存在。'
     }
-    return formatRequestError(
-        '项目操作失败',
-        error,
-        '项目操作失败，请稍后重试。',
-    )
+    return formatRequestError('项目操作失败', error, errorCopy.generic)
 }
 
 export function createProjectsApi(client: BrowserHttpClient) {

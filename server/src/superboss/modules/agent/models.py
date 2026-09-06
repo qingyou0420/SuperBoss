@@ -5,11 +5,13 @@ from enum import StrEnum
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
     Enum,
     ForeignKey,
+    Identity,
     Index,
     Integer,
     SmallInteger,
@@ -82,6 +84,7 @@ class AgentConversation(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    summarized_until: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     messages: Mapped[list["AgentMessage"]] = relationship(back_populates="conversation")
     cards: Mapped[list["AgentCard"]] = relationship(back_populates="conversation")
 
@@ -94,6 +97,7 @@ class AgentMessage(Base):
             name="ck_agent_messages_role",
         ),
         Index("ix_agent_messages_conversation", "conversation_id", "created_at"),
+        Index("ix_agent_messages_conversation_seq", "conversation_id", "seq"),
     )
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -117,6 +121,7 @@ class AgentMessage(Base):
         ARRAY(PG_UUID(as_uuid=True)), default=list, nullable=False
     )
     token_usage: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict, nullable=False)
+    seq: Mapped[int] = mapped_column(BigInteger, Identity(always=False), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

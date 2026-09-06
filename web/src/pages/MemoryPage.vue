@@ -61,17 +61,25 @@ async function save(item: AgentMemory): Promise<void> {
 }
 
 async function togglePin(item: AgentMemory): Promise<void> {
-    const updated = await agentApi.patchMemory(item.id, {
-        pinned: !item.pinned,
-    })
-    memories.value = memories.value.map((entry) =>
-        entry.id === updated.id ? updated : entry,
-    )
+    try {
+        const updated = await agentApi.patchMemory(item.id, {
+            pinned: !item.pinned,
+        })
+        memories.value = memories.value.map((entry) =>
+            entry.id === updated.id ? updated : entry,
+        )
+    } catch (error) {
+        errorMessage.value = agentErrorMessage(error)
+    }
 }
 
 async function archive(item: AgentMemory): Promise<void> {
-    await agentApi.patchMemory(item.id, { status: 'ARCHIVED' })
-    memories.value = memories.value.filter((entry) => entry.id !== item.id)
+    try {
+        await agentApi.patchMemory(item.id, { status: 'ARCHIVED' })
+        memories.value = memories.value.filter((entry) => entry.id !== item.id)
+    } catch (error) {
+        errorMessage.value = agentErrorMessage(error)
+    }
 }
 
 onMounted(async () => {
@@ -107,7 +115,11 @@ onMounted(async () => {
                                 <el-dropdown-menu>
                                     <el-dropdown-item
                                         @click="togglePin(item)"
-                                        >{{ memoryCopy.pin }}</el-dropdown-item
+                                        >{{
+                                            item.pinned
+                                                ? memoryCopy.unpin
+                                                : memoryCopy.pin
+                                        }}</el-dropdown-item
                                     >
                                     <el-dropdown-item
                                         @click="beginEdit(item)"

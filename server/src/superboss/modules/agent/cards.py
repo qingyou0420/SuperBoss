@@ -61,8 +61,11 @@ async def commit_card(
     audit: AuditService | None,
 ) -> AgentCard:
     try:
-        parsed = parse_card_payload(card.kind, card.payload)
-        object_type, object_id = await _dispatch(session, actor, card, parsed, request_id, storage)
+        async with session.begin_nested():
+            parsed = parse_card_payload(card.kind, card.payload)
+            object_type, object_id = await _dispatch(
+                session, actor, card, parsed, request_id, storage
+            )
     except DomainError as error:
         card.status = CardStatus.FAILED
         card.error = error.code

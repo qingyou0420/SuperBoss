@@ -3,10 +3,11 @@ import { computed, reactive, ref, watch } from 'vue'
 
 import type { AgentCard } from '../../api/agent'
 import { moneyLabel } from '../../api/parse'
-import { CARD_STATUS_LABEL } from '../../copy/glossary'
+import { FIELD_LABEL } from '../../copy/glossary'
 import { chatCopy } from '../../copy/pages/chat'
 import {
     committedHref,
+    committedLabel,
     displayRows,
     draftsFromPayload,
     editFields,
@@ -30,6 +31,7 @@ const emit = defineEmits<{
 
 const revising = ref(false)
 const editing = ref(false)
+const retries = ref(0)
 const instruction = ref('')
 const drafts = reactive<Record<string, string>>({})
 const fields = computed(() => editFields(props.card.kind))
@@ -53,6 +55,11 @@ watch(
 function beginEdit(): void {
     Object.assign(drafts, draftsFromPayload(props.card.payload))
     editing.value = true
+}
+
+function retry(): void {
+    retries.value += 1
+    emit('confirm')
 }
 
 function submitPatch(): void {
@@ -83,7 +90,9 @@ function submitRevise(): void {
         <p v-if="card.status === 'COMMITTED'" class="folded folded--ok">
             {{ chatCopy.committed }} · {{ kindLabel(card.kind) }} {{ title }}
             <span v-if="amountText">{{ amountText }}</span>
-            <router-link :to="committedHref(card)">财务</router-link>
+            <router-link :to="committedHref(card)">{{
+                committedLabel(card.kind)
+            }}</router-link>
         </p>
         <p v-else-if="card.status === 'REJECTED'" class="folded">
             {{ chatCopy.rejected }} · {{ kindLabel(card.kind) }} {{ title }}
@@ -93,14 +102,20 @@ function submitRevise(): void {
         </p>
         <p v-else-if="card.status === 'FAILED'" class="folded folded--danger">
             {{ chatCopy.failed }} · {{ kindLabel(card.kind) }} {{ title }}
-            <el-button text native-type="button" @click="emit('confirm')">{{
-                chatCopy.retry
+            <el-button
+                v-if="retries < 2"
+                text
+                native-type="button"
+                @click="retry"
+                >{{ chatCopy.retry }}</el-button
+            >
+            <el-button v-else text native-type="button" @click="beginEdit">{{
+                chatCopy.editFields
             }}</el-button>
         </p>
         <template v-else>
             <header>
                 <strong>{{ kindLabel(card.kind) }}</strong>
-                <span>{{ CARD_STATUS_LABEL[card.status] }}</span>
             </header>
             <form v-if="editing" class="edit" @submit.prevent="submitPatch">
                 <label v-for="field in fields" :key="field.key">
@@ -137,7 +152,11 @@ function submitRevise(): void {
                 </label>
                 <template v-if="!fields.length">
                     <label v-for="(value, key) in drafts" :key="String(key)">
-                        {{ key === 'category' ? '类别' : String(key) }}
+                        {{
+                            key === 'category'
+                                ? FIELD_LABEL.category
+                                : String(key)
+                        }}
                         <el-input v-model="drafts[key]" />
                     </label>
                 </template>

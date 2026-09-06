@@ -13,6 +13,7 @@ export const financeCopy = {
     category: '类别',
     memo: '备注',
     amount: '金额',
+    amountYuan: '金额（元）',
     visibility: '可见',
     adjust: '调整',
     reason: '原因',
@@ -21,4 +22,14 @@ export const financeCopy = {
     defaultVisibility: '默认：管理层',
     pivot: '项目 × 月',
     month: '月份',
+    amountAndCategory: '请填写金额和类别。',
+    projectRequired: '项目成本需要选择项目。',
+    adjustRequired: '请填写调整后的值和原因。',
+    adjustAmountInvalid: '调整金额无效。',
+    adjustValue: '调整后的值',
+    adjustReason: '调整原因',
+}
+
+export function financeMonthLabel(year: string, month: string): string {
+    return `${year}年${Number(month)}月`
 }

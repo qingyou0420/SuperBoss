@@ -268,9 +268,7 @@ describe('strict browser file API', () => {
     test('maps transport failures to a safe message with status and request id', async () => {
         const mod = await filesModule()
         const detail = 's3://secret@internal provider traceback sentinel'
-        expect(mod.fileErrorMessage(new Error(detail))).toBe(
-            '文件操作失败，请稍后重试。',
-        )
+        expect(mod.fileErrorMessage(new Error(detail))).toBe('操作失败。')
         expect(mod.fileErrorMessage(new Error(detail))).not.toContain(
             'sentinel',
         )

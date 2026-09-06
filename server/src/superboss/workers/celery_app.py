@@ -43,7 +43,7 @@ celery_app.conf.update(
         "superboss.agent.daily_digest": {"queue": "file-scan"},
     },
     task_serializer="json",
-    timezone="UTC",
+    timezone="Asia/Shanghai",
     worker_concurrency=1,
     worker_prefetch_multiplier=1,
 )

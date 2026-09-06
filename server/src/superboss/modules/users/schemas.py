@@ -17,20 +17,12 @@ class StaffCreate(BaseModel):
     username: StrictStr = Field(min_length=3, max_length=32, pattern=USERNAME_PATTERN)
     display_name: StrictStr = Field(min_length=1, max_length=255)
     role: Role = Role.STAFF
-    project_ids: list[UUID] = Field(max_length=1000)
 
     @field_validator("role")
     @classmethod
     def managed_role(cls, value: Role) -> Role:
         if value not in _MANAGED_ROLES:
             raise ValueError("Role must be MANAGER or STAFF")
-        return value
-
-    @field_validator("project_ids")
-    @classmethod
-    def unique_project_ids(cls, value: list[UUID]) -> list[UUID]:
-        if len(set(value)) != len(value):
-            raise ValueError("Project IDs must be unique")
         return value
 
 
@@ -49,26 +41,6 @@ class StaffUpdate(BaseModel):
         return value
 
 
-class ProjectAssignments(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    project_ids: list[UUID] = Field(max_length=1000)
-
-    @field_validator("project_ids")
-    @classmethod
-    def unique_project_ids(cls, value: list[UUID]) -> list[UUID]:
-        if len(set(value)) != len(value):
-            raise ValueError("Project IDs must be unique")
-        return value
-
-
-class UserProjectRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: UUID
-    name: str
-
-
 class OwnerUserRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -78,7 +50,6 @@ class OwnerUserRead(BaseModel):
     role: Role
     status: UserStatus
     last_login_at: datetime | None
-    projects: tuple[UserProjectRead, ...]
 
 
 class StaffCreateRead(BaseModel):

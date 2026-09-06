@@ -40,9 +40,12 @@ export async function loginThroughLocalAccount(
         (url) => url.origin === e2e.baseUrl && url.pathname === homePath,
         { timeout: 120_000 },
     )
-    const me = await page.request.get('/api/v1/auth/me')
-    expect(me.status()).toBe(200)
-    const identity = (await me.json()) as { role: string }
-    expect(identity.role).toBe(expectedRole)
+    const me = await page.evaluate(async () => {
+        const response = await fetch('/api/v1/auth/me', { credentials: 'include' })
+        const body = (await response.json()) as { role?: string }
+        return { status: response.status, role: body.role }
+    })
+    expect(me.status).toBe(200)
+    expect(me.role).toBe(expectedRole)
     await expect(page).toHaveURL(`${e2e.baseUrl}${homePath}`)
 }

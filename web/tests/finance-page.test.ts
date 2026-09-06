@@ -56,7 +56,6 @@ beforeEach(() => {
             id: PROJECT_ID,
             name: '星野合作',
             description: '',
-            is_test: false,
             status: 'ACTIVE',
             stage: 'PLANNING',
             progress_percent: 0,

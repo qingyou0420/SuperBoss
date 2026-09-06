@@ -4,6 +4,7 @@ import {
     type BrowserHttpClient,
     HttpClientError,
 } from './http'
+import { errorCopy } from '../copy/errors'
 import { hasRequiredKeys, isRecord, UUID } from './parse'
 
 const SHA256 = /^[0-9a-f]{64}$/
@@ -286,11 +287,7 @@ function parseUrl(value: unknown): string {
 }
 
 export function fileErrorMessage(error: unknown): string {
-    return formatRequestError(
-        '文件操作失败',
-        error,
-        '文件操作失败，请稍后重试。',
-    )
+    return formatRequestError('文件操作失败', error, errorCopy.generic)
 }
 
 export function createFilesApi(client: BrowserHttpClient) {

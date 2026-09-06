@@ -16,7 +16,7 @@ from superboss.core.config import Settings
 from superboss.main import create_app
 from superboss.modules.auth.models import AuthSession
 from superboss.modules.auth.service import AuthService
-from superboss.modules.projects.models import Project, ProjectMember
+from superboss.modules.projects.models import Project
 from superboss.modules.users.models import Role, User, UserStatus
 from tests.identity import LOCAL_TEST_PASSWORD, local_user
 
@@ -31,7 +31,6 @@ async def api_client(
     with TestClient(app, base_url="https://testserver") as client:
         yield client
     await db_session.rollback()
-    await db_session.execute(delete(ProjectMember))
     await db_session.execute(delete(Project))
     await db_session.execute(delete(AuthSession))
     await db_session.execute(delete(User))
@@ -66,20 +65,20 @@ def _assert_error(response: httpx.Response, status: int, code: str, message: str
 
 
 @pytest.mark.asyncio
-async def test_owner_sees_all_projects_and_create_preserves_is_test(
+async def test_owner_sees_all_projects_and_create_returns_name(
     api_client: TestClient, db_session: AsyncSession
 ) -> None:
-    """Filtering owners by memberships or dropping is_test loses visible project state."""
-    db_session.add(Project(name="Existing", is_test=False))
+    """Filtering owners by memberships loses visible project state."""
+    db_session.add(Project(name="Existing"))
     await db_session.commit()
     _login(api_client, "owner-code")
 
     created = api_client.post(
-        "/api/v1/projects", json={"name": "Sandbox", "is_test": True}, headers=_csrf_headers(api_client)
+        "/api/v1/projects", json={"name": "Sandbox"}, headers=_csrf_headers(api_client)
     )
     assert created.status_code == 201
     assert created.json()["name"] == "Sandbox"
-    assert created.json()["is_test"] is True
+    assert "is_test" not in created.json()
 
     listed = api_client.get("/api/v1/projects")
     assert listed.status_code == 200
@@ -94,8 +93,6 @@ async def test_staff_sees_all_projects_and_cannot_create(
     assigned = Project(name="Assigned")
     hidden = Project(name="Hidden")
     db_session.add_all([staff, assigned, hidden])
-    await db_session.flush()
-    db_session.add(ProjectMember(project_id=assigned.id, user_id=staff.id))
     await db_session.commit()
     _login(api_client, "staff-code")
 
@@ -120,8 +117,6 @@ async def test_cookie_actor_precedes_bearer_without_fallback(
     assigned = Project(name="Source Assigned")
     hidden = Project(name="Source Hidden")
     db_session.add_all([staff, assigned, hidden])
-    await db_session.flush()
-    db_session.add(ProjectMember(project_id=assigned.id, user_id=staff.id))
     await db_session.commit()
 
     _login(api_client, "owner-code")
@@ -261,13 +256,13 @@ def test_project_name_trims_and_rejects_case_insensitive_aliases(api_client: Tes
     _assert_error(duplicate, 409, "PROJECT_NAME_CONFLICT", "A project with this name already exists")
 
 
-def test_is_test_requires_json_boolean(api_client: TestClient) -> None:
-    """Coercing string false silently accepts a non-JSON-boolean API value."""
+def test_unknown_create_fields_are_ignored_or_rejected(api_client: TestClient) -> None:
     _login(api_client, "owner-code")
     response = api_client.post(
-        "/api/v1/projects", json={"name": "Strict", "is_test": "false"}, headers=_csrf_headers(api_client)
+        "/api/v1/projects", json={"name": "Strict"}, headers=_csrf_headers(api_client)
     )
-    _assert_error(response, 422, "VALIDATION_ERROR", "Request validation failed")
+    assert response.status_code == 201
+    assert "is_test" not in response.json()
 
 
 @pytest.mark.asyncio

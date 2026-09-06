@@ -11,7 +11,6 @@ from superboss.modules.audit.service import AuditService
 from superboss.modules.users.schemas import (
     OwnerUserRead,
     PasswordResetRead,
-    ProjectAssignments,
     StaffCreate,
     StaffCreateRead,
     StaffUpdate,
@@ -49,14 +48,6 @@ async def update_staff(request: Request, user_id: UUID, command: StaffUpdate, ac
     current_request_id = request_id(request)
     user = await service.update_staff(actor, user_id, command, current_request_id)
     await service.commit_and_record_success(actor, "user.update", current_request_id, user.id)
-    return OwnerUserRead.model_validate(user)
-
-
-@router.put("/{user_id}/projects", response_model=OwnerUserRead)
-async def replace_projects(request: Request, user_id: UUID, command: ProjectAssignments, actor: Actor = Depends(get_actor), service: OwnerUserService = Depends(get_service)) -> OwnerUserRead:
-    current_request_id = request_id(request)
-    user = await service.replace_projects(actor, user_id, command, current_request_id)
-    await service.commit_and_record_success(actor, "user.projects.replace", current_request_id, user.id)
     return OwnerUserRead.model_validate(user)
 
 

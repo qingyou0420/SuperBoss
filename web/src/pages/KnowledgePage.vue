@@ -82,7 +82,14 @@ async function saveDoc(): Promise<void> {
                     .filter(Boolean),
             })
         } else {
-            await knowledgeApi.create(title.value.trim(), body.value)
+            await knowledgeApi.create(
+                title.value.trim(),
+                body.value,
+                tags.value
+                    .split(/[、,，]/)
+                    .map((item) => item.trim())
+                    .filter(Boolean),
+            )
         }
         drawerOpen.value = false
         await load()
@@ -92,13 +99,21 @@ async function saveDoc(): Promise<void> {
 }
 
 async function publish(doc: KnowledgeDoc): Promise<void> {
-    await knowledgeApi.publish(doc.id)
-    await load()
+    try {
+        await knowledgeApi.publish(doc.id)
+        await load()
+    } catch (error) {
+        errorMessage.value = knowledgeErrorMessage(error)
+    }
 }
 
 async function unpublish(doc: KnowledgeDoc): Promise<void> {
-    await knowledgeApi.update(doc.id, { status: 'DRAFT' })
-    await load()
+    try {
+        await knowledgeApi.update(doc.id, { status: 'DRAFT' })
+        await load()
+    } catch (error) {
+        errorMessage.value = knowledgeErrorMessage(error)
+    }
 }
 
 onMounted(load)
@@ -160,10 +175,15 @@ onMounted(load)
                     </div>
                 </header>
                 <p class="meta">
-                    {{ dateLabel(selected.updated_at) }}
-                    ·
-                    {{ selected.tags.join('、') }}
-                    · {{ DOC_STATUS_LABEL[selected.status] }}
+                    {{
+                        [
+                            dateLabel(selected.updated_at),
+                            selected.tags.join('、'),
+                            DOC_STATUS_LABEL[selected.status],
+                        ]
+                            .filter(Boolean)
+                            .join(' · ')
+                    }}
                 </p>
                 <div class="markdown" v-html="render(selected.body_md)" />
                 <section v-for="point in selected.points" :key="point.id">

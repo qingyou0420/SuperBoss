@@ -9,6 +9,8 @@ import {
     AUDIT_ACTION_LABEL,
     AUDIT_OUTCOME_LABEL,
     auditActionLabel,
+    auditObjectLabel,
+    isKnownAuditAction,
 } from '../copy/audit'
 import { auditPageCopy } from '../copy/pages/audit'
 
@@ -63,15 +65,18 @@ onMounted(load)
                 }}</template>
             </el-table-column>
             <el-table-column :label="auditPageCopy.action" min-width="160">
+                <template #default="{ row }">
+                    <span
+                        :class="{ unknown: !isKnownAuditAction(row.action) }"
+                        >{{ auditActionLabel(row.action) }}</span
+                    >
+                </template>
+            </el-table-column>
+            <el-table-column :label="auditPageCopy.object" min-width="120">
                 <template #default="{ row }">{{
-                    auditActionLabel(row.action)
+                    auditObjectLabel(row.object_type)
                 }}</template>
             </el-table-column>
-            <el-table-column
-                :label="auditPageCopy.object"
-                min-width="120"
-                prop="object_type"
-            />
             <el-table-column :label="auditPageCopy.result" width="90">
                 <template #default="{ row }">{{
                     AUDIT_OUTCOME_LABEL[
@@ -82,3 +87,9 @@ onMounted(load)
         </el-table>
     </section>
 </template>
+
+<style scoped>
+.unknown {
+    color: var(--sb-ink-3);
+}
+</style>

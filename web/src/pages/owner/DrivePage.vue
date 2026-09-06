@@ -16,10 +16,9 @@ import EmptyLine from '../../components/ui/EmptyLine.vue'
 import InlineError from '../../components/ui/InlineError.vue'
 import MultipartUploader from '../../components/files/MultipartUploader.vue'
 import PageHeader from '../../components/ui/PageHeader.vue'
-import UploadTray, {
-    type TrayItem,
-} from '../../components/files/UploadTray.vue'
-import { FILE_STATE_LABEL } from '../../copy/glossary'
+import UploadTray from '../../components/files/UploadTray.vue'
+import { useMultipartUpload } from '../../components/files/useMultipartUpload'
+import { FILE_STATE_LABEL, FOLDER_NAME } from '../../copy/glossary'
 import { driveCopy } from '../../copy/pages/drive'
 import { useAuthStore } from '../../stores/auth'
 
@@ -35,7 +34,9 @@ const currentId = ref('')
 const newFolderName = ref('')
 const currentResult = ref<FileUploadCompleted>()
 const downloadUrl = ref('')
-const tray = ref<TrayItem[]>([])
+const { tray, upload, clearTray } = useMultipartUpload(
+    () => props.allowedObjectOrigin,
+)
 const loading = ref(true)
 const errorMessage = ref('')
 const renamingId = ref('')
@@ -117,7 +118,8 @@ async function loadFolders(): Promise<void> {
             currentId.value =
                 folders.value.find(
                     (folder) =>
-                        folder.name === '项目' && folder.parent_id === null,
+                        folder.name === FOLDER_NAME.PROJECTS &&
+                        folder.parent_id === null,
                 )?.id ??
                 folders.value.find((folder) => folder.parent_id === null)?.id ??
                 ''
@@ -147,7 +149,7 @@ async function createFolder(): Promise<void> {
         folders.value.push(created)
         newFolderName.value = ''
     } catch {
-        errorMessage.value = '无法创建目录。'
+        errorMessage.value = driveCopy.createFailed
     }
 }
 
@@ -187,7 +189,7 @@ async function renameFile(file: DriveFile): Promise<void> {
         )
         renamingId.value = ''
     } catch {
-        errorMessage.value = '无法重命名。'
+        errorMessage.value = driveCopy.renameFailed
     }
 }
 
@@ -196,7 +198,7 @@ async function removeFile(file: DriveFile): Promise<void> {
         await filesApi.remove(file.id)
         files.value = files.value.filter((item) => item.id !== file.id)
     } catch {
-        errorMessage.value = '无法删除文件。'
+        errorMessage.value = driveCopy.deleteFailed
     }
 }
 
@@ -207,14 +209,14 @@ async function moveFile(file: DriveFile): Promise<void> {
         files.value = files.value.filter((item) => item.id !== file.id)
         movingId.value = ''
     } catch {
-        errorMessage.value = '无法移动文件。'
+        errorMessage.value = driveCopy.moveFailed
     }
 }
 
 function showCompleted(result: FileUploadCompleted): void {
     currentResult.value = result
     downloadUrl.value = ''
-    tray.value = []
+    clearTray()
     void loadFiles()
 }
 
@@ -225,7 +227,7 @@ async function prepareDownload(): Promise<void> {
     try {
         downloadUrl.value = await filesApi.download(result.file_id)
         currentResult.value = { ...result, state: 'CLEAN' }
-        tray.value = []
+        clearTray()
     } catch (error) {
         if (error instanceof FileDownloadUnavailableError) {
             currentResult.value = { ...result, state: error.state }
@@ -247,6 +249,14 @@ function fileTone(file: DriveFile): 'muted' | 'danger' | undefined {
     return undefined
 }
 
+async function onDropped(list: File[]): Promise<void> {
+    if (!validObjectOrigin.value || !currentId.value) return
+    for (const file of list) {
+        const result = await upload(file, currentId.value)
+        if (result) showCompleted(result)
+    }
+}
+
 watch(currentId, () => {
     void loadFiles()
 })
@@ -254,7 +264,7 @@ onMounted(loadFolders)
 </script>
 
 <template>
-    <DropZone>
+    <DropZone @files="onDropped">
         <section class="drive-page" aria-labelledby="drive-title">
             <PageHeader :title="driveCopy.title" heading-id="drive-title">
                 <span v-if="!validObjectOrigin" class="hint">{{
@@ -262,7 +272,7 @@ onMounted(loadFolders)
                 }}</span>
             </PageHeader>
             <InlineError :message="errorMessage" />
-            <nav class="crumbs" aria-label="目录">
+            <nav class="crumbs" :aria-label="driveCopy.crumbs">
                 <el-button
                     v-for="folder in breadcrumbs"
                     :key="folder.id"
@@ -367,7 +377,7 @@ onMounted(loadFolders)
                                 <el-select
                                     id="move-target"
                                     v-model="moveTarget"
-                                    aria-label="目标目录"
+                                    :aria-label="driveCopy.targetFolder"
                                     :placeholder="driveCopy.targetFolder"
                                 >
                                     <el-option
@@ -398,11 +408,11 @@ onMounted(loadFolders)
                         <el-button
                             v-if="canCheckDownload"
                             @click="prepareDownload"
-                            >检查并获取下载</el-button
+                            >{{ driveCopy.download }}</el-button
                         >
-                        <a v-if="downloadUrl" :href="downloadUrl"
-                            >下载本次文件</a
-                        >
+                        <a v-if="downloadUrl" :href="downloadUrl">{{
+                            driveCopy.download
+                        }}</a>
                     </div>
                 </div>
             </div>

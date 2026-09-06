@@ -13,6 +13,7 @@ import { projectsApi } from '../api/projects'
 import ProposalCard from '../components/chat/ProposalCard.vue'
 import MultipartUploader from '../components/files/MultipartUploader.vue'
 import InlineError from '../components/ui/InlineError.vue'
+import { FOLDER_NAME } from '../copy/glossary'
 import { chatCopy } from '../copy/pages/chat'
 
 withDefaults(
@@ -142,7 +143,9 @@ async function send(): Promise<void> {
             const alreadyStored =
                 lastUser &&
                 ((content && lastUser.content.startsWith(content)) ||
-                    (!content && fileId && lastUser.content.includes('附件')))
+                    (!content &&
+                        fileId &&
+                        lastUser.content.includes(chatCopy.attachment)))
             if (!alreadyStored) {
                 const turn = await agentApi.send(
                     currentId.value,
@@ -239,8 +242,10 @@ onMounted(async () => {
             projectsApi.list().catch(() => []),
         ])
         folderId.value =
-            folders.find((folder) => folder.name === '老板私有')?.id ??
-            folders.find((folder) => folder.name === '项目')?.id ??
+            folders.find((folder) => folder.name === FOLDER_NAME.OWNER_PRIVATE)
+                ?.id ??
+            folders.find((folder) => folder.name === FOLDER_NAME.PROJECTS)
+                ?.id ??
             folders[0]?.id ??
             ''
         folderNames.value = Object.fromEntries(
@@ -368,11 +373,11 @@ onMounted(async () => {
                         @keydown.enter.exact.prevent="send"
                     />
                     <el-button
-                        type="primary"
                         native-type="submit"
                         :loading="sending"
                         :disabled="sending || offline"
-                        >{{ chatCopy.send }}</el-button
+                        :aria-label="chatCopy.send"
+                        >↑</el-button
                     >
                 </div>
             </form>

@@ -13,7 +13,7 @@ from superboss.core.config import Settings
 from superboss.main import create_app
 from superboss.modules.audit.models import AuditLog
 from superboss.modules.auth.models import AuthSession
-from superboss.modules.projects.models import Project, ProjectMember
+from superboss.modules.projects.models import Project
 from superboss.modules.users.models import User
 from tests.identity import LOCAL_TEST_PASSWORD, local_user
 
@@ -29,7 +29,6 @@ async def client(
         yield test_client
     await db_session.rollback()
     await db_session.execute(delete(AuditLog))
-    await db_session.execute(delete(ProjectMember))
     await db_session.execute(delete(Project))
     await db_session.execute(delete(AuthSession))
     await db_session.execute(delete(User))

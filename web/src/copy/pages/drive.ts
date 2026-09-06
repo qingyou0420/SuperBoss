@@ -15,12 +15,26 @@ export const driveCopy = {
     unconfigured: '上传未配置',
     create: '创建',
     confirm: '确定',
-    confirmMove: '确定移动',
+    confirmMove: '放到这里',
     download: '下载',
     newSubfolder: '新建子目录',
     targetFolder: '目标目录',
     scanning: '扫描中',
     infected: '检测到风险，文件不可下载',
     scanFailed: '扫描失败，文件不可下载，请重新上传',
-    stillScanning: '文件仍在扫描中，请稍后重试。',
+    stillScanning: '文件仍在扫描中。',
+    crumbs: '目录',
+    createFailed: '无法创建目录。',
+    renameFailed: '无法重命名。',
+    deleteFailed: '无法删除文件。',
+    moveFailed: '无法移动文件。',
+    uploading: '上传中',
+    uploadingEllipsis: '上传中…',
+    tooLarge: '文件超过 100MB 上限。',
+    emptyFile: '请选择非空文件。',
+    unsupportedType: '不支持的文件类型。',
+}
+
+export function uploadingPercent(percent: number): string {
+    return `${driveCopy.uploading} ${percent}%`
 }

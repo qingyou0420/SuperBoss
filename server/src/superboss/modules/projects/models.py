@@ -5,7 +5,6 @@ from enum import StrEnum
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
-    Boolean,
     CheckConstraint,
     Date,
     DateTime,
@@ -60,7 +59,6 @@ class Project(Base):
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="", server_default="", nullable=False)
-    is_test: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[ProjectStatus] = mapped_column(
         Enum(ProjectStatus, name="project_status", native_enum=False),
         default=ProjectStatus.ACTIVE,
@@ -116,17 +114,3 @@ class ProjectMilestone(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     project: Mapped[Project] = relationship(back_populates="milestones")
-
-
-class ProjectMember(Base):
-    __tablename__ = "project_members"
-
-    project_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
-    )
-    user_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )

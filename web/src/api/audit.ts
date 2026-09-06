@@ -1,3 +1,4 @@
+import { errorCopy } from '../copy/errors'
 import { apiClient, formatRequestError, type BrowserHttpClient } from './http'
 import { isRecord, UUID } from './parse'
 
@@ -54,11 +55,7 @@ function parseEvent(value: unknown): AuditEvent {
 }
 
 export function auditErrorMessage(error: unknown): string {
-    return formatRequestError(
-        '审计记录暂时无法加载',
-        error,
-        '审计记录暂时无法加载，请稍后重试。',
-    )
+    return formatRequestError('审计记录加载失败', error, errorCopy.generic)
 }
 
 export function createAuditApi(client: BrowserHttpClient) {

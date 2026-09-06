@@ -60,7 +60,7 @@ test('独立 STAFF 直接请求项目、用户管理、外项目文件与公司�
     await loginThroughLocalAccount(page, 'STAFF', e2e.staffCredentials)
     const headers = await csrfHeaders(page.context())
     const projectCreate = await page.request.post('/api/v1/projects', {
-        data: { is_test: true, name: `STAFF forbidden ${randomUUID()}` },
+        data: { name: `STAFF forbidden ${randomUUID()}` },
         headers,
     })
     const userList = await page.request.get('/api/v1/owner/users')

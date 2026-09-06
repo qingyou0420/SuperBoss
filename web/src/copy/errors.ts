@@ -4,6 +4,7 @@ export const errorCopy = {
     unauthorized: '登录已失效，请重新登录。',
     forbidden: '没有权限',
     retry: '重试',
+    unavailable: '操作失败。',
 }
 
 export function shortRequestId(id: string | undefined): string {

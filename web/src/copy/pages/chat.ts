@@ -11,6 +11,11 @@ export const chatCopy = {
     placeholder: '对霜月说……',
     composerLabel: '给霜月',
     send: '发送',
+    finance: '财务',
+    projects: '项目',
+    drive: '网盘',
+    knowledge: '知识库',
+    memory: '记忆',
     confirm: '确认入库',
     revise: '修改',
     editFields: '直接改',
@@ -25,4 +30,5 @@ export const chatCopy = {
     offline: '霜月暂时离线',
     you: '你',
     assistant: '霜月',
+    attachment: '附件',
 }

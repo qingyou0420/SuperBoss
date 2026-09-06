@@ -29,6 +29,7 @@ const creating = ref(false)
 const errorMessage = ref('')
 const drawerOpen = ref(false)
 const filter = ref<'active' | 'archived'>('active')
+let loadSeq = 0
 
 const visible = computed(() =>
     projects.value.filter((project) =>
@@ -46,17 +47,18 @@ function dueTone(project: Project): 'warn' | 'muted' {
 }
 
 async function loadProjects(): Promise<void> {
+    const seq = (loadSeq += 1)
     loading.value = true
     errorMessage.value = ''
     try {
         const loaded = await projectsApi.list()
-        const merged = new Map(loaded.map((project) => [project.id, project]))
-        for (const project of projects.value) merged.set(project.id, project)
-        projects.value = [...merged.values()]
+        if (seq !== loadSeq) return
+        projects.value = loaded
     } catch {
+        if (seq !== loadSeq) return
         errorMessage.value = projectsCopy.loadFailed
     } finally {
-        loading.value = false
+        if (seq === loadSeq) loading.value = false
     }
 }
 
@@ -79,17 +81,20 @@ async function createProject(): Promise<void> {
     try {
         const created = await projectsApi.create({
             name: canonicalName,
-            is_test: false,
             description: description.value,
             stage: stage.value,
+            starts_on: startsOn.value || null,
+            due_on: dueOn.value || null,
         })
-        projects.value.push(created)
         name.value = ''
         description.value = ''
         stage.value = 'PLANNING'
         startsOn.value = ''
         dueOn.value = ''
         drawerOpen.value = false
+        await loadProjects()
+        const others = projects.value.filter((item) => item.id !== created.id)
+        projects.value = [...others, created]
     } catch (error) {
         errorMessage.value = projectErrorMessage(error)
     } finally {
@@ -173,7 +178,7 @@ onMounted(loadProjects)
                     native-type="submit"
                     :loading="creating"
                     :disabled="creating"
-                    >创建项目</el-button
+                    >{{ projectsCopy.createSubmit }}</el-button
                 >
             </form>
         </el-drawer>

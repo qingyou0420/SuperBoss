@@ -6,7 +6,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { createAppRouter, homePath } from '../src/app/router'
-import AppLayout from '../src/layouts/AppLayout.vue'
+import AppShell from '../src/layouts/AppShell.vue'
 import { useAuthStore } from '../src/stores/auth'
 
 const DRIVE_PATH = '../src/pages/owner/DrivePage.vue'
@@ -62,7 +62,6 @@ beforeEach(() => {
     mocks.projectsApi.list.mockResolvedValue([
         {
             id: PROJECT_ID,
-            is_test: false,
             name: '客户方案',
             status: 'ACTIVE',
             description: '',
@@ -115,7 +114,7 @@ describe('Task13 OWNER navigation and Drive integration', () => {
         })
         await router.push('/owner')
         await router.isReady()
-        render(AppLayout, {
+        render(AppShell, {
             global: { plugins: [createPinia(), router, ElementPlus] },
         })
 
@@ -187,20 +186,18 @@ describe('Task13 OWNER navigation and Drive integration', () => {
         await fireEvent.click(screen.getByRole('button', { name: '完成上传' }))
 
         const check = screen.getByRole('button', {
-            name: '检查并获取下载',
+            name: '下载',
         })
         await fireEvent.click(check)
+        expect(await screen.findByText('文件仍在扫描中。')).toBeInTheDocument()
         expect(
-            await screen.findByText('文件仍在扫描中，请稍后重试。'),
-        ).toBeInTheDocument()
-        expect(
-            screen.queryByRole('link', { name: '下载本次文件' }),
+            screen.queryByRole('link', { name: '下载' }),
         ).not.toBeInTheDocument()
         expect(check).toBeInTheDocument()
 
         await fireEvent.click(check)
         const link = await screen.findByRole('link', {
-            name: '下载本次文件',
+            name: '下载',
         })
         expect(link).toHaveAttribute(
             'href',
@@ -246,11 +243,11 @@ describe('Task13 OWNER navigation and Drive integration', () => {
             expect(screen.getByText(message)).toBeInTheDocument()
             expect(
                 screen.queryByRole('button', {
-                    name: '检查并获取下载',
+                    name: '下载',
                 }),
             ).not.toBeInTheDocument()
             expect(
-                screen.queryByRole('link', { name: '下载本次文件' }),
+                screen.queryByRole('link', { name: '下载' }),
             ).not.toBeInTheDocument()
         },
     )
@@ -285,7 +282,7 @@ describe('Task13 OWNER navigation and Drive integration', () => {
             )
             await fireEvent.click(
                 screen.getByRole('button', {
-                    name: '检查并获取下载',
+                    name: '下载',
                 }),
             )
 
@@ -294,11 +291,11 @@ describe('Task13 OWNER navigation and Drive integration', () => {
             expect(mocks.filesApi.download).toHaveBeenCalledWith(FILE_ID)
             expect(
                 screen.queryByRole('button', {
-                    name: '检查并获取下载',
+                    name: '下载',
                 }),
             ).not.toBeInTheDocument()
             expect(
-                screen.queryByRole('link', { name: '下载本次文件' }),
+                screen.queryByRole('link', { name: '下载' }),
             ).not.toBeInTheDocument()
         },
     )
@@ -392,7 +389,7 @@ describe('Task13 OWNER navigation and Drive integration', () => {
         await fireEvent.click(
             await screen.findByRole('option', { name: '公司' }),
         )
-        await fireEvent.click(screen.getByRole('button', { name: '确定移动' }))
+        await fireEvent.click(screen.getByRole('button', { name: '放到这里' }))
         expect(mocks.filesApi.move).toHaveBeenCalledWith(FILE_ID, destId)
         expect(screen.queryByText('新方案.pdf')).not.toBeInTheDocument()
     })

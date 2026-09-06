@@ -6,6 +6,7 @@ import {
     filesApi,
     type FileUploadCompleted,
 } from '../../api/files'
+import { driveCopy, uploadingPercent } from '../../copy/pages/drive'
 import {
     createMultipartUploader,
     createPresignedUploadTransport,
@@ -34,9 +35,9 @@ const totalBytes = ref(0)
 let activeUploader: ReturnType<typeof createMultipartUploader> | undefined
 
 function userErrorText(error: UploadUserError): string {
-    if (error.code === 'TOO_LARGE') return '文件超过 100MB 上限。'
-    if (error.code === 'EMPTY') return '请选择非空文件。'
-    return '不支持的文件类型。'
+    if (error.code === 'TOO_LARGE') return driveCopy.tooLarge
+    if (error.code === 'EMPTY') return driveCopy.emptyFile
+    return driveCopy.unsupportedType
 }
 
 async function uploadFile(file: File): Promise<void> {
@@ -58,7 +59,7 @@ async function uploadFile(file: File): Promise<void> {
                 totalBytes.value = total
                 const percent =
                     total === 0 ? 0 : Math.round((done / total) * 100)
-                status.value = `上传中 ${percent}%`
+                status.value = uploadingPercent(percent)
             },
             uploadPart: transport.put,
         })
@@ -66,7 +67,7 @@ async function uploadFile(file: File): Promise<void> {
             file,
             folder_id: props.folderId,
         })
-        status.value = '扫描中'
+        status.value = driveCopy.scanning
         emit('completed', result)
     } catch (error) {
         if (error instanceof UploadUserError) {
@@ -101,8 +102,12 @@ onBeforeUnmount(cancel)
             :drag="!compact"
             @change="onChange"
         >
-            <span v-if="compact" class="clip" aria-label="上传">📎</span>
-            <span v-else>{{ pending ? '上传中…' : '上传' }}</span>
+            <span v-if="compact" class="clip" :aria-label="driveCopy.upload"
+                >📎</span
+            >
+            <span v-else>{{
+                pending ? driveCopy.uploadingEllipsis : driveCopy.upload
+            }}</span>
         </el-upload>
         <p v-if="status" role="status">{{ status }}</p>
         <p v-if="errorMessage" role="alert">{{ errorMessage }}</p>

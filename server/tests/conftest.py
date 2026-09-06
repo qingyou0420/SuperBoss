@@ -25,7 +25,7 @@ from superboss.modules.auth.models import AuthSession
 from superboss.modules.files.models import File, Folder
 from superboss.modules.finance.models import FinanceAdjustment, FinanceEntry
 from superboss.modules.knowledge.models import KnowledgeDoc, KnowledgePoint
-from superboss.modules.projects.models import Project, ProjectMember, ProjectMilestone
+from superboss.modules.projects.models import Project, ProjectMilestone
 from superboss.modules.users.models import Role, User
 from tests.identity import local_user
 
@@ -75,7 +75,6 @@ async def db_session(postgres_database: str) -> AsyncIterator[AsyncSession]:
             await connection.execute(delete(File))
             await connection.execute(delete(Folder))
             await connection.execute(delete(ProjectMilestone))
-            await connection.execute(delete(ProjectMember))
             await connection.execute(delete(Project))
             await connection.execute(delete(User))
 
