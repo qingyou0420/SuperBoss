@@ -1,12 +1,12 @@
 """Local browser authentication routes."""
 
-from collections.abc import AsyncIterator
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core.actors import Actor
+from superboss.core.db import get_session
 from superboss.core.errors import AuthenticationFailedError, UnauthenticatedError
 from superboss.core.security import new_csrf_token
 from superboss.modules.audit.models import AuditLog
@@ -21,19 +21,6 @@ from superboss.modules.auth.service import AuthService, CompletedLogin, InvalidS
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 _SYSTEM_ACTOR_ID = UUID(int=0)
-
-
-async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
-    session = request.app.state.session_factory()
-    try:
-        yield session
-    except Exception:
-        await session.rollback()
-        raise
-    else:
-        await session.commit()
-    finally:
-        await session.close()
 
 
 def get_service(request: Request, session: AsyncSession = Depends(get_session)) -> AuthService:

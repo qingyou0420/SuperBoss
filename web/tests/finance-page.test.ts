@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
         summary: vi.fn(),
         create: vi.fn(),
         adjust: vi.fn(),
+        alerts: vi.fn(),
     },
     projectsApi: {
         list: vi.fn(),
@@ -64,6 +65,7 @@ beforeEach(() => {
             milestones: [],
         },
     ])
+    mocks.financeApi.alerts.mockResolvedValue([])
     mocks.financeApi.list.mockResolvedValue([
         {
             id: PROJECT_ID,
@@ -101,10 +103,9 @@ describe('finance page by role', () => {
         const pinia = setRole('OWNER')
         mocks.financeApi.create.mockResolvedValue({})
         render(FinancePage, { global: { plugins: [pinia, ElementPlus] } })
-        expect(
-            await screen.findByRole('heading', { name: '公司' }),
-        ).toBeInTheDocument()
+        expect(await screen.findByText('公司运营成本')).toBeInTheDocument()
         expect(await screen.findByText('外包')).toBeInTheDocument()
+        await fireEvent.click(screen.getByRole('button', { name: '记一笔' }))
         expect(screen.getByRole('button', { name: '保存' })).toBeInTheDocument()
         await fireEvent.update(screen.getByLabelText('类别'), '房租')
         await fireEvent.update(screen.getByLabelText('金额（元）'), '8000')
@@ -134,16 +135,14 @@ describe('finance page by role', () => {
         })
         render(FinancePage, { global: { plugins: [pinia, ElementPlus] } })
         expect(await screen.findByText('外包')).toBeInTheDocument()
-        expect(screen.getAllByText(/12000.00 元/).length).toBeGreaterThan(0)
+        expect(screen.getAllByText(/¥ 12,000.00/).length).toBeGreaterThan(0)
         expect(
             screen.queryByRole('button', { name: '保存' }),
         ).not.toBeInTheDocument()
         expect(
             screen.queryByRole('button', { name: '调整' }),
         ).not.toBeInTheDocument()
-        expect(
-            screen.queryByRole('heading', { name: '公司' }),
-        ).not.toBeInTheDocument()
+        expect(screen.queryByText('公司运营成本')).not.toBeInTheDocument()
         expect(screen.queryByText(/收入/)).not.toBeInTheDocument()
     })
 })

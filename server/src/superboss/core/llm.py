@@ -1,6 +1,7 @@
 """OpenAI-compatible chat-completions client with tools and streaming."""
 
 import json
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -9,9 +10,20 @@ import httpx
 
 from superboss.core.config import Settings
 
+_LOG = logging.getLogger(__name__)
+
 
 class LLMUnavailable(Exception):
     """The configured model endpoint cannot be used."""
+
+
+class LLMRequestError(Exception):
+    """The model endpoint rejected the request."""
+
+    def __init__(self, status_code: int | None, body: str) -> None:
+        self.status_code = status_code
+        self.body = body
+        super().__init__(f"LLM request failed ({status_code})")
 
 
 @dataclass
@@ -156,10 +168,16 @@ class OpenAICompatibleLLM:
                     json=self._payload(messages, tools, stream=False),
                     headers=self._headers(),
                 )
-                response.raise_for_status()
-                body = response.json()
+        except LLMUnavailable:
+            raise
         except Exception as error:
+            _LOG.warning("llm transport failed: %s", error)
             raise LLMUnavailable() from error
+        if response.status_code >= 400:
+            body_text = response.text[:200]
+            _LOG.warning("llm http %s %s", response.status_code, body_text)
+            raise LLMRequestError(response.status_code, body_text)
+        body = response.json()
         choice = (body.get("choices") or [{}])[0]
         message = choice.get("message") or {}
         usage = body.get("usage") or {}
@@ -199,7 +217,10 @@ class OpenAICompatibleLLM:
                     headers=self._headers(),
                 ) as response,
             ):
-                response.raise_for_status()
+                if response.status_code >= 400:
+                    error_body = (await response.aread())[:200].decode("utf-8", errors="replace")
+                    _LOG.warning("llm http %s %s", response.status_code, error_body)
+                    raise LLMRequestError(response.status_code, error_body)
                 async for line in response.aiter_lines():
                     if not line.startswith("data:"):
                         continue
@@ -215,9 +236,10 @@ class OpenAICompatibleLLM:
                     piece = apply_openai_delta(body, tools=collected, usage=usage)
                     if piece:
                         yield LLMStreamChunk(content=piece)
-        except LLMUnavailable:
+        except (LLMUnavailable, LLMRequestError):
             raise
         except Exception as error:
+            _LOG.warning("llm transport failed: %s", error)
             raise LLMUnavailable() from error
         yield LLMStreamChunk(
             done=True,

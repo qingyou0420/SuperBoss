@@ -93,7 +93,8 @@ export function formatRequestError(
     const status = responseStatus(error)
     if (!status) return fallback
     const id = requestIdFromError(error)
-    return id ? `${prefix}（${status}，${id}）` : `${prefix}（${status}）`
+    const short = id && id.length > 8 ? id.slice(0, 8) : id
+    return short ? `${prefix}（${status}，${short}）` : `${prefix}（${status}）`
 }
 
 function csrfToken(): string | undefined {

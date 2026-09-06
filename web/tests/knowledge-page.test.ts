@@ -36,7 +36,9 @@ describe('knowledge page', () => {
             must_change_password: false,
         }
         render(KnowledgePage, { global: { plugins: [pinia, ElementPlus] } })
-        expect(await screen.findByText('星野合作')).toBeInTheDocument()
+        expect(
+            await screen.findByRole('heading', { name: '星野合作' }),
+        ).toBeInTheDocument()
         expect(
             screen.queryByRole('button', { name: '保存草稿' }),
         ).not.toBeInTheDocument()

@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase
+from starlette.requests import Request
 
 from superboss.core.config import get_settings
 
@@ -33,3 +34,17 @@ async def get_db_session() -> AsyncIterator[AsyncSession]:
     """Provide one transactional unit-of-work session for a request."""
     async with async_session_factory()() as session:
         yield session
+
+
+async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
+    """Open the app session factory, commit on success, roll back on error."""
+    session = request.app.state.session_factory()
+    try:
+        yield session
+    except Exception:
+        await session.rollback()
+        raise
+    else:
+        await session.commit()
+    finally:
+        await session.close()

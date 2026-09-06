@@ -92,7 +92,7 @@ class ProjectService:
             ),
         )
         if project is None:
-            raise NotFoundError()
+            raise NotFoundError("PROJECT_NOT_FOUND", "Project not found")
         return project
 
     async def create(
@@ -112,7 +112,9 @@ class ProjectService:
             await self.session.flush()
         except IntegrityError as error:
             await self.session.rollback()
-            raise ConflictError() from error
+            raise ConflictError(
+                "PROJECT_NAME_CONFLICT", "A project with this name already exists"
+            ) from error
         await self.session.refresh(project, attribute_names=["milestones"])
         return project
 
@@ -180,7 +182,9 @@ class ProjectService:
             await self.session.flush()
         except IntegrityError as error:
             await self.session.rollback()
-            raise ConflictError() from error
+            raise ConflictError(
+                "PROJECT_NAME_CONFLICT", "A project with this name already exists"
+            ) from error
         return project
 
     async def replace_milestones(

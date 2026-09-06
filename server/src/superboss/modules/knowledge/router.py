@@ -1,12 +1,12 @@
 """Knowledge routes."""
 
-from collections.abc import AsyncIterator
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core.actors import Actor, get_actor
+from superboss.core.db import get_session
 from superboss.modules.knowledge.schemas import (
     KnowledgeDocCreate,
     KnowledgeDocRead,
@@ -15,19 +15,6 @@ from superboss.modules.knowledge.schemas import (
 from superboss.modules.knowledge.service import KnowledgeService
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
-
-
-async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
-    session = request.app.state.session_factory()
-    try:
-        yield session
-    except Exception:
-        await session.rollback()
-        raise
-    else:
-        await session.commit()
-    finally:
-        await session.close()
 
 
 def get_service(session: AsyncSession = Depends(get_session)) -> KnowledgeService:

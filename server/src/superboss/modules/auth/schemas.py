@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
 
@@ -46,6 +47,7 @@ class PasswordChangeCommand(BaseModel):
 class AuthUserRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
+    id: UUID
     username: str
     display_name: str
     role: Role

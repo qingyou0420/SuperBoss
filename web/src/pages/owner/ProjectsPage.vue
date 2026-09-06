@@ -1,30 +1,49 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 
+import { dateShort } from '../../api/parse'
 import {
     projectErrorMessage,
     projectsApi,
     type Project,
     type ProjectStage,
 } from '../../api/projects'
+import Dot from '../../components/ui/Dot.vue'
+import EmptyLine from '../../components/ui/EmptyLine.vue'
+import InlineError from '../../components/ui/InlineError.vue'
+import PageHeader from '../../components/ui/PageHeader.vue'
+import { STAGE_LABEL } from '../../copy/glossary'
+import { projectsCopy } from '../../copy/pages/projects'
 import { useAuthStore } from '../../stores/auth'
-
-const STAGE_LABEL: Record<ProjectStage, string> = {
-    PLANNING: '立项',
-    ACTIVE: '进行中',
-    DELIVERING: '交付中',
-    REVIEW: '复盘',
-    ARCHIVED: '已归档',
-}
 
 const auth = useAuthStore()
 const canCreate = computed(() => auth.user?.role === 'OWNER')
 const projects = ref<Project[]>([])
 const name = ref('')
-const isTest = ref(false)
+const description = ref('')
+const stage = ref<ProjectStage>('PLANNING')
+const startsOn = ref('')
+const dueOn = ref('')
 const loading = ref(false)
 const creating = ref(false)
 const errorMessage = ref('')
+const drawerOpen = ref(false)
+const filter = ref<'active' | 'archived'>('active')
+
+const visible = computed(() =>
+    projects.value.filter((project) =>
+        filter.value === 'archived'
+            ? project.stage === 'ARCHIVED'
+            : project.stage !== 'ARCHIVED',
+    ),
+)
+
+function dueTone(project: Project): 'warn' | 'muted' {
+    if (!project.due_on) return 'muted'
+    const due = new Date(`${project.due_on}T00:00:00`)
+    const soon = Date.now() + 14 * 24 * 60 * 60 * 1000
+    return due.getTime() <= soon ? 'warn' : 'muted'
+}
 
 async function loadProjects(): Promise<void> {
     loading.value = true
@@ -35,7 +54,7 @@ async function loadProjects(): Promise<void> {
         for (const project of projects.value) merged.set(project.id, project)
         projects.value = [...merged.values()]
     } catch {
-        errorMessage.value = '项目列表暂时无法加载，请稍后重试。'
+        errorMessage.value = projectsCopy.loadFailed
     } finally {
         loading.value = false
     }
@@ -48,11 +67,11 @@ async function createProject(): Promise<void> {
         '',
     )
     if (!canonicalName) {
-        errorMessage.value = '请输入项目名称。'
+        errorMessage.value = projectsCopy.nameRequired
         return
     }
     if ([...canonicalName].length > 255) {
-        errorMessage.value = '项目名称不能超过 255 个字符。'
+        errorMessage.value = projectsCopy.tooLong
         return
     }
     creating.value = true
@@ -60,11 +79,17 @@ async function createProject(): Promise<void> {
     try {
         const created = await projectsApi.create({
             name: canonicalName,
-            is_test: isTest.value,
+            is_test: false,
+            description: description.value,
+            stage: stage.value,
         })
         projects.value.push(created)
         name.value = ''
-        isTest.value = false
+        description.value = ''
+        stage.value = 'PLANNING'
+        startsOn.value = ''
+        dueOn.value = ''
+        drawerOpen.value = false
     } catch (error) {
         errorMessage.value = projectErrorMessage(error)
     } finally {
@@ -77,104 +102,126 @@ onMounted(loadProjects)
 
 <template>
     <section class="projects-page" aria-labelledby="projects-title">
-        <header>
-            <p class="projects-page__eyebrow">
-                {{ auth.user?.role || '工作台' }}
-            </p>
-            <h1 id="projects-title">项目管理</h1>
-        </header>
-
-        <el-card v-if="canCreate" shadow="never">
-            <form class="project-form" @submit.prevent="createProject">
-                <label for="project-name">项目名称</label>
+        <PageHeader :title="projectsCopy.title" heading-id="projects-title">
+            <el-button
+                text
+                :class="{ active: filter === 'active' }"
+                @click="filter = 'active'"
+                >{{ projectsCopy.active }}</el-button
+            >
+            <el-button
+                text
+                :class="{ active: filter === 'archived' }"
+                @click="filter = 'archived'"
+                >{{ projectsCopy.archived }}</el-button
+            >
+            <el-button v-if="canCreate" text @click="drawerOpen = true">{{
+                projectsCopy.create
+            }}</el-button>
+        </PageHeader>
+        <InlineError :message="errorMessage" />
+        <ul v-loading="loading" class="rows">
+            <li v-for="project in visible" :key="project.id">
+                <router-link :to="`/projects/${project.id}`">{{
+                    project.name
+                }}</router-link>
+                <span>{{ STAGE_LABEL[project.stage] }}</span>
+                <span class="progress">
+                    <i :style="{ width: `${project.progress_percent}%` }" />
+                </span>
+                <span class="tabular">{{ project.progress_percent }}%</span>
+                <span v-if="project.due_on" class="due">
+                    <Dot :tone="dueTone(project)" />
+                    {{ dateShort(project.due_on) }}
+                </span>
+            </li>
+        </ul>
+        <EmptyLine v-if="!visible.length" :message="projectsCopy.empty" />
+        <el-drawer
+            v-model="drawerOpen"
+            :title="projectsCopy.create"
+            size="400px"
+        >
+            <form class="drawer-form" @submit.prevent="createProject">
+                <label for="project-name">{{ projectsCopy.nameLabel }}</label>
                 <el-input id="project-name" v-model="name" />
-                <el-checkbox v-model="isTest">设为验收测试项目</el-checkbox>
+                <label>{{ projectsCopy.stage }}</label>
+                <el-select v-model="stage">
+                    <el-option
+                        v-for="(label, item) in STAGE_LABEL"
+                        :key="item"
+                        :label="label"
+                        :value="item"
+                    />
+                </el-select>
+                <label>{{ projectsCopy.start }}</label>
+                <el-date-picker
+                    v-model="startsOn"
+                    type="date"
+                    value-format="YYYY-MM-DD"
+                />
+                <label>{{ projectsCopy.due }}</label>
+                <el-date-picker
+                    v-model="dueOn"
+                    type="date"
+                    value-format="YYYY-MM-DD"
+                />
+                <label>{{ projectsCopy.description }}</label>
+                <el-input v-model="description" type="textarea" />
                 <el-button
                     type="primary"
                     native-type="submit"
                     :loading="creating"
                     :disabled="creating"
+                    >创建项目</el-button
                 >
-                    创建项目
-                </el-button>
             </form>
-        </el-card>
-
-        <el-alert v-if="errorMessage" type="error" :closable="false" show-icon>
-            {{ errorMessage }}
-        </el-alert>
-
-        <div v-loading="loading" class="project-list" aria-live="polite">
-            <el-card
-                v-for="project in projects"
-                :key="project.id"
-                shadow="never"
-            >
-                <div class="project-row">
-                    <div>
-                        <router-link
-                            :to="`/projects/${project.id}`"
-                            class="project-row__name"
-                            >{{ project.name }}</router-link
-                        >
-                        <p>
-                            {{ STAGE_LABEL[project.stage] }} · 进度
-                            {{ project.progress_percent }}%
-                        </p>
-                    </div>
-                    <el-tag v-if="project.is_test" type="warning"
-                        >验收测试</el-tag
-                    >
-                </div>
-            </el-card>
-        </div>
+        </el-drawer>
     </section>
 </template>
 
 <style scoped>
-.projects-page,
-.project-list {
-    display: grid;
-    gap: 18px;
-}
-
-.projects-page__eyebrow,
-.project-row p {
+.rows {
+    list-style: none;
     margin: 0;
-    color: #909399;
+    padding: 0;
 }
-
-.projects-page h1 {
-    margin: 6px 0 0;
-}
-
-.project-form {
+.rows li {
     display: grid;
-    grid-template-columns: minmax(220px, 1fr) auto auto;
-    gap: 12px;
-    align-items: end;
-}
-
-.project-form label {
-    grid-column: 1 / -1;
-    font-weight: 600;
-}
-
-.project-row {
-    display: flex;
+    grid-template-columns: minmax(140px, 1.4fr) 4em 120px 3em 6em;
+    gap: 16px;
     align-items: center;
-    justify-content: space-between;
+    min-height: 48px;
+    border-bottom: 1px solid var(--sb-line);
 }
-
-.project-row__name {
-    color: #303133;
-    font-weight: 700;
-    text-decoration: none;
+.progress {
+    display: block;
+    height: 2px;
+    background: var(--sb-line);
 }
-
-@media (max-width: 680px) {
-    .project-form {
-        grid-template-columns: 1fr;
+.progress i {
+    display: block;
+    height: 2px;
+    background: var(--sb-accent);
+}
+.due {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    color: var(--sb-ink-2);
+    font-size: var(--sb-sm);
+}
+.active {
+    font-weight: 600;
+    color: var(--sb-accent);
+}
+.drawer-form {
+    display: grid;
+    gap: 12px;
+}
+@media (max-width: 760px) {
+    .rows li {
+        grid-template-columns: 1fr 4em;
     }
 }
 </style>

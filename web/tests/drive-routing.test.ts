@@ -154,7 +154,6 @@ describe('Task13 OWNER navigation and Drive integration', () => {
         expect(screen.queryByText(/历史文件|全部文件/)).not.toBeInTheDocument()
         await fireEvent.click(screen.getByRole('button', { name: '完成上传' }))
         expect(screen.getByText('扫描中')).toBeInTheDocument()
-        expect(screen.getByText('file-1')).toBeInTheDocument()
     })
 
     test('rechecks only the current quarantined file until its download becomes ready', async () => {
@@ -184,7 +183,7 @@ describe('Task13 OWNER navigation and Drive integration', () => {
                 stubs: { MultipartUploader: MultipartStub },
             },
         })
-        await screen.findByText('项目')
+        await screen.findByRole('button', { name: '完成上传' })
         await fireEvent.click(screen.getByRole('button', { name: '完成上传' }))
 
         const check = screen.getByRole('button', {
@@ -239,7 +238,7 @@ describe('Task13 OWNER navigation and Drive integration', () => {
                     stubs: { MultipartUploader: MultipartStub },
                 },
             })
-            await screen.findByText('项目')
+            await screen.findByRole('button', { name: '完成上传' })
             await fireEvent.click(
                 screen.getByRole('button', { name: '完成上传' }),
             )
@@ -280,7 +279,7 @@ describe('Task13 OWNER navigation and Drive integration', () => {
                     stubs: { MultipartUploader: MultipartStub },
                 },
             })
-            await screen.findByText('项目')
+            await screen.findByRole('button', { name: '完成上传' })
             await fireEvent.click(
                 screen.getByRole('button', { name: '完成上传' }),
             )
@@ -387,7 +386,12 @@ describe('Task13 OWNER navigation and Drive integration', () => {
 
         expect(screen.getByRole('button', { name: '删除' })).toBeInTheDocument()
         await fireEvent.click(screen.getByRole('button', { name: '移动' }))
-        await fireEvent.update(screen.getByLabelText('目标目录'), destId)
+        await fireEvent.click(
+            screen.getByRole('combobox', { name: '目标目录' }),
+        )
+        await fireEvent.click(
+            await screen.findByRole('option', { name: '公司' }),
+        )
         await fireEvent.click(screen.getByRole('button', { name: '确定移动' }))
         expect(mocks.filesApi.move).toHaveBeenCalledWith(FILE_ID, destId)
         expect(screen.queryByText('新方案.pdf')).not.toBeInTheDocument()

@@ -1,7 +1,5 @@
 import { apiClient, formatRequestError, type BrowserHttpClient } from './http'
-
-const UUID =
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+import { isRecord, uuid } from './parse'
 
 export type CardKind =
     | 'finance_entry'
@@ -77,14 +75,6 @@ export class AgentContractError extends Error {
         super('Invalid agent data')
         this.name = 'AgentContractError'
     }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-    return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function uuid(value: unknown): value is string {
-    return typeof value === 'string' && UUID.test(value)
 }
 
 function parseConversation(value: unknown): AgentConversation {
@@ -210,6 +200,26 @@ export function createAgentApi(client: BrowserHttpClient) {
             const response = await client.post('/agent/conversations', {})
             if (response.status !== 201) throw new AgentContractError()
             return parseConversation(response.data)
+        },
+        async archive(id: string): Promise<void> {
+            if (!uuid(id)) throw new AgentContractError()
+            const response = await client.post(
+                `/agent/conversations/${id}/archive`,
+            )
+            if (response.status !== 204) throw new AgentContractError()
+        },
+        async monthlyUsage(): Promise<{
+            prompt_tokens: number
+            completion_tokens: number
+        }> {
+            const response = await client.get('/agent/usage')
+            if (response.status !== 200 || !isRecord(response.data)) {
+                throw new AgentContractError()
+            }
+            return {
+                prompt_tokens: Number(response.data.prompt_tokens) || 0,
+                completion_tokens: Number(response.data.completion_tokens) || 0,
+            }
         },
         async listMessages(id: string): Promise<AgentMessage[]> {
             if (!uuid(id)) throw new AgentContractError()

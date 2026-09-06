@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import timedelta
 from typing import Any
@@ -12,7 +13,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core.actors import Actor, require_owner
 from superboss.core.errors import ConflictError, NotFoundError
-from superboss.core.llm import LLMClient, LLMResult, LLMUnavailable, OfflineLLM, iter_llm
+from superboss.core.llm import (
+    LLMClient,
+    LLMRequestError,
+    LLMResult,
+    LLMUnavailable,
+    OfflineLLM,
+    iter_llm,
+)
 from superboss.core.security import utcnow
 from superboss.modules.agent.cards import commit_card, parse_card_payload
 from superboss.modules.agent.models import (
@@ -52,6 +60,51 @@ _MAX_TOOL_ROUNDS = 6
 _OFFLINE = "霜月暂时离线，你仍可以直接使用各页面录入。"
 _ATTACHMENT_BYTES = 200_000
 _ATTACHMENT_CHARS = 1500
+
+
+def replay_window_row(*, role: str, content: str, tool_calls: object | None) -> dict[str, Any]:
+    """Rebuild one stored message in the OpenAI-compatible history shape."""
+    stored = tool_calls if isinstance(tool_calls, dict) else {}
+    if role == "tool":
+        payload: dict[str, Any] = {"role": "tool", "content": content}
+        call_id = stored.get("tool_call_id")
+        if call_id:
+            payload["tool_call_id"] = str(call_id)
+        return payload
+    if role == "assistant":
+        payload = {"role": "assistant", "content": content or None}
+        calls = stored.get("tool_calls")
+        if isinstance(calls, list) and calls:
+            payload["tool_calls"] = calls
+        return payload
+    return {"role": role, "content": content}
+
+
+def recall_needles(query: str) -> list[str]:
+    text = query.strip()[:80]
+    if not text:
+        return []
+    tokens = re.findall(r"[A-Za-z0-9]+|[\u4e00-\u9fff]{2,}", text)
+    needles: list[str] = []
+    for token in tokens:
+        needles.append(token)
+        if len(token) > 4:
+            needles.extend(token[index : index + 2] for index in range(0, len(token) - 1, 2))
+    unique: list[str] = []
+    for needle in needles:
+        if needle not in unique:
+            unique.append(needle)
+        if len(unique) == 5:
+            break
+    return unique
+
+
+def _similar_memory(left: str, right: str) -> bool:
+    from difflib import SequenceMatcher
+
+    if left == right:
+        return True
+    return SequenceMatcher(None, left, right).ratio() > 0.8
 
 
 def format_attachment_excerpt(filename: str, *, state: FileState, data: bytes | None) -> str:
@@ -124,6 +177,33 @@ class AgentService:
         conversation = await self._conversation(conversation_id)
         conversation.archived_at = utcnow()
 
+    async def monthly_usage(self) -> dict[str, object]:
+        start = utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        rows = (
+            await self.session.execute(
+                select(AgentMessage.token_usage)
+                .join(
+                    AgentConversation,
+                    AgentMessage.conversation_id == AgentConversation.id,
+                )
+                .where(
+                    AgentConversation.owner_id == self.actor.subject_id,
+                    AgentMessage.created_at >= start,
+                )
+            )
+        ).all()
+        prompt = 0
+        completion = 0
+        for (usage,) in rows:
+            if isinstance(usage, dict):
+                prompt += int(usage.get("prompt_tokens") or 0)
+                completion += int(usage.get("completion_tokens") or 0)
+        return {
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "month": start.strftime("%Y-%m"),
+        }
+
     async def list_messages(self, conversation_id: UUID) -> list[MessageRead]:
         await self._conversation(conversation_id)
         rows = (
@@ -131,12 +211,19 @@ class AgentService:
                 select(AgentMessage)
                 .where(
                     AgentMessage.conversation_id == conversation_id,
-                    AgentMessage.role.in_((MessageRole.USER, MessageRole.ASSISTANT)),
+                    AgentMessage.role.in_(
+                        (MessageRole.USER, MessageRole.ASSISTANT, MessageRole.SYSTEM)
+                    ),
                 )
                 .order_by(AgentMessage.created_at)
             )
         ).all()
-        return [MessageRead.model_validate(item) for item in rows]
+        visible: list[MessageRead] = []
+        for item in rows:
+            if item.role is MessageRole.ASSISTANT and not (item.content or "").strip():
+                continue
+            visible.append(MessageRead.model_validate(item))
+        return visible
 
     async def list_cards(self, conversation_id: UUID) -> list[CardRead]:
         await self._conversation(conversation_id)
@@ -348,11 +435,12 @@ class AgentService:
                             conversation_id=conversation.id,
                             role=MessageRole.TOOL,
                             content=output,
+                            tool_calls={"tool_call_id": call.id},
                         )
                     )
             else:
                 last_content = last_content or "工具调用次数已达上限，请拆成更小的请求。"
-        except LLMUnavailable:
+        except (LLMUnavailable, LLMRequestError):
             last_content = _OFFLINE
         assistant = AgentMessage(
             conversation_id=conversation.id,
@@ -381,20 +469,19 @@ class AgentService:
             ).all()
         )
         rows.reverse()
-        messages: list[dict[str, Any]] = []
-        for item in rows:
-            if item.role is MessageRole.TOOL:
-                messages.append({"role": "tool", "content": item.content})
-            else:
-                messages.append({"role": item.role.value, "content": item.content})
-        return messages
+        return [
+            replay_window_row(
+                role=item.role.value, content=item.content, tool_calls=item.tool_calls
+            )
+            for item in rows
+        ]
 
     async def confirm_card(self, card_id: UUID, request_id: UUID) -> CardRead:
         card = await self._card(card_id)
         if card.status is not CardStatus.PROPOSED:
             raise ConflictError("CARD_NOT_OPEN", "Card is not waiting for confirmation")
         parse_card_payload(card.kind, card.payload)
-        await commit_card(
+        committed = await commit_card(
             self.session,
             self.actor,
             card,
@@ -402,14 +489,15 @@ class AgentService:
             storage=self.storage,
             audit=self.audit,
         )
-        self.session.add(
-            AgentMessage(
-                conversation_id=card.conversation_id,
-                role=MessageRole.SYSTEM,
-                content=f"已入库：{card.kind.value}",
+        if committed.status is CardStatus.COMMITTED:
+            self.session.add(
+                AgentMessage(
+                    conversation_id=card.conversation_id,
+                    role=MessageRole.SYSTEM,
+                    content=f"已入库：{card.kind.value}",
+                )
             )
-        )
-        return CardRead.model_validate(card)
+        return CardRead.model_validate(committed)
 
     async def reject_card(self, card_id: UUID) -> CardRead:
         card = await self._card(card_id)
@@ -571,20 +659,27 @@ class AgentService:
                         AgentMemory.created_at >= utcnow() - timedelta(days=7),
                     )
                     .order_by(AgentMemory.created_at.desc())
-                    .limit(7)
+                    .limit(3)
                 )
             ).all()
         )
         searched: list[AgentMemory] = []
-        needle = query.strip()[:80]
-        if needle:
+        needles = recall_needles(query)
+        if needles:
+            matches = [
+                AgentMemory.content.ilike(f"%{term}%") for term in needles
+            ]
+            matches.append(func.similarity(AgentMemory.content, query.strip()[:80]) > 0.3)
+            matches.append(
+                AgentMemory.search.op("@@")(func.plainto_tsquery("simple", " ".join(needles)))
+            )
             searched = list(
                 (
                     await self.session.scalars(
                         select(AgentMemory)
                         .where(
                             AgentMemory.status == MemoryStatus.ACTIVE,
-                            AgentMemory.content.ilike(f"%{needle}%"),
+                            or_(*matches),
                         )
                         .order_by(AgentMemory.importance.desc())
                         .limit(8)
@@ -633,7 +728,7 @@ class AgentService:
                 [{"role": "system", "content": prompt}, {"role": "user", "content": transcript}],
                 [],
             )
-        except LLMUnavailable:
+        except (LLMUnavailable, LLMRequestError):
             return
         try:
             payload = json.loads(result.content)
@@ -654,7 +749,7 @@ class AgentService:
             content = str(item.get("content") or "").strip()
             if len(content) < 4:
                 continue
-            if any(memory.content == content for memory in existing):
+            if any(_similar_memory(memory.content, content) for memory in existing):
                 continue
             kind_raw = str(item.get("kind") or "FACT")
             try:
@@ -692,4 +787,48 @@ class AgentService:
             )
             for memory in extras:
                 memory.status = MemoryStatus.ARCHIVED
+        await self.maybe_summarize(conversation_id)
         await self.session.flush()
+
+    async def maybe_summarize(self, conversation_id: UUID) -> None:
+        if not self.llm.available:
+            return
+        conversation = await self._conversation(conversation_id)
+        count = await self.session.scalar(
+            select(func.count())
+            .select_from(AgentMessage)
+            .where(AgentMessage.conversation_id == conversation_id)
+        )
+        if not count or count <= _WINDOW:
+            return
+        older = list(
+            (
+                await self.session.scalars(
+                    select(AgentMessage)
+                    .where(AgentMessage.conversation_id == conversation_id)
+                    .order_by(AgentMessage.created_at.asc())
+                    .limit(max(int(count) - _WINDOW, 1))
+                )
+            ).all()
+        )
+        transcript = "\n".join(
+            f"{item.role.value}: {item.content}" for item in older if (item.content or "").strip()
+        )[:4000]
+        if not transcript:
+            return
+        try:
+            result = await self.llm.complete(
+                [
+                    {
+                        "role": "system",
+                        "content": "把更早的对话压成不超过 300 字的中文摘要，只保留稳定事实与决定。",
+                    },
+                    {"role": "user", "content": transcript},
+                ],
+                [],
+            )
+        except (LLMUnavailable, LLMRequestError):
+            return
+        summary = (result.content or "").strip()[:2000]
+        if summary:
+            conversation.summary = summary

@@ -18,6 +18,17 @@ export default tseslint.config(
             parserOptions: {
                 parser: tseslint.parser,
             },
+            globals: {
+                File: 'readonly',
+                DragEvent: 'readonly',
+                navigator: 'readonly',
+            },
+        },
+        rules: {
+            'vue/multi-word-component-names': [
+                'error',
+                { ignores: ['Dot', 'Money'] },
+            ],
         },
     },
     prettier,

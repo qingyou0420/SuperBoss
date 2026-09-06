@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 
 import ChatPage from '../src/pages/ChatPage.vue'
+import { chatCopy } from '../src/copy/pages/chat'
 import { useAuthStore } from '../src/stores/auth'
 
 const ID = '019f2b8e-18f0-7f31-9f42-3e6a76b9f810'
@@ -21,6 +22,7 @@ const mocks = vi.hoisted(() => ({
         confirm: vi.fn(),
         revise: vi.fn(),
         reject: vi.fn(),
+        archive: vi.fn(),
     },
 }))
 
@@ -111,9 +113,13 @@ describe('chat page', () => {
         }
         render(ChatPage, { global: { plugins: [pinia, ElementPlus] } })
         expect(await screen.findByText('请确认房租。')).toBeInTheDocument()
-        await fireEvent.click(screen.getByRole('button', { name: '确认入库' }))
+        await fireEvent.click(
+            screen.getByRole('button', { name: chatCopy.confirm }),
+        )
         expect(mocks.agentApi.confirm).toHaveBeenCalledWith(CARD)
-        expect(await screen.findByText(/已入库/)).toBeInTheDocument()
+        expect(
+            await screen.findByText(new RegExp(chatCopy.committed)),
+        ).toBeInTheDocument()
     })
 
     test('OWNER can edit card fields inline before confirming', async () => {
@@ -139,8 +145,13 @@ describe('chat page', () => {
         }
         render(ChatPage, { global: { plugins: [pinia, ElementPlus] } })
         expect(await screen.findByText('请确认房租。')).toBeInTheDocument()
+        await fireEvent.click(
+            screen.getByRole('button', { name: chatCopy.editFields }),
+        )
         await fireEvent.update(screen.getByDisplayValue('房租'), '水电')
-        await fireEvent.click(screen.getByRole('button', { name: '保存修改' }))
+        await fireEvent.click(
+            screen.getByRole('button', { name: chatCopy.saveFields }),
+        )
         expect(mocks.agentApi.patch).toHaveBeenCalledWith(
             CARD,
             expect.objectContaining({ category: '水电' }),
@@ -159,10 +170,14 @@ describe('chat page', () => {
         }
         render(ChatPage, { global: { plugins: [pinia, ElementPlus] } })
         expect(await screen.findByText('房租')).toBeInTheDocument()
-        await fireEvent.update(screen.getByLabelText('搜索会话'), '房租')
-        await fireEvent.click(screen.getByRole('button', { name: '查找' }))
-        expect(mocks.agentApi.listConversations).toHaveBeenLastCalledWith(
+        await fireEvent.update(
+            screen.getByLabelText(chatCopy.searchSessions),
             '房租',
+        )
+        await waitFor(() =>
+            expect(mocks.agentApi.listConversations).toHaveBeenLastCalledWith(
+                '房租',
+            ),
         )
     })
 
@@ -189,8 +204,13 @@ describe('chat page', () => {
         }
         render(ChatPage, { global: { plugins: [pinia, ElementPlus] } })
         expect(await screen.findByText('请确认房租。')).toBeInTheDocument()
-        await fireEvent.update(screen.getByLabelText('给霜月'), '这个月房租')
-        await fireEvent.click(screen.getByRole('button', { name: '发送' }))
+        await fireEvent.update(
+            screen.getByLabelText(chatCopy.composerLabel),
+            '这个月房租',
+        )
+        await fireEvent.click(
+            screen.getByRole('button', { name: chatCopy.send }),
+        )
         await waitFor(() => {
             expect(mocks.agentApi.stream).toHaveBeenCalledWith(
                 ID,
@@ -226,8 +246,13 @@ describe('chat page', () => {
         }
         render(ChatPage, { global: { plugins: [pinia, ElementPlus] } })
         expect(await screen.findByText('请确认房租。')).toBeInTheDocument()
-        await fireEvent.update(screen.getByLabelText('给霜月'), '这个月房租')
-        await fireEvent.click(screen.getByRole('button', { name: '发送' }))
+        await fireEvent.update(
+            screen.getByLabelText(chatCopy.composerLabel),
+            '这个月房租',
+        )
+        await fireEvent.click(
+            screen.getByRole('button', { name: chatCopy.send }),
+        )
         await waitFor(() => {
             expect(mocks.agentApi.send).toHaveBeenCalledWith(
                 ID,

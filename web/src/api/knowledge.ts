@@ -1,7 +1,5 @@
 import { apiClient, formatRequestError, type BrowserHttpClient } from './http'
-
-const UUID =
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+import { isRecord, UUID } from './parse'
 
 export interface KnowledgePoint {
     id: string
@@ -25,10 +23,6 @@ export class KnowledgeContractError extends Error {
         super('Invalid knowledge data')
         this.name = 'KnowledgeContractError'
     }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-    return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function parseDoc(value: unknown): KnowledgeDoc {
@@ -94,6 +88,19 @@ export function createKnowledgeApi(client: BrowserHttpClient) {
             const response = await client.patch(`/knowledge/${id}`, {
                 status: 'PUBLISHED',
             })
+            if (response.status !== 200) throw new KnowledgeContractError()
+            return parseDoc(response.data)
+        },
+        async update(
+            id: string,
+            patch: {
+                title?: string
+                body_md?: string
+                tags?: string[]
+                status?: 'DRAFT' | 'PUBLISHED'
+            },
+        ): Promise<KnowledgeDoc> {
+            const response = await client.patch(`/knowledge/${id}`, patch)
             if (response.status !== 200) throw new KnowledgeContractError()
             return parseDoc(response.data)
         },

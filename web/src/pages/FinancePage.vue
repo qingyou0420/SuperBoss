@@ -5,33 +5,41 @@ import {
     centsFromYuan,
     financeApi,
     financeErrorMessage,
-    yuanFromCents,
     type FinanceEntry,
     type FinanceKind,
     type FinanceScope,
     type FinanceSummary,
     type FinanceVisibility,
 } from '../api/finance'
+import { moneyLabel } from '../api/parse'
 import { projectsApi, type Project } from '../api/projects'
+import DateText from '../components/ui/DateText.vue'
+import EmptyLine from '../components/ui/EmptyLine.vue'
+import InlineError from '../components/ui/InlineError.vue'
+import Money from '../components/ui/Money.vue'
+import PageHeader from '../components/ui/PageHeader.vue'
+import {
+    FINANCE_KIND_LABEL,
+    FINANCE_SCOPE_LABEL,
+    VISIBILITY_LABEL,
+} from '../copy/glossary'
+import { financeCopy } from '../copy/pages/finance'
 import { useAuthStore } from '../stores/auth'
-
-const KIND_LABEL: Record<FinanceKind, string> = {
-    COST: '成本',
-    INCOME: '收入',
-}
-const SCOPE_LABEL: Record<FinanceScope, string> = {
-    COMPANY: '公司',
-    PROJECT: '项目',
-}
-const VISIBILITY_LABEL: Record<FinanceVisibility, string> = {
-    ALL: '全员',
-    MANAGEMENT: '管理层',
-    OWNER_ONLY: '仅老板',
-}
 
 function currentMonth(): string {
     const now = new Date()
     return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+}
+
+function shiftMonth(value: string, delta: number): string {
+    const [year, month] = value.split('-').map(Number)
+    const date = new Date(year, month - 1 + delta, 1)
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
+}
+
+function monthLabel(value: string): string {
+    const [year, month] = value.split('-')
+    return `${year}年${Number(month)}月`
 }
 
 const auth = useAuthStore()
@@ -41,8 +49,11 @@ const month = ref(currentMonth())
 const summary = ref<FinanceSummary>()
 const entries = ref<FinanceEntry[]>([])
 const projects = ref<Project[]>([])
+const alerts = ref<{ project_id: string; message: string }[]>([])
 const loading = ref(true)
 const errorMessage = ref('')
+const drawerOpen = ref(false)
+const adjustOpen = ref(false)
 const kind = ref<FinanceKind>('COST')
 const scope = ref<FinanceScope>('COMPANY')
 const projectId = ref('')
@@ -52,25 +63,39 @@ const category = ref('')
 const memo = ref('')
 const visibility = ref<FinanceVisibility | ''>('')
 const saving = ref(false)
-const adjustingId = ref('')
+const adjusting = ref<FinanceEntry>()
 const adjustField = ref<
     'amount_cents' | 'occurred_on' | 'category' | 'memo' | 'visibility'
 >('amount_cents')
 const adjustValue = ref('')
 const adjustReason = ref('')
 
+const companyCost = computed(() => summary.value?.company?.cost_cents ?? 0)
+const companyIncome = computed(() => summary.value?.company?.income_cents ?? 0)
+const projectCostTotal = computed(
+    () =>
+        summary.value?.projects.reduce(
+            (sum, item) => sum + item.cost_cents,
+            0,
+        ) ?? 0,
+)
+const margin = computed(() => companyIncome.value - companyCost.value)
+
 async function load(): Promise<void> {
     loading.value = true
     errorMessage.value = ''
     try {
-        const [nextSummary, nextEntries, nextProjects] = await Promise.all([
-            financeApi.summary(month.value),
-            financeApi.list(month.value),
-            projectsApi.list(),
-        ])
+        const [nextSummary, nextEntries, nextProjects, nextAlerts] =
+            await Promise.all([
+                financeApi.summary(month.value),
+                financeApi.list(month.value),
+                projectsApi.list(),
+                financeApi.alerts().catch(() => []),
+            ])
         summary.value = nextSummary
         entries.value = nextEntries
         projects.value = nextProjects
+        alerts.value = nextAlerts
     } catch {
         errorMessage.value = '财务数据暂时无法加载，请稍后重试。'
     } finally {
@@ -106,6 +131,7 @@ async function createEntry(): Promise<void> {
         category.value = ''
         memo.value = ''
         visibility.value = ''
+        drawerOpen.value = false
         await load()
     } catch (error) {
         errorMessage.value = financeErrorMessage(error)
@@ -114,7 +140,8 @@ async function createEntry(): Promise<void> {
     }
 }
 
-async function submitAdjustment(entry: FinanceEntry): Promise<void> {
+async function submitAdjustment(): Promise<void> {
+    if (!adjusting.value) return
     if (!adjustValue.value.trim() || !adjustReason.value.trim()) {
         errorMessage.value = '请填写调整后的值和原因。'
         return
@@ -130,12 +157,13 @@ async function submitAdjustment(entry: FinanceEntry): Promise<void> {
             errorMessage.value = '调整金额无效。'
             return
         }
-        await financeApi.adjust(entry.id, {
+        await financeApi.adjust(adjusting.value.id, {
             field: adjustField.value,
             new_value: newValue,
             reason: adjustReason.value.trim(),
         })
-        adjustingId.value = ''
+        adjustOpen.value = false
+        adjusting.value = undefined
         adjustValue.value = ''
         adjustReason.value = ''
         await load()
@@ -147,10 +175,11 @@ async function submitAdjustment(entry: FinanceEntry): Promise<void> {
 }
 
 function beginAdjust(entry: FinanceEntry): void {
-    adjustingId.value = entry.id
+    adjusting.value = entry
     adjustField.value = 'amount_cents'
-    adjustValue.value = yuanFromCents(entry.amount_cents)
+    adjustValue.value = (entry.amount_cents / 100).toFixed(2)
     adjustReason.value = ''
+    adjustOpen.value = true
 }
 
 watch(month, () => {
@@ -161,195 +190,255 @@ onMounted(load)
 
 <template>
     <section class="finance-page" aria-labelledby="finance-title">
-        <header>
-            <p class="finance-page__eyebrow">
-                {{ auth.user?.role || '工作台' }}
-            </p>
-            <h1 id="finance-title">财务</h1>
-        </header>
-        <label class="month-picker">
-            月份
-            <input v-model="month" type="month" />
-        </label>
-        <a class="export" :href="`/api/v1/finance/export?month=${month}`"
-            >导出 CSV</a
-        >
-        <el-alert v-if="errorMessage" type="error" :closable="false" show-icon>
-            {{ errorMessage }}
-        </el-alert>
-        <div v-loading="loading" class="summary-grid">
-            <el-card v-if="canSeeCompany" shadow="never">
-                <h2>公司</h2>
-                <p>
-                    成本
-                    {{ yuanFromCents(summary?.company?.cost_cents ?? 0) }} 元
-                </p>
-                <p>
-                    收入
-                    {{ yuanFromCents(summary?.company?.income_cents ?? 0) }} 元
-                </p>
-                <p>
-                    毛利
-                    {{
-                        yuanFromCents(
-                            (summary?.company?.income_cents ?? 0) -
-                                (summary?.company?.cost_cents ?? 0),
-                        )
-                    }}
-                    元
-                </p>
-            </el-card>
-            <el-card shadow="never">
-                <h2>项目成本</h2>
-                <p v-if="!summary?.projects.length">本月暂无项目成本</p>
-                <p
-                    v-for="item in summary?.projects ?? []"
-                    :key="item.project_id"
-                >
-                    {{ item.project_name }}
-                    {{ yuanFromCents(item.cost_cents) }} 元
-                    <span v-if="item.income_cents !== undefined">
-                        · 收入 {{ yuanFromCents(item.income_cents) }} 元
-                    </span>
-                </p>
-            </el-card>
+        <PageHeader :title="financeCopy.title" heading-id="finance-title">
+            <el-button text @click="month = shiftMonth(month, -1)">‹</el-button>
+            <span class="month-label">{{ monthLabel(month) }}</span>
+            <el-button text @click="month = shiftMonth(month, 1)">›</el-button>
+            <el-button v-if="canWrite" text @click="drawerOpen = true">{{
+                financeCopy.record
+            }}</el-button>
+            <a class="export" :href="`/api/v1/finance/export?month=${month}`">{{
+                financeCopy.export
+            }}</a>
+        </PageHeader>
+        <InlineError :message="errorMessage" />
+        <div v-loading="loading" class="summary">
+            <div v-if="canSeeCompany" class="stat">
+                <span>{{ financeCopy.companyCost }}</span>
+                <strong class="tabular">{{ moneyLabel(companyCost) }}</strong>
+            </div>
+            <div class="stat">
+                <span>{{ financeCopy.projectCost }}</span>
+                <strong class="tabular">{{
+                    moneyLabel(projectCostTotal)
+                }}</strong>
+            </div>
+            <div v-if="canSeeCompany" class="stat">
+                <span>{{ financeCopy.income }}</span>
+                <strong class="tabular">{{ moneyLabel(companyIncome) }}</strong>
+            </div>
+            <div v-if="canSeeCompany" class="stat">
+                <span>{{ financeCopy.margin }}</span>
+                <strong class="tabular">{{ moneyLabel(margin) }}</strong>
+            </div>
         </div>
-        <el-card v-if="canWrite" shadow="never">
-            <form class="entry-form" @submit.prevent="createEntry">
-                <h2>录入</h2>
+        <p v-for="item in alerts" :key="item.project_id" class="alert-line">
+            {{ item.message }}
+        </p>
+        <el-table :data="entries" class="plain-table">
+            <el-table-column :label="financeCopy.date" min-width="90">
+                <template #default="{ row }">
+                    <DateText :value="row.occurred_on" format="short" />
+                </template>
+            </el-table-column>
+            <el-table-column :label="financeCopy.kind" min-width="80">
+                <template #default="{ row }">{{
+                    FINANCE_KIND_LABEL[row.kind as FinanceKind]
+                }}</template>
+            </el-table-column>
+            <el-table-column :label="financeCopy.scope" min-width="120">
+                <template #default="{ row }">
+                    {{
+                        row.project_name ||
+                        FINANCE_SCOPE_LABEL[row.scope as FinanceScope]
+                    }}
+                </template>
+            </el-table-column>
+            <el-table-column prop="category" :label="financeCopy.category" />
+            <el-table-column prop="memo" :label="financeCopy.memo" />
+            <el-table-column :label="financeCopy.amount" align="right">
+                <template #default="{ row }">
+                    <Money :cents="row.amount_cents" />
+                </template>
+            </el-table-column>
+            <el-table-column
+                v-if="canWrite"
+                :label="financeCopy.visibility"
+                width="90"
+            >
+                <template #default="{ row }">{{
+                    VISIBILITY_LABEL[row.visibility as FinanceVisibility]
+                }}</template>
+            </el-table-column>
+            <el-table-column v-if="canWrite" width="72">
+                <template #default="{ row }">
+                    <el-button text @click="beginAdjust(row)">{{
+                        financeCopy.adjust
+                    }}</el-button>
+                </template>
+            </el-table-column>
+        </el-table>
+        <EmptyLine v-if="!entries.length" :message="financeCopy.empty" />
+        <section v-if="summary?.projects.length" class="pivot">
+            <h2>{{ financeCopy.pivot }}</h2>
+            <el-table :data="summary.projects" class="plain-table">
+                <el-table-column
+                    prop="project_name"
+                    :label="financeCopy.project"
+                />
+                <el-table-column :label="financeCopy.projectCost" align="right">
+                    <template #default="{ row }">
+                        <Money :cents="row.cost_cents" />
+                    </template>
+                </el-table-column>
+                <el-table-column
+                    v-if="canSeeCompany"
+                    :label="financeCopy.income"
+                    align="right"
+                >
+                    <template #default="{ row }">
+                        <Money :cents="row.income_cents ?? 0" />
+                    </template>
+                </el-table-column>
+            </el-table>
+        </section>
+        <el-drawer
+            v-model="drawerOpen"
+            :title="financeCopy.record"
+            size="400px"
+        >
+            <form class="drawer-form" @submit.prevent="createEntry">
                 <label>
-                    类型
-                    <select v-model="kind">
-                        <option value="COST">成本</option>
-                        <option value="INCOME">收入</option>
-                    </select>
+                    {{ financeCopy.kind }}
+                    <el-select v-model="kind">
+                        <el-option label="成本" value="COST" />
+                        <el-option label="收入" value="INCOME" />
+                    </el-select>
                 </label>
                 <label>
-                    范围
-                    <select v-model="scope">
-                        <option value="COMPANY">公司</option>
-                        <option value="PROJECT">项目</option>
-                    </select>
+                    {{ financeCopy.scope }}
+                    <el-select v-model="scope">
+                        <el-option label="公司运营" value="COMPANY" />
+                        <el-option label="项目" value="PROJECT" />
+                    </el-select>
                 </label>
                 <label v-if="scope === 'PROJECT'">
-                    项目
-                    <select v-model="projectId">
-                        <option value="" disabled>选择项目</option>
-                        <option
+                    {{ financeCopy.project }}
+                    <el-select v-model="projectId">
+                        <el-option
                             v-for="project in projects"
                             :key="project.id"
+                            :label="project.name"
                             :value="project.id"
-                        >
-                            {{ project.name }}
-                        </option>
-                    </select>
+                        />
+                    </el-select>
                 </label>
                 <label for="amount-yuan">金额（元）</label>
                 <el-input id="amount-yuan" v-model="amountYuan" />
-                <label for="occurred-on">发生日</label>
-                <input id="occurred-on" v-model="occurredOn" type="date" />
-                <label for="finance-category">类别</label>
+                <label for="occurred-on">{{ financeCopy.date }}</label>
+                <el-date-picker
+                    id="occurred-on"
+                    v-model="occurredOn"
+                    type="date"
+                    value-format="YYYY-MM-DD"
+                />
+                <label for="finance-category">{{ financeCopy.category }}</label>
                 <el-input id="finance-category" v-model="category" />
                 <label>
-                    备注
+                    {{ financeCopy.memo }}
                     <el-input v-model="memo" />
                 </label>
                 <label>
-                    可见范围
-                    <select v-model="visibility">
-                        <option value="">默认</option>
-                        <option value="ALL">全员</option>
-                        <option value="MANAGEMENT">管理层</option>
-                        <option value="OWNER_ONLY">仅老板</option>
-                    </select>
+                    {{ financeCopy.visibility }}
+                    <el-select v-model="visibility">
+                        <el-option
+                            :label="financeCopy.defaultVisibility"
+                            value=""
+                        />
+                        <el-option label="全员" value="ALL" />
+                        <el-option label="管理层" value="MANAGEMENT" />
+                        <el-option label="仅自己" value="OWNER_ONLY" />
+                    </el-select>
                 </label>
                 <el-button
                     type="primary"
                     native-type="submit"
                     :loading="saving"
                     :disabled="saving"
-                    >保存</el-button
+                    >{{ financeCopy.save }}</el-button
                 >
             </form>
-        </el-card>
-        <el-card shadow="never">
-            <h2>明细</h2>
-            <ul class="entry-list">
-                <li v-for="entry in entries" :key="entry.id">
-                    <strong>{{ KIND_LABEL[entry.kind] }}</strong>
-                    <span>{{ SCOPE_LABEL[entry.scope] }}</span>
-                    <span v-if="entry.project_name">{{
-                        entry.project_name
-                    }}</span>
-                    <span>{{ yuanFromCents(entry.amount_cents) }} 元</span>
-                    <span>{{ entry.category }}</span>
-                    <span>{{ entry.occurred_on }}</span>
-                    <span>{{ VISIBILITY_LABEL[entry.visibility] }}</span>
-                    <template v-if="canWrite">
-                        <el-button text @click="beginAdjust(entry)"
-                            >调整</el-button
-                        >
-                    </template>
-                    <form
-                        v-if="adjustingId === entry.id"
-                        class="adjust-form"
-                        @submit.prevent="submitAdjustment(entry)"
-                    >
-                        <select v-model="adjustField" aria-label="调整字段">
-                            <option value="amount_cents">金额</option>
-                            <option value="occurred_on">日期</option>
-                            <option value="category">类别</option>
-                            <option value="memo">备注</option>
-                            <option value="visibility">可见范围</option>
-                        </select>
-                        <el-input
-                            v-model="adjustValue"
-                            aria-label="调整后的值"
-                        />
-                        <el-input
-                            v-model="adjustReason"
-                            aria-label="调整原因"
-                        />
-                        <el-button native-type="submit">确定调整</el-button>
-                    </form>
-                </li>
-            </ul>
-            <p v-if="!entries.length">本月暂无可见条目</p>
-        </el-card>
+        </el-drawer>
+        <el-drawer
+            v-model="adjustOpen"
+            :title="financeCopy.adjust"
+            size="400px"
+        >
+            <form class="drawer-form" @submit.prevent="submitAdjustment">
+                <label>
+                    {{ financeCopy.adjust }}
+                    <el-select v-model="adjustField">
+                        <el-option label="金额" value="amount_cents" />
+                        <el-option label="日期" value="occurred_on" />
+                        <el-option label="类别" value="category" />
+                        <el-option label="备注" value="memo" />
+                        <el-option label="可见范围" value="visibility" />
+                    </el-select>
+                </label>
+                <el-input v-model="adjustValue" aria-label="调整后的值" />
+                <el-input
+                    v-model="adjustReason"
+                    :placeholder="financeCopy.reason"
+                    aria-label="调整原因"
+                />
+                <el-button native-type="submit" type="primary">{{
+                    financeCopy.save
+                }}</el-button>
+            </form>
+        </el-drawer>
     </section>
 </template>
 
 <style scoped>
-.finance-page,
-.summary-grid,
-.entry-form,
-.entry-list,
-.adjust-form {
+.summary {
     display: grid;
-    gap: 1rem;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 24px;
+    margin-bottom: 16px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--sb-line);
 }
-.finance-page__eyebrow {
-    margin: 0;
-    color: #909399;
-}
-.month-picker,
-.entry-form label {
+.stat {
     display: grid;
     gap: 6px;
+}
+.stat span {
+    color: var(--sb-ink-2);
+    font-size: var(--sb-sm);
+}
+.stat strong {
+    font-size: var(--sb-xl);
     font-weight: 600;
+    letter-spacing: -0.01em;
 }
-.summary-grid {
-    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+.month-label {
+    min-width: 7em;
+    text-align: center;
 }
-.entry-list {
-    list-style: none;
-    padding: 0;
-    margin: 0;
+.export {
+    font-size: var(--sb-sm);
 }
-.entry-list li {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    align-items: center;
+.alert-line {
+    color: var(--sb-warn);
+    font-size: var(--sb-sm);
+}
+.plain-table {
+    width: 100%;
+}
+.pivot {
+    margin-top: 48px;
+}
+.pivot h2 {
+    font-size: var(--sb-lg);
+    margin-bottom: 16px;
+}
+.drawer-form {
+    display: grid;
+    gap: 12px;
+}
+@media print {
+    .summary strong {
+        color: #000;
+    }
 }
 </style>

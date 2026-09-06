@@ -137,7 +137,7 @@ class OwnerUserService:
         projects = await self._projects_for_update(project_ids)
         if len(projects) != len(project_ids):
             await self._record(actor, "user.create", "DENIED", request_id, reason="PROJECT_NOT_FOUND")
-            raise NotFoundError()
+            raise NotFoundError("PROJECT_NOT_FOUND", "Project not found")
         temporary_password = new_temporary_password()
         user = User(
             username=command.username,
@@ -193,7 +193,7 @@ class OwnerUserService:
         projects = await self._projects_for_update(project_ids)
         if len(projects) != len(project_ids):
             await self._record(actor, "user.projects.replace", "DENIED", request_id, user_id, reason="PROJECT_NOT_FOUND")
-            raise NotFoundError()
+            raise NotFoundError("PROJECT_NOT_FOUND", "Project not found")
         await self._replace_project_memberships(user.id, project_ids)
         return OwnerUserView(user.id, user.username, user.display_name, user.role, user.status, user.last_login_at, tuple(projects))
 

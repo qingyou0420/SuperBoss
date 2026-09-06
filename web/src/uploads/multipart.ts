@@ -5,13 +5,12 @@ import type {
     FileUploadStarted,
 } from '../api/files'
 import { HttpClientError } from '../api/http'
+import { isRecord, UUID } from '../api/parse'
 
 export const UPLOAD_PART_SIZE = 8 * 1024 * 1024
 export const MAX_PARALLEL_PUTS = 3
 
 const MAX_FILE_BYTES = 100 * 1024 * 1024
-const UUID =
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const SHA256 = /^[0-9a-f]{64}$/
 const MIME = /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/
 export interface UploadCommand {
@@ -68,13 +67,6 @@ export class UploadUserError extends UploadContractError {
         this.name = 'UploadUserError'
         this.code = code
     }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-    if (typeof value !== 'object' || value === null || Array.isArray(value))
-        return false
-    const prototype = Object.getPrototypeOf(value)
-    return prototype === Object.prototype || prototype === null
 }
 
 function isSafeText(value: unknown, maximum: number): value is string {

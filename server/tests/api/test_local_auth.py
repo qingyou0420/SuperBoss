@@ -157,6 +157,7 @@ async def test_successful_login_sets_exact_session_and_records_audit(
     me = local_auth_client.get("/api/v1/auth/me")
     assert me.status_code == 200
     assert me.json() == {
+        "id": str(user.id),
         "display_name": "Owner",
         "must_change_password": False,
         "role": "OWNER",

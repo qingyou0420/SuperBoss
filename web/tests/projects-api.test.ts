@@ -214,7 +214,7 @@ describe('strict project API contracts', () => {
                 return
             }
             expect(projectErrorMessage(error)).toBe(
-                `项目操作失败（${status}，${projectConflictBody.error.request_id}）`,
+                `项目操作失败（${status}，${projectConflictBody.error.request_id.slice(0, 8)}）`,
             )
         },
     )

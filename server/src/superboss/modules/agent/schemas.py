@@ -271,6 +271,12 @@ class SoulRead(BaseModel):
     is_active: bool
 
 
+class UsageRead(BaseModel):
+    prompt_tokens: int
+    completion_tokens: int
+    month: str
+
+
 class SoulPreview(BaseModel):
     prompt: str
 

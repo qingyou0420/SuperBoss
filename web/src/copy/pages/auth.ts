@@ -1,0 +1,15 @@
+export const authCopy = {
+    login: '登录',
+    username: '用户名',
+    password: '密码',
+    loginFailed: '用户名或密码错误，请重试。',
+    setPassword: '设置新密码',
+    currentPassword: '当前密码',
+    newPassword: '新密码',
+    confirmPassword: '确认新密码',
+    save: '保存',
+    updatePassword: '更新密码',
+    mismatch: '两次输入的新密码不一致。',
+    forbidden: '没有权限',
+    backHome: '回到首页',
+}

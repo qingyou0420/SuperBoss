@@ -284,7 +284,7 @@ describe('strict browser file API', () => {
                     },
                 }),
             ),
-        ).toBe('文件操作失败（503，bba39a39-47ba-4ac5-9250-ccdba1d7f25e）')
+        ).toBe('文件操作失败（503，bba39a39）')
         expect(
             mod.fileErrorMessage(new HttpClientError(502, { error: {} })),
         ).toBe('文件操作失败（502）')
@@ -369,6 +369,7 @@ describe('strict browser file API', () => {
             content_type: 'application/pdf',
             state: 'CLEAN',
             created_at: '2026-09-05T00:00:00Z',
+            uploader_name: null,
         }
         const { calls, client } = clientWith([
             { data: [folder], status: 200 },

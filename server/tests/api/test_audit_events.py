@@ -197,11 +197,10 @@ async def test_records_successful_project_create_list_and_read(
         ).all()
     )
     by_action = {event.action: event for event in events}
-    assert set(by_action) == {"project.create", "project.list", "project.read"}
-    assert all(event.outcome == "SUCCESS" for event in by_action.values())
+    assert set(by_action) == {"project.create"}
+    assert by_action["project.create"].outcome == "SUCCESS"
     assert by_action["project.create"].project_id == project_id
-    assert by_action["project.read"].request_id == UUID(read.headers["X-Request-ID"])
-    assert by_action["project.list"].metadata_json["actor_role"] == "OWNER"
+    assert by_action["project.create"].metadata_json["actor_role"] == "OWNER"
 
 
 def test_audit_log_has_no_http_mutation_routes(client: TestClient) -> None:

@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
+import { dateLabel, dateShort } from '../api/parse'
 import {
     PROJECT_STAGES,
     projectErrorMessage,
@@ -10,15 +11,12 @@ import {
     type Project,
     type ProjectStage,
 } from '../api/projects'
+import EmptyLine from '../components/ui/EmptyLine.vue'
+import InlineError from '../components/ui/InlineError.vue'
+import PageHeader from '../components/ui/PageHeader.vue'
+import { STAGE_LABEL } from '../copy/glossary'
+import { projectsCopy } from '../copy/pages/projects'
 import { useAuthStore } from '../stores/auth'
-
-const STAGE_LABEL: Record<ProjectStage, string> = {
-    PLANNING: '立项',
-    ACTIVE: '进行中',
-    DELIVERING: '交付中',
-    REVIEW: '复盘',
-    ARCHIVED: '已归档',
-}
 
 const route = useRoute()
 const auth = useAuthStore()
@@ -28,6 +26,8 @@ const project = ref<Project>()
 const loading = ref(true)
 const saving = ref(false)
 const errorMessage = ref('')
+const drawerOpen = ref(false)
+const adding = ref(false)
 const description = ref('')
 const stage = ref<ProjectStage>('PLANNING')
 const startsOn = ref('')
@@ -40,8 +40,7 @@ async function load(): Promise<void> {
     loading.value = true
     errorMessage.value = ''
     try {
-        const loaded = await projectsApi.get(projectId.value)
-        apply(loaded)
+        apply(await projectsApi.get(projectId.value))
     } catch (error) {
         errorMessage.value = projectErrorMessage(error)
     } finally {
@@ -75,6 +74,7 @@ async function saveProject(): Promise<void> {
                 due_on: dueOn.value || null,
             }),
         )
+        drawerOpen.value = false
     } catch (error) {
         errorMessage.value = projectErrorMessage(error)
     } finally {
@@ -96,6 +96,7 @@ async function saveMilestones(): Promise<void> {
             }))
             .filter((item) => item.title)
         apply(await projectsApi.replaceMilestones(projectId.value, milestones))
+        adding.value = false
     } catch (error) {
         errorMessage.value = projectErrorMessage(error)
     } finally {
@@ -104,11 +105,8 @@ async function saveMilestones(): Promise<void> {
 }
 
 function addMilestone(): void {
+    adding.value = true
     draftMilestones.value.push({ title: '', due_on: '', done: false })
-}
-
-function removeMilestone(index: number): void {
-    draftMilestones.value.splice(index, 1)
 }
 
 watch(projectId, load)
@@ -117,139 +115,162 @@ onMounted(load)
 
 <template>
     <section class="detail" aria-labelledby="project-detail-title">
-        <p class="eyebrow">
-            <router-link to="/projects">项目</router-link>
-        </p>
-        <h1 id="project-detail-title">{{ project?.name || '项目详情' }}</h1>
-        <el-alert v-if="errorMessage" type="error" :closable="false" show-icon>
-            {{ errorMessage }}
-        </el-alert>
+        <PageHeader
+            :title="project?.name || projectsCopy.title"
+            heading-id="project-detail-title"
+        >
+            <el-button v-if="canEdit" text @click="drawerOpen = true">{{
+                projectsCopy.edit
+            }}</el-button>
+        </PageHeader>
+        <InlineError :message="errorMessage" />
         <div v-loading="loading">
-            <p v-if="project" class="progress">
-                进度 {{ project.progress_percent }}% ·
+            <p v-if="project" class="meta">
                 {{ STAGE_LABEL[project.stage] }}
+                ·
+                {{
+                    project.starts_on
+                        ? dateLabel(project.starts_on)
+                        : projectsCopy.start
+                }}
+                –
+                {{
+                    project.due_on
+                        ? dateLabel(project.due_on)
+                        : projectsCopy.due
+                }}
+                · {{ project.progress_percent }}%
             </p>
-            <el-card v-if="project" shadow="never">
-                <h2>概况</h2>
-                <template v-if="canEdit">
-                    <label for="project-stage">阶段</label>
-                    <select id="project-stage" v-model="stage">
-                        <option
-                            v-for="item in PROJECT_STAGES"
-                            :key="item"
-                            :value="item"
-                        >
-                            {{ STAGE_LABEL[item] }}
-                        </option>
-                    </select>
-                    <label for="project-description">说明</label>
-                    <el-input
-                        id="project-description"
-                        v-model="description"
-                        type="textarea"
-                        :rows="3"
-                    />
-                    <label for="project-start">开始</label>
-                    <el-input
-                        id="project-start"
-                        v-model="startsOn"
-                        type="date"
-                    />
-                    <label for="project-due">截止</label>
-                    <el-input id="project-due" v-model="dueOn" type="date" />
+            <p v-if="project?.description" class="body">
+                {{ project.description }}
+            </p>
+            <h2>{{ projectsCopy.milestones }}</h2>
+            <ol class="timeline">
+                <li
+                    v-for="item in project?.milestones ?? []"
+                    :key="item.id"
+                    :class="{ done: item.done_at }"
+                >
+                    <span>{{
+                        item.due_on ? dateShort(item.due_on) : '—'
+                    }}</span>
+                    <strong>{{ item.title }}</strong>
+                </li>
+            </ol>
+            <EmptyLine
+                v-if="!project?.milestones.length"
+                :message="projectsCopy.emptyMilestones"
+            />
+            <div v-if="canEdit" class="milestone-edit">
+                <el-button text @click="addMilestone">{{
+                    projectsCopy.add
+                }}</el-button>
+                <form
+                    v-if="adding"
+                    class="drawer-form"
+                    @submit.prevent="saveMilestones"
+                >
+                    <label
+                        v-for="(item, index) in draftMilestones"
+                        :key="index"
+                    >
+                        <el-input v-model="item.title" />
+                        <el-date-picker
+                            v-model="item.due_on"
+                            type="date"
+                            value-format="YYYY-MM-DD"
+                        />
+                        <el-checkbox v-model="item.done">{{
+                            projectsCopy.done
+                        }}</el-checkbox>
+                    </label>
                     <el-button
                         type="primary"
+                        native-type="submit"
                         :loading="saving"
-                        @click="saveProject"
-                        >保存概况</el-button
+                        >{{ projectsCopy.save }}</el-button
                     >
-                </template>
-                <dl v-else>
-                    <dt>说明</dt>
-                    <dd>{{ project.description || '暂无' }}</dd>
-                    <dt>开始</dt>
-                    <dd>{{ project.starts_on || '未定' }}</dd>
-                    <dt>截止</dt>
-                    <dd>{{ project.due_on || '未定' }}</dd>
-                </dl>
-            </el-card>
-            <el-card v-if="project" shadow="never" class="timeline">
-                <h2>里程碑</h2>
-                <ol v-if="canEdit">
-                    <li v-for="(item, index) in draftMilestones" :key="index">
-                        <el-input v-model="item.title" placeholder="节点名称" />
-                        <el-input v-model="item.due_on" type="date" />
-                        <label>
-                            <input v-model="item.done" type="checkbox" />
-                            完成
-                        </label>
-                        <el-button text @click="removeMilestone(index)"
-                            >删除</el-button
-                        >
-                    </li>
-                </ol>
-                <ol v-else>
-                    <li v-for="item in project.milestones" :key="item.id">
-                        <strong>{{ item.title }}</strong>
-                        <span>{{ item.due_on || '未定日期' }}</span>
-                        <span>{{ item.done_at ? '已完成' : '未完成' }}</span>
-                    </li>
-                </ol>
-                <div v-if="canEdit" class="timeline__actions">
-                    <el-button @click="addMilestone">添加节点</el-button>
-                    <el-button
-                        type="primary"
-                        :loading="saving"
-                        @click="saveMilestones"
-                        >保存里程碑</el-button
-                    >
-                </div>
-            </el-card>
+                </form>
+            </div>
         </div>
+        <el-drawer v-model="drawerOpen" :title="projectsCopy.edit" size="400px">
+            <form class="drawer-form" @submit.prevent="saveProject">
+                <label for="project-stage">{{ projectsCopy.stage }}</label>
+                <el-select id="project-stage" v-model="stage">
+                    <el-option
+                        v-for="item in PROJECT_STAGES"
+                        :key="item"
+                        :label="STAGE_LABEL[item]"
+                        :value="item"
+                    />
+                </el-select>
+                <label for="project-description">{{
+                    projectsCopy.description
+                }}</label>
+                <el-input
+                    id="project-description"
+                    v-model="description"
+                    type="textarea"
+                    :rows="3"
+                />
+                <label for="project-start">{{ projectsCopy.start }}</label>
+                <el-date-picker
+                    id="project-start"
+                    v-model="startsOn"
+                    type="date"
+                    value-format="YYYY-MM-DD"
+                />
+                <label for="project-due">{{ projectsCopy.due }}</label>
+                <el-date-picker
+                    id="project-due"
+                    v-model="dueOn"
+                    type="date"
+                    value-format="YYYY-MM-DD"
+                />
+                <el-button
+                    type="primary"
+                    native-type="submit"
+                    :loading="saving"
+                    >{{ projectsCopy.save }}</el-button
+                >
+            </form>
+        </el-drawer>
     </section>
 </template>
 
 <style scoped>
-.detail,
-.timeline,
-.timeline ol,
-.timeline li,
-.timeline__actions {
+.meta,
+.body {
+    color: var(--sb-ink-2);
+    margin-bottom: 24px;
+}
+.body {
+    font-size: var(--sb-md);
+    line-height: 1.75;
+    color: var(--sb-ink);
+}
+h2 {
+    font-size: var(--sb-lg);
+    margin-bottom: 16px;
+}
+.timeline {
+    list-style: none;
+    margin: 0;
+    padding: 0;
     display: grid;
     gap: 12px;
 }
-.eyebrow,
-.progress,
-dl {
-    color: #606266;
-}
-.eyebrow a {
-    color: #409eff;
-    text-decoration: none;
-}
-h1,
-h2,
-p {
-    margin: 0;
-}
-select,
 .timeline li {
-    align-items: center;
+    display: flex;
+    gap: 16px;
+    align-items: baseline;
 }
-.timeline li {
-    grid-template-columns: minmax(160px, 1fr) auto auto auto;
+.timeline .done {
+    color: var(--sb-ink-3);
 }
-dl {
+.drawer-form,
+.milestone-edit {
     display: grid;
-    grid-template-columns: 4rem 1fr;
-    gap: 8px;
-}
-dd {
-    margin: 0;
-}
-@media (max-width: 680px) {
-    .timeline li {
-        grid-template-columns: 1fr;
-    }
+    gap: 12px;
 }
 </style>

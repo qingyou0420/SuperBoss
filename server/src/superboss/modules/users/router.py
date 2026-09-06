@@ -1,12 +1,12 @@
 """OWNER-only STAFF whitelist endpoints."""
 
-from collections.abc import AsyncIterator
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core.actors import Actor, get_actor
+from superboss.core.db import get_session
 from superboss.modules.audit.service import AuditService
 from superboss.modules.users.schemas import (
     OwnerUserRead,
@@ -19,19 +19,6 @@ from superboss.modules.users.schemas import (
 from superboss.modules.users.service import OwnerUserService
 
 router = APIRouter(prefix="/owner/users", tags=["owner-users"])
-
-
-async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
-    session = request.app.state.session_factory()
-    try:
-        yield session
-    except Exception:
-        await session.rollback()
-        raise
-    else:
-        await session.commit()
-    finally:
-        await session.close()
 
 
 def get_service(request: Request, session: AsyncSession = Depends(get_session)) -> OwnerUserService:

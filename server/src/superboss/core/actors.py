@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from fastapi import Depends, Request
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core.errors import (
@@ -14,7 +13,6 @@ from superboss.core.errors import (
     UnauthenticatedError,
 )
 from superboss.modules.auth.service import AuthService, InvalidSession
-from superboss.modules.projects.models import ProjectMember
 from superboss.modules.users.models import Role
 
 _SIGNED_IN = frozenset({Role.OWNER, Role.MANAGER, Role.STAFF})
@@ -51,18 +49,7 @@ async def get_actor(request: Request) -> Actor:
             raise UnauthenticatedError() from error
         if user.must_change_password:
             raise PasswordChangeRequiredError()
-        project_ids: frozenset[UUID] = frozenset()
-        if user.role != Role.OWNER:
-            project_ids = frozenset(
-                (
-                    await session.scalars(
-                        select(ProjectMember.project_id).where(
-                            ProjectMember.user_id == user.id
-                        )
-                    )
-                ).all()
-            )
-        actor = Actor(user.id, user.role, project_ids)
+        actor = Actor(user.id, user.role)
         request.state.resolved_actor = actor
         return actor
     raise UnauthenticatedError()

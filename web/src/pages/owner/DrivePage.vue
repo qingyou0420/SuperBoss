@@ -1,22 +1,27 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 
+import { bytesLabel } from '../../api/parse'
 import {
     FileDownloadUnavailableError,
     filesApi,
     type DriveFile,
     type DriveFolder,
     type FileUploadCompleted,
-    type FolderVisibility,
 } from '../../api/files'
+import DateText from '../../components/ui/DateText.vue'
+import Dot from '../../components/ui/Dot.vue'
+import DropZone from '../../components/files/DropZone.vue'
+import EmptyLine from '../../components/ui/EmptyLine.vue'
+import InlineError from '../../components/ui/InlineError.vue'
 import MultipartUploader from '../../components/files/MultipartUploader.vue'
+import PageHeader from '../../components/ui/PageHeader.vue'
+import UploadTray, {
+    type TrayItem,
+} from '../../components/files/UploadTray.vue'
+import { FILE_STATE_LABEL } from '../../copy/glossary'
+import { driveCopy } from '../../copy/pages/drive'
 import { useAuthStore } from '../../stores/auth'
-
-const VISIBILITY_LABEL: Record<FolderVisibility, string> = {
-    ALL: '全员',
-    MANAGEMENT: '管理层',
-    OWNER_ONLY: '仅老板',
-}
 
 const props = defineProps<{
     allowedObjectOrigin: string
@@ -30,15 +35,7 @@ const currentId = ref('')
 const newFolderName = ref('')
 const currentResult = ref<FileUploadCompleted>()
 const downloadUrl = ref('')
-const canCheckDownload = computed(() => {
-    const state = currentResult.value?.state
-    return Boolean(
-        state &&
-        !downloadUrl.value &&
-        state !== 'INFECTED' &&
-        state !== 'FAILED',
-    )
-})
+const tray = ref<TrayItem[]>([])
 const loading = ref(true)
 const errorMessage = ref('')
 const renamingId = ref('')
@@ -51,6 +48,9 @@ const current = computed(
 )
 const children = computed(() =>
     folders.value.filter((folder) => folder.parent_id === currentId.value),
+)
+const roots = computed(() =>
+    folders.value.filter((folder) => folder.parent_id === null),
 )
 const breadcrumbs = computed(() => {
     const trail: DriveFolder[] = []
@@ -85,17 +85,27 @@ const validObjectOrigin = computed(() => {
 const currentStatusMessage = computed(() => {
     switch (currentResult.value?.state) {
         case 'CLEAN':
-            return '处理完成'
+            return ''
         case 'INFECTED':
-            return '检测到风险，文件不可下载'
+            return driveCopy.infected
         case 'FAILED':
-            return '扫描失败，文件不可下载，请重新上传'
+            return driveCopy.scanFailed
         case 'QUARANTINED':
         case 'SCANNING':
-            return '扫描中'
+            return driveCopy.scanning
         default:
             return ''
     }
+})
+
+const canCheckDownload = computed(() => {
+    const state = currentResult.value?.state
+    return Boolean(
+        state &&
+        !downloadUrl.value &&
+        state !== 'INFECTED' &&
+        state !== 'FAILED',
+    )
 })
 
 async function loadFolders(): Promise<void> {
@@ -114,7 +124,7 @@ async function loadFolders(): Promise<void> {
         }
         await loadFiles()
     } catch {
-        errorMessage.value = '网盘暂时无法加载，请稍后重试。'
+        errorMessage.value = driveCopy.empty
     } finally {
         loading.value = false
     }
@@ -149,11 +159,11 @@ async function downloadFile(file: DriveFile): Promise<void> {
         if (error instanceof FileDownloadUnavailableError) {
             errorMessage.value =
                 error.state === 'INFECTED'
-                    ? '检测到风险，文件不可下载'
-                    : '扫描失败，文件不可下载'
+                    ? driveCopy.infected
+                    : driveCopy.scanFailed
             return
         }
-        errorMessage.value = '文件仍在扫描中，请稍后重试。'
+        errorMessage.value = driveCopy.stillScanning
     }
 }
 
@@ -182,7 +192,6 @@ async function renameFile(file: DriveFile): Promise<void> {
 }
 
 async function removeFile(file: DriveFile): Promise<void> {
-    if (!globalThis.confirm(`确认删除 ${file.filename} 吗？`)) return
     try {
         await filesApi.remove(file.id)
         files.value = files.value.filter((item) => item.id !== file.id)
@@ -205,6 +214,7 @@ async function moveFile(file: DriveFile): Promise<void> {
 function showCompleted(result: FileUploadCompleted): void {
     currentResult.value = result
     downloadUrl.value = ''
+    tray.value = []
     void loadFiles()
 }
 
@@ -215,14 +225,26 @@ async function prepareDownload(): Promise<void> {
     try {
         downloadUrl.value = await filesApi.download(result.file_id)
         currentResult.value = { ...result, state: 'CLEAN' }
+        tray.value = []
     } catch (error) {
         if (error instanceof FileDownloadUnavailableError) {
             currentResult.value = { ...result, state: error.state }
             downloadUrl.value = ''
             return
         }
-        errorMessage.value = '文件仍在扫描中，请稍后重试。'
+        errorMessage.value = driveCopy.stillScanning
     }
+}
+
+function fileTone(file: DriveFile): 'muted' | 'danger' | undefined {
+    if (file.state === 'INFECTED' || file.state === 'FAILED') return 'danger'
+    if (
+        file.state === 'SCANNING' ||
+        file.state === 'QUARANTINED' ||
+        file.state === 'UPLOADING'
+    )
+        return 'muted'
+    return undefined
 }
 
 watch(currentId, () => {
@@ -232,170 +254,211 @@ onMounted(loadFolders)
 </script>
 
 <template>
-    <section class="drive-page" aria-labelledby="drive-title">
-        <header>
-            <p class="drive-page__eyebrow">{{ auth.user?.role || '工作台' }}</p>
-            <h1 id="drive-title">网盘</h1>
-        </header>
-        <el-alert
-            v-if="!validObjectOrigin"
-            type="error"
-            :closable="false"
-            show-icon
-        >
-            对象存储来源尚未安全配置，暂时无法上传文件。
-        </el-alert>
-        <el-alert
-            v-else-if="errorMessage"
-            type="error"
-            :closable="false"
-            show-icon
-        >
-            {{ errorMessage }}
-        </el-alert>
-        <nav class="crumbs" aria-label="目录">
-            <button
-                v-for="folder in breadcrumbs"
-                :key="folder.id"
-                type="button"
-                @click="currentId = folder.id"
-            >
-                {{ folder.name }}
-            </button>
-        </nav>
-        <div v-loading="loading" class="drive-grid">
-            <el-card shadow="never">
-                <h2>目录</h2>
-                <p v-if="current">
-                    可见范围：{{ VISIBILITY_LABEL[current.visibility] }}
-                </p>
-                <button
-                    v-for="folder in children"
+    <DropZone>
+        <section class="drive-page" aria-labelledby="drive-title">
+            <PageHeader :title="driveCopy.title" heading-id="drive-title">
+                <span v-if="!validObjectOrigin" class="hint">{{
+                    driveCopy.unconfigured
+                }}</span>
+            </PageHeader>
+            <InlineError :message="errorMessage" />
+            <nav class="crumbs" aria-label="目录">
+                <el-button
+                    v-for="folder in breadcrumbs"
                     :key="folder.id"
-                    type="button"
-                    class="folder-item"
+                    text
                     @click="currentId = folder.id"
+                    >{{ folder.name }}</el-button
                 >
-                    {{ folder.name }}
-                </button>
-                <form
-                    v-if="canManage && currentId"
-                    class="new-folder"
-                    @submit.prevent="createFolder"
-                >
-                    <label for="new-folder">新建子目录</label>
-                    <el-input id="new-folder" v-model="newFolderName" />
-                    <el-button native-type="submit" type="primary"
-                        >创建</el-button
+            </nav>
+            <div v-loading="loading" class="drive-grid">
+                <aside>
+                    <el-button
+                        v-for="folder in roots"
+                        :key="folder.id"
+                        text
+                        :class="{ active: folder.id === currentId }"
+                        @click="currentId = folder.id"
+                        >{{ folder.name }}</el-button
                     >
-                </form>
-            </el-card>
-            <el-card shadow="never">
-                <h2>文件</h2>
-                <ul class="file-list">
-                    <li v-for="file in files" :key="file.id">
-                        <strong>{{ file.filename }}</strong>
-                        <span>{{ file.state }}</span>
-                        <el-button text @click="downloadFile(file)"
-                            >下载</el-button
-                        >
-                        <template v-if="canManage">
-                            <el-button text @click="beginRename(file)"
-                                >重命名</el-button
+                    <el-button
+                        v-for="folder in children"
+                        :key="folder.id"
+                        text
+                        @click="currentId = folder.id"
+                        >{{ folder.name }}</el-button
+                    >
+                    <form
+                        v-if="canManage && currentId"
+                        class="new-folder"
+                        @submit.prevent="createFolder"
+                    >
+                        <label for="new-folder">{{
+                            driveCopy.newSubfolder
+                        }}</label>
+                        <el-input id="new-folder" v-model="newFolderName" />
+                        <el-button native-type="submit">{{
+                            driveCopy.create
+                        }}</el-button>
+                    </form>
+                </aside>
+                <div>
+                    <ul class="file-list">
+                        <li v-for="row in files" :key="row.id">
+                            <Dot
+                                v-if="fileTone(row) === 'muted'"
+                                tone="muted"
+                            />
+                            <strong
+                                :class="{ danger: fileTone(row) === 'danger' }"
+                                >{{ row.filename }}</strong
                             >
-                            <el-button text @click="beginMove(file)"
-                                >移动</el-button
+                            <span>{{ bytesLabel(row.size_bytes) }}</span>
+                            <DateText :value="row.created_at" format="short" />
+                            <span>{{ row.uploader_name || '' }}</span>
+                            <span
+                                v-if="
+                                    FILE_STATE_LABEL[
+                                        row.state as keyof typeof FILE_STATE_LABEL
+                                    ]
+                                "
+                                class="state"
+                                >{{
+                                    FILE_STATE_LABEL[
+                                        row.state as keyof typeof FILE_STATE_LABEL
+                                    ]
+                                }}</span
                             >
-                            <el-button
-                                text
-                                type="danger"
-                                @click="removeFile(file)"
-                                >删除</el-button
-                            >
-                        </template>
-                        <form
-                            v-if="renamingId === file.id"
-                            @submit.prevent="renameFile(file)"
-                        >
-                            <el-input v-model="renameValue" />
-                            <el-button native-type="submit">确定</el-button>
-                        </form>
-                        <form
-                            v-if="movingId === file.id"
-                            @submit.prevent="moveFile(file)"
-                        >
-                            <select v-model="moveTarget" aria-label="目标目录">
-                                <option
-                                    v-for="folder in folders"
-                                    :key="folder.id"
-                                    :value="folder.id"
+                            <el-button text @click="downloadFile(row)">{{
+                                driveCopy.download
+                            }}</el-button>
+                            <template v-if="canManage">
+                                <el-button text @click="beginRename(row)">{{
+                                    driveCopy.rename
+                                }}</el-button>
+                                <el-button text @click="beginMove(row)">{{
+                                    driveCopy.move
+                                }}</el-button>
+                                <el-popconfirm
+                                    :title="driveCopy.removeConfirm"
+                                    :teleported="false"
+                                    @confirm="removeFile(row)"
                                 >
-                                    {{ folder.name }}
-                                </option>
-                            </select>
-                            <el-button native-type="submit">确定移动</el-button>
-                        </form>
-                    </li>
-                </ul>
-                <MultipartUploader
-                    v-if="validObjectOrigin && currentId"
-                    :allowed-object-origin="allowedObjectOrigin"
-                    :folder-id="currentId"
-                    @completed="showCompleted"
-                />
-            </el-card>
-        </div>
-        <el-card v-if="currentResult" shadow="never">
-            <h2>本次上传</h2>
-            <p>{{ currentStatusMessage }}</p>
-            <p>{{ currentResult.file_id }}</p>
-            <el-button v-if="canCheckDownload" @click="prepareDownload">
-                检查并获取下载
-            </el-button>
-            <a v-if="downloadUrl" :href="downloadUrl">下载本次文件</a>
-        </el-card>
-    </section>
+                                    <template #reference>
+                                        <el-button text>{{
+                                            driveCopy.remove
+                                        }}</el-button>
+                                    </template>
+                                </el-popconfirm>
+                            </template>
+                            <form
+                                v-if="renamingId === row.id"
+                                @submit.prevent="renameFile(row)"
+                            >
+                                <el-input v-model="renameValue" />
+                                <el-button native-type="submit">{{
+                                    driveCopy.confirm
+                                }}</el-button>
+                            </form>
+                            <form
+                                v-if="movingId === row.id"
+                                @submit.prevent="moveFile(row)"
+                            >
+                                <el-select
+                                    id="move-target"
+                                    v-model="moveTarget"
+                                    aria-label="目标目录"
+                                    :placeholder="driveCopy.targetFolder"
+                                >
+                                    <el-option
+                                        v-for="folder in folders"
+                                        :key="folder.id"
+                                        :label="folder.name"
+                                        :value="folder.id"
+                                    />
+                                </el-select>
+                                <el-button native-type="submit">{{
+                                    driveCopy.confirmMove
+                                }}</el-button>
+                            </form>
+                        </li>
+                    </ul>
+                    <EmptyLine
+                        v-if="!files.length"
+                        :message="driveCopy.empty"
+                    />
+                    <MultipartUploader
+                        v-if="validObjectOrigin && currentId"
+                        :allowed-object-origin="allowedObjectOrigin"
+                        :folder-id="currentId"
+                        @completed="showCompleted"
+                    />
+                    <div v-if="currentResult" class="result">
+                        <p>{{ currentStatusMessage }}</p>
+                        <el-button
+                            v-if="canCheckDownload"
+                            @click="prepareDownload"
+                            >检查并获取下载</el-button
+                        >
+                        <a v-if="downloadUrl" :href="downloadUrl"
+                            >下载本次文件</a
+                        >
+                    </div>
+                </div>
+            </div>
+            <UploadTray :items="tray" />
+        </section>
+    </DropZone>
 </template>
 
 <style scoped>
-.drive-page,
-.drive-grid,
-.file-list,
-.new-folder {
+.drive-grid {
     display: grid;
-    gap: 1rem;
+    grid-template-columns: 240px 1fr;
+    gap: 32px;
 }
-.drive-page__eyebrow {
-    margin: 0;
-    color: #909399;
+aside {
+    display: grid;
+    align-content: start;
+    gap: 4px;
+}
+.active {
+    font-weight: 600;
+    color: var(--sb-accent);
 }
 .crumbs {
-    display: flex;
-    flex-wrap: wrap;
+    margin-bottom: 16px;
+}
+.new-folder {
+    display: grid;
     gap: 8px;
+    margin-top: 16px;
 }
-.folder-item,
-.crumbs button {
-    text-align: left;
-    cursor: pointer;
-    background: #fff;
-    border: 1px solid #dcdfe6;
-    border-radius: 8px;
-    padding: 0.6rem 0.9rem;
+.hint,
+.state {
+    color: var(--sb-ink-3);
+    font-size: var(--sb-sm);
 }
-.drive-grid {
-    grid-template-columns: minmax(220px, 0.8fr) minmax(320px, 1.2fr);
+.danger {
+    color: var(--sb-danger);
 }
 .file-list {
     list-style: none;
+    margin: 0 0 16px;
     padding: 0;
-    margin: 0;
 }
 .file-list li {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
     align-items: center;
+    min-height: 48px;
+    border-bottom: 1px solid var(--sb-line);
+}
+.result {
+    margin-top: 16px;
+    color: var(--sb-ink-2);
+    font-size: var(--sb-sm);
 }
 @media (max-width: 760px) {
     .drive-grid {

@@ -67,13 +67,13 @@ async def commit_card(
         card.status = CardStatus.FAILED
         card.error = error.code
         card.decided_at = utcnow()
-        raise
-    except Exception as error:
+        return card
+    except Exception:  # noqa: BLE001 -- persist FAILED rather than leak provider errors
         _LOG.exception("card commit failed for %s", card.id)
         card.status = CardStatus.FAILED
         card.error = "CARD_COMMIT_FAILED"
         card.decided_at = utcnow()
-        raise DomainError("CARD_COMMIT_FAILED", "Card could not be committed", 409) from error
+        return card
     card.status = CardStatus.COMMITTED
     card.decided_at = utcnow()
     card.committed_object_type = object_type

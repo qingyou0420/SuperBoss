@@ -1,0 +1,60 @@
+html,
+body,
+#app {
+    min-height: 100%;
+    margin: 0;
+    background: var(--sb-paper);
+    color: var(--sb-ink);
+    font-family: var(--sb-font);
+    font-size: var(--sb-base);
+    line-height: 1.6;
+}
+
+button,
+input,
+select,
+textarea {
+    font: inherit;
+}
+
+a {
+    color: var(--sb-accent);
+    text-decoration: none;
+}
+
+h1,
+h2,
+p {
+    margin: 0;
+}
+
+.tabular {
+    font-variant-numeric: tabular-nums;
+}
+
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+@media print {
+    .shell__header,
+    .page-header__actions,
+    .no-print {
+        display: none !important;
+    }
+    .shell,
+    .shell__main {
+        background: #fff;
+        max-width: none;
+        padding: 0;
+        margin: 0;
+    }
+}

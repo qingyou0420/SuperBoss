@@ -2,24 +2,40 @@
 import { computed, onMounted, ref } from 'vue'
 
 import { agentApi, agentErrorMessage, type AgentMemory } from '../api/agent'
+import { dateTimeShort } from '../api/parse'
+import Dot from '../components/ui/Dot.vue'
+import InlineError from '../components/ui/InlineError.vue'
+import PageHeader from '../components/ui/PageHeader.vue'
+import { MEMORY_KIND_LABEL } from '../copy/glossary'
+import { memoryCopy } from '../copy/pages/memory'
+
+const KIND_ORDER = [
+    'FACT',
+    'PREFERENCE',
+    'DECISION',
+    'PROJECT_NOTE',
+    'DAILY_DIGEST',
+] as const
 
 const memories = ref<AgentMemory[]>([])
-const groups = computed(() => {
-    const kinds = [
-        'PREFERENCE',
-        'FACT',
-        'DECISION',
-        'PROJECT_NOTE',
-        'DAILY_DIGEST',
-    ]
-    return kinds.map((kind) => ({
-        kind,
-        items: memories.value.filter((item) => item.kind === kind),
-    }))
-})
+const query = ref('')
 const errorMessage = ref('')
 const editingId = ref('')
 const editValue = ref('')
+
+const filtered = computed(() => {
+    const needle = query.value.trim()
+    if (!needle) return memories.value
+    return memories.value.filter((item) => item.content.includes(needle))
+})
+
+const groups = computed(() =>
+    KIND_ORDER.map((kind) => ({
+        kind,
+        label: MEMORY_KIND_LABEL[kind],
+        items: filtered.value.filter((item) => item.kind === kind),
+    })).filter((group) => group.items.length),
+)
 
 async function load(): Promise<void> {
     memories.value = await agentApi.listMemories()
@@ -69,48 +85,80 @@ onMounted(async () => {
 
 <template>
     <section class="memory-page" aria-labelledby="memory-title">
-        <h1 id="memory-title">记忆</h1>
-        <el-alert v-if="errorMessage" type="error" :closable="false" show-icon>
-            {{ errorMessage }}
-        </el-alert>
+        <PageHeader :title="memoryCopy.title" heading-id="memory-title" />
+        <label class="sr-only" for="memory-q">{{ memoryCopy.search }}</label>
+        <el-input
+            id="memory-q"
+            v-model="query"
+            :placeholder="memoryCopy.search"
+        />
+        <InlineError :message="errorMessage" />
         <section v-for="group in groups" :key="group.kind">
-            <h2>{{ group.kind }}</h2>
-            <p v-if="!group.items.length">暂无</p>
+            <h2>{{ group.label }}</h2>
             <ul>
                 <li v-for="item in group.items" :key="item.id">
-                    <strong>{{ item.kind }}</strong>
-                    <span v-if="item.pinned">置顶</span>
-                    <p>{{ item.content }}</p>
-                    <el-button text @click="togglePin(item)">{{
-                        item.pinned ? '取消置顶' : '置顶'
-                    }}</el-button>
-                    <el-button text @click="beginEdit(item)">编辑</el-button>
-                    <el-button text @click="archive(item)">归档</el-button>
+                    <div class="row">
+                        <Dot v-if="item.pinned" tone="ok" />
+                        <p>{{ item.content }}</p>
+                        <span>{{ dateTimeShort(item.created_at) }}</span>
+                        <el-dropdown trigger="click">
+                            <el-button text>···</el-button>
+                            <template #dropdown>
+                                <el-dropdown-menu>
+                                    <el-dropdown-item
+                                        @click="togglePin(item)"
+                                        >{{ memoryCopy.pin }}</el-dropdown-item
+                                    >
+                                    <el-dropdown-item
+                                        @click="beginEdit(item)"
+                                        >{{ memoryCopy.edit }}</el-dropdown-item
+                                    >
+                                    <el-dropdown-item @click="archive(item)">{{
+                                        memoryCopy.archive
+                                    }}</el-dropdown-item>
+                                </el-dropdown-menu>
+                            </template>
+                        </el-dropdown>
+                    </div>
                     <form
                         v-if="editingId === item.id"
                         @submit.prevent="save(item)"
                     >
                         <el-input v-model="editValue" />
-                        <el-button native-type="submit">保存</el-button>
+                        <el-button native-type="submit">{{
+                            memoryCopy.save
+                        }}</el-button>
                     </form>
                 </li>
             </ul>
         </section>
-        <p v-if="!memories.length">还没有长期记忆。</p>
     </section>
 </template>
 
 <style scoped>
+h2 {
+    margin: 32px 0 8px;
+    font-size: var(--sb-sm);
+    color: var(--sb-ink-2);
+    font-weight: 400;
+}
 ul {
     list-style: none;
+    margin: 0;
     padding: 0;
-    display: grid;
-    gap: 1rem;
 }
 li {
-    border: 1px solid #ebeef5;
-    border-radius: 8px;
-    padding: 1rem;
-    background: #fff;
+    border-bottom: 1px solid var(--sb-line);
+    padding: 12px 0;
+}
+.row {
+    display: grid;
+    grid-template-columns: auto 1fr auto auto;
+    gap: 12px;
+    align-items: start;
+}
+.row span {
+    color: var(--sb-ink-3);
+    font-size: var(--sb-sm);
 }
 </style>

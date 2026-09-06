@@ -1,12 +1,12 @@
 """Project API routes."""
 
-from collections.abc import AsyncIterator
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core.actors import Actor, get_actor
+from superboss.core.db import get_session
 from superboss.modules.audit.service import AuditService
 from superboss.modules.projects.schemas import (
     MilestoneReplace,
@@ -17,19 +17,6 @@ from superboss.modules.projects.schemas import (
 from superboss.modules.projects.service import ProjectService
 
 router = APIRouter(prefix="/projects", tags=["projects"])
-
-
-async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
-    session = request.app.state.session_factory()
-    try:
-        yield session
-    except Exception:
-        await session.rollback()
-        raise
-    else:
-        await session.commit()
-    finally:
-        await session.close()
 
 
 def get_service(request: Request, session: AsyncSession = Depends(get_session)) -> ProjectService:
@@ -57,7 +44,6 @@ async def list_projects(
 ) -> list[ProjectRead]:
     request_id = UUID(request.state.request_id)
     projects = await service.list(actor, request_id)
-    await service.commit_and_record_success(actor, "project.list", request_id)
     return [ProjectRead.model_validate(project) for project in projects]
 
 
@@ -80,7 +66,6 @@ async def get_project(
 ) -> ProjectRead:
     request_id = UUID(request.state.request_id)
     project = await service.get(actor, project_id, request_id)
-    await service.commit_and_record_success(actor, "project.read", request_id, project_id)
     return ProjectRead.model_validate(project)
 
 

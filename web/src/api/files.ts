@@ -4,9 +4,8 @@ import {
     type BrowserHttpClient,
     HttpClientError,
 } from './http'
+import { hasRequiredKeys, isRecord, UUID } from './parse'
 
-const UUID =
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const SHA256 = /^[0-9a-f]{64}$/
 const MIME = /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/
 const MAX_FILE_BYTES = 100 * 1024 * 1024
@@ -29,6 +28,7 @@ export interface DriveFile {
     readonly content_type: string
     readonly state: FileUploadCompleted['state'] | 'UPLOADING'
     readonly created_at: string
+    readonly uploader_name?: string | null
 }
 
 export interface FileUploadStart {
@@ -73,20 +73,6 @@ export class FileDownloadUnavailableError extends Error {
         this.state = state
         Object.freeze(this)
     }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-    if (typeof value !== 'object' || value === null || Array.isArray(value))
-        return false
-    const prototype = Object.getPrototypeOf(value)
-    return prototype === Object.prototype || prototype === null
-}
-
-function hasRequiredKeys(
-    value: Record<string, unknown>,
-    required: readonly string[],
-): boolean {
-    return required.every((key) => key in value)
 }
 
 function safeText(value: unknown, maximum: number): value is string {
@@ -271,6 +257,10 @@ function parseDriveFile(value: unknown): DriveFile {
         content_type: value.content_type,
         state: value.state as DriveFile['state'],
         created_at: value.created_at,
+        uploader_name:
+            typeof value.uploader_name === 'string'
+                ? value.uploader_name
+                : null,
     }
 }
 
@@ -365,8 +355,12 @@ export function createFilesApi(client: BrowserHttpClient) {
             }
             return response.data.map(parseFolder)
         },
-        async createFolder(parentId: string, name: string): Promise<DriveFolder> {
-            if (!uuid(parentId) || !safeText(name, 128)) throw new FileContractError()
+        async createFolder(
+            parentId: string,
+            name: string,
+        ): Promise<DriveFolder> {
+            if (!uuid(parentId) || !safeText(name, 128))
+                throw new FileContractError()
             const response = await client.post('/folders', {
                 parent_id: parentId,
                 name,
@@ -388,7 +382,9 @@ export function createFilesApi(client: BrowserHttpClient) {
             if (!uuid(fileId) || !safeText(filename, 1024)) {
                 throw new FileContractError()
             }
-            const response = await client.patch(`/files/${fileId}`, { filename })
+            const response = await client.patch(`/files/${fileId}`, {
+                filename,
+            })
             if (response.status !== 200) throw new FileContractError()
             return parseDriveFile(response.data)
         },

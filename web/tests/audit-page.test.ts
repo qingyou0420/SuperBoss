@@ -34,8 +34,6 @@ describe('audit page', () => {
         expect(
             await screen.findByRole('heading', { name: '审计' }),
         ).toBeInTheDocument()
-        expect(
-            await screen.findByText('finance.entry.create'),
-        ).toBeInTheDocument()
+        expect(await screen.findByText('记一笔')).toBeInTheDocument()
     })
 })

@@ -1,7 +1,6 @@
 import { apiClient, formatRequestError, type BrowserHttpClient } from './http'
+import { hasRequiredKeys, isRecord, uuid } from './parse'
 
-const UUID =
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const DATE = /^\d{4}-\d{2}-\d{2}$/
 const MONTH = /^\d{4}-(0[1-9]|1[0-2])$/
 const EDGE = /^[ \t\r\n\u00a0]+|[ \t\r\n\u00a0]+$/g
@@ -80,21 +79,6 @@ export class FinanceContractError extends Error {
         super('Invalid finance data')
         this.name = 'FinanceContractError'
     }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-    return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function hasRequiredKeys(
-    value: Record<string, unknown>,
-    required: readonly string[],
-): boolean {
-    return required.every((key) => key in value)
-}
-
-function uuid(value: unknown): value is string {
-    return typeof value === 'string' && UUID.test(value)
 }
 
 function cents(value: unknown): value is number {
@@ -276,6 +260,21 @@ export function createFinanceApi(client: BrowserHttpClient) {
                 throw new FinanceContractError()
             }
             return response.data.map(parseEntry)
+        },
+        async alerts(): Promise<{ project_id: string; message: string }[]> {
+            const response = await client.get('/finance/alerts')
+            if (response.status !== 200 || !Array.isArray(response.data)) {
+                throw new FinanceContractError()
+            }
+            return response.data.map((item) => {
+                if (!isRecord(item) || typeof item.message !== 'string') {
+                    throw new FinanceContractError()
+                }
+                return {
+                    project_id: String(item.project_id || ''),
+                    message: item.message,
+                }
+            })
         },
         async summary(month: string): Promise<FinanceSummary> {
             if (!MONTH.test(month)) throw new FinanceContractError()

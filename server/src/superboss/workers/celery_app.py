@@ -1,6 +1,7 @@
 """Celery application configuration with no broker connection at import time."""
 
 from celery import Celery  # type: ignore[import-untyped]
+from celery.schedules import crontab
 
 from superboss.core.config import get_settings
 
@@ -26,7 +27,7 @@ celery_app.conf.update(
         },
         "agent-daily-digest": {
             "task": "superboss.agent.daily_digest",
-            "schedule": 86400.0,
+            "schedule": crontab(hour=0, minute=30),
             "options": {"queue": "file-scan"},
         },
     },

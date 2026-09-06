@@ -12,16 +12,20 @@ import {
     UploadUserError,
 } from '../../uploads/multipart'
 
-const props = defineProps<{
-    allowedObjectOrigin: string
-    folderId: string
-}>()
+const props = withDefaults(
+    defineProps<{
+        allowedObjectOrigin: string
+        folderId: string
+        compact?: boolean
+    }>(),
+    { compact: false },
+)
 
 const emit = defineEmits<{
     completed: [result: FileUploadCompleted]
+    selected: [file: File]
 }>()
 
-const file = ref<globalThis.File>()
 const pending = ref(false)
 const status = ref('')
 const errorMessage = ref('')
@@ -29,28 +33,20 @@ const uploadedBytes = ref(0)
 const totalBytes = ref(0)
 let activeUploader: ReturnType<typeof createMultipartUploader> | undefined
 
-function selectFile(event: globalThis.Event): void {
-    const input = event.target as globalThis.HTMLInputElement
-    file.value = input.files?.[0]
-    errorMessage.value = ''
-    status.value = ''
-    uploadedBytes.value = 0
-    totalBytes.value = 0
-}
-
 function userErrorText(error: UploadUserError): string {
     if (error.code === 'TOO_LARGE') return '文件超过 100MB 上限。'
     if (error.code === 'EMPTY') return '请选择非空文件。'
     return '不支持的文件类型。'
 }
 
-async function submit(): Promise<void> {
-    if (!file.value || pending.value) return
+async function uploadFile(file: File): Promise<void> {
+    if (pending.value) return
+    emit('selected', file)
     pending.value = true
     status.value = ''
     errorMessage.value = ''
     uploadedBytes.value = 0
-    totalBytes.value = file.value.size
+    totalBytes.value = file.size
     try {
         const transport = createPresignedUploadTransport({
             allowedObjectOrigin: props.allowedObjectOrigin,
@@ -67,10 +63,10 @@ async function submit(): Promise<void> {
             uploadPart: transport.put,
         })
         const result = await activeUploader.upload({
-            file: file.value,
+            file,
             folder_id: props.folderId,
         })
-        status.value = '\u626b\u63cf\u4e2d'
+        status.value = '扫描中'
         emit('completed', result)
     } catch (error) {
         if (error instanceof UploadUserError) {
@@ -85,6 +81,10 @@ async function submit(): Promise<void> {
     }
 }
 
+function onChange(item: { raw?: File }): void {
+    if (item.raw) void uploadFile(item.raw)
+}
+
 function cancel(): void {
     activeUploader?.cancel()
 }
@@ -93,45 +93,32 @@ onBeforeUnmount(cancel)
 </script>
 
 <template>
-    <section class="multipart-uploader" aria-labelledby="upload-title">
-        <h2 id="upload-title">上传文件</h2>
-        <label>
-            文件
-            <input type="file" :disabled="pending" @change="selectFile" />
-        </label>
-        <div class="multipart-uploader__actions">
-            <button type="button" :disabled="pending || !file" @click="submit">
-                {{ pending ? '上传中…' : '开始上传' }}
-            </button>
-            <button v-if="pending" type="button" @click="cancel">取消</button>
-        </div>
-        <progress
-            v-if="pending && totalBytes > 0"
-            :max="totalBytes"
-            :value="uploadedBytes"
-        />
+    <div class="uploader" :class="{ 'uploader--compact': compact }">
+        <el-upload
+            :auto-upload="false"
+            :show-file-list="false"
+            :disabled="pending"
+            :drag="!compact"
+            @change="onChange"
+        >
+            <span v-if="compact" class="clip" aria-label="上传">📎</span>
+            <span v-else>{{ pending ? '上传中…' : '上传' }}</span>
+        </el-upload>
         <p v-if="status" role="status">{{ status }}</p>
         <p v-if="errorMessage" role="alert">{{ errorMessage }}</p>
-    </section>
+    </div>
 </template>
 
 <style scoped>
-.multipart-uploader {
+.uploader {
     display: grid;
-    gap: 1rem;
+    gap: 8px;
 }
-
-.multipart-uploader label {
-    display: grid;
-    gap: 0.4rem;
+.clip {
+    cursor: pointer;
+    font-size: 16px;
 }
-
-.multipart-uploader__actions {
-    display: flex;
-    gap: 0.75rem;
-}
-
-progress {
-    width: 100%;
+.uploader--compact :deep(.el-upload) {
+    display: inline-flex;
 }
 </style>

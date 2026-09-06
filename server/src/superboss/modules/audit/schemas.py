@@ -124,6 +124,7 @@ class AuditRead(BaseModel):
     id: UUID
     actor_kind: str
     actor_id: UUID | None
+    actor_name: str | None = None
     action: str
     object_type: str
     object_id: UUID | None

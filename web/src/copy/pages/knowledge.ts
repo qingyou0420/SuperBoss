@@ -1,0 +1,16 @@
+export const knowledgeCopy = {
+    title: '知识库',
+    search: '搜索',
+    create: '新建',
+    edit: '编辑',
+    publish: '发布',
+    unpublish: '下架',
+    draft: '草稿',
+    heading: '标题',
+    tags: '标签',
+    body: '正文',
+    save: '保存',
+    empty: '还没有文档',
+    noMatch: '没有匹配的内容',
+    saveDraft: '保存草稿',
+}

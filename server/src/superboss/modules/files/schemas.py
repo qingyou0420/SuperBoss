@@ -96,6 +96,7 @@ class FileRead(BaseModel):
     content_type: str
     state: FileState
     created_at: datetime
+    uploader_name: str | None = None
 
 
 class FilePatch(BaseModel):

@@ -1,11 +1,15 @@
 import { ApiContractError, apiClient, type BrowserHttpClient } from './http'
+import { hasRequiredKeys, isRecord } from './parse'
 
 const USERNAME = /^[a-z][a-z0-9._-]{2,31}$/
+const UUID =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const MAX_PASSWORD_UTF8_BYTES = 512
 
 export type UserRole = 'OWNER' | 'MANAGER' | 'STAFF'
 
 export interface AuthUser {
+    id?: string
     username: string
     display_name: string
     role: UserRole
@@ -27,17 +31,6 @@ export class AuthContractError extends ApiContractError {
         super('Invalid authentication data')
         this.name = 'AuthContractError'
     }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-    return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function hasRequiredKeys(
-    value: Record<string, unknown>,
-    required: readonly string[],
-): boolean {
-    return required.every((key) => key in value)
 }
 
 function hasUnsafeText(value: string): boolean {
@@ -108,12 +101,14 @@ function parseUser(data: unknown): AuthUser {
     ) {
         throw new AuthContractError()
     }
-    return {
+    const user: AuthUser = {
         username: data.username,
         display_name: data.display_name,
         role: data.role,
         must_change_password: data.must_change_password,
     }
+    if (typeof data.id === 'string' && UUID.test(data.id)) user.id = data.id
+    return user
 }
 
 export function createAuthApi(client: BrowserHttpClient) {

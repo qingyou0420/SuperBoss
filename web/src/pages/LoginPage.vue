@@ -3,6 +3,8 @@ import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { homePath, safePostLoginPath } from '../app/router'
+import InlineError from '../components/ui/InlineError.vue'
+import { authCopy } from '../copy/pages/auth'
 import { useAuthStore } from '../stores/auth'
 
 const username = ref('')
@@ -34,7 +36,7 @@ async function login(): Promise<void> {
         }
     } catch {
         password.value = ''
-        errorMessage.value = '用户名或密码错误，请重试。'
+        errorMessage.value = authCopy.loginFailed
     } finally {
         pending.value = false
     }
@@ -42,20 +44,19 @@ async function login(): Promise<void> {
 </script>
 
 <template>
-    <main class="login-page">
-        <section class="login-card" aria-labelledby="login-title">
-            <p class="login-card__eyebrow">SuperBoss</p>
-            <h1 id="login-title">登录工作台</h1>
-            <p class="login-card__description">使用本地账号继续。</p>
-            <form class="login-form" @submit.prevent="login">
-                <label for="login-username">用户名</label>
+    <main class="auth-page">
+        <p class="brand">SuperBoss</p>
+        <section class="auth-panel" aria-labelledby="login-title">
+            <h1 id="login-title">{{ authCopy.login }}</h1>
+            <form class="auth-form" @submit.prevent="login">
+                <label for="login-username">{{ authCopy.username }}</label>
                 <el-input
                     id="login-username"
                     v-model="username"
                     autocomplete="username"
                     maxlength="32"
                 />
-                <label for="login-password">密码</label>
+                <label for="login-password">{{ authCopy.password }}</label>
                 <el-input
                     id="login-password"
                     v-model="password"
@@ -65,61 +66,44 @@ async function login(): Promise<void> {
                 />
                 <el-button
                     type="primary"
-                    size="large"
                     native-type="submit"
                     :loading="pending"
                 >
-                    登录
+                    {{ authCopy.login }}
                 </el-button>
             </form>
-            <el-alert
-                v-if="errorMessage || auth.errorMessage"
-                type="error"
-                :closable="false"
-                show-icon
-            >
-                {{ errorMessage || auth.errorMessage }}
-            </el-alert>
+            <InlineError :message="errorMessage || auth.errorMessage" />
         </section>
     </main>
 </template>
 
 <style scoped>
-.login-page {
+.auth-page {
     display: grid;
-    min-height: calc(100vh - 64px);
+    min-height: 100vh;
     place-items: center;
     padding: 24px;
-    background: #f5f7fa;
+    background: var(--sb-paper);
 }
-
-.login-card {
+.brand {
+    position: absolute;
+    top: 24px;
+    left: 40px;
+    font-size: var(--sb-sm);
+    font-weight: 600;
+}
+.auth-panel {
     display: grid;
-    width: min(420px, 100%);
-    gap: 18px;
-    padding: 36px;
-    background: #fff;
-    border: 1px solid #e4e7ed;
-    border-radius: 12px;
+    width: min(360px, 100%);
+    gap: 24px;
 }
-
-.login-form {
+.auth-panel h1 {
+    font-size: var(--sb-xl);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+}
+.auth-form {
     display: grid;
     gap: 12px;
-}
-
-.login-card__eyebrow {
-    margin: 0;
-    color: #409eff;
-    font-weight: 700;
-}
-
-.login-card h1,
-.login-card__description {
-    margin: 0;
-}
-
-.login-card__description {
-    color: #606266;
 }
 </style>

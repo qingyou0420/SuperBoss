@@ -40,6 +40,11 @@ vi.mock('../src/api/agent', () => ({
         previewSoul: vi.fn(),
         listMemories: vi.fn().mockResolvedValue([]),
         patchMemory: vi.fn(),
+        archive: vi.fn(),
+        monthlyUsage: vi.fn().mockResolvedValue({
+            prompt_tokens: 0,
+            completion_tokens: 0,
+        }),
     },
     agentErrorMessage: () => '霜月暂时无法完成操作，请稍后重试。',
 }))
@@ -540,7 +545,7 @@ describe('server-authoritative role refresh routing', () => {
             })
         const router = await renderAt('/users')
         expect(
-            await screen.findByRole('heading', { name: '账号管理' }),
+            await screen.findByRole('heading', { name: '成员' }),
         ).toBeInTheDocument()
 
         await sessionRefreshedHandler()()
@@ -555,7 +560,7 @@ describe('server-authoritative role refresh routing', () => {
             expect(router.currentRoute.value.name).toBe('forbidden'),
         )
         expect(
-            screen.queryByRole('heading', { name: '账号管理' }),
+            screen.queryByRole('heading', { name: '成员' }),
         ).not.toBeInTheDocument()
     })
 

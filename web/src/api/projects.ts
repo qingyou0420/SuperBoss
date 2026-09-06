@@ -4,11 +4,10 @@ import {
     formatRequestError,
     type BrowserHttpClient,
 } from './http'
+import { hasRequiredKeys, isRecord, UUID } from './parse'
 
 export const MAX_PROJECTS_PER_RESPONSE = 1000
 
-const UUID =
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const EDGE_WHITESPACE = /^[ \t\r\n\u00a0]+|[ \t\r\n\u00a0]+$/g
 
 export const PROJECT_STAGES = [
@@ -70,17 +69,6 @@ export class ProjectContractError extends Error {
         super('Invalid project data')
         this.name = 'ProjectContractError'
     }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-    return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function hasRequiredKeys(
-    value: Record<string, unknown>,
-    required: readonly string[],
-): boolean {
-    return required.every((key) => key in value)
 }
 
 function hasUnsafeText(value: string): boolean {

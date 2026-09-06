@@ -1,7 +1,6 @@
 """OWNER-only 霜月 routes."""
 
 import json
-from collections.abc import AsyncIterator
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request, status
@@ -9,6 +8,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core.actors import Actor, require_role
+from superboss.core.db import get_session
 from superboss.modules.agent.schemas import (
     CardPatch,
     CardRead,
@@ -23,6 +23,7 @@ from superboss.modules.agent.schemas import (
     SoulPreview,
     SoulRead,
     SoulWrite,
+    UsageRead,
 )
 from superboss.modules.agent.service import AgentService
 from superboss.modules.audit.service import AuditService
@@ -30,19 +31,6 @@ from superboss.modules.users.models import Role
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 _owner = require_role(Role.OWNER)
-
-
-async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
-    session = request.app.state.session_factory()
-    try:
-        yield session
-    except Exception:
-        await session.rollback()
-        raise
-    else:
-        await session.commit()
-    finally:
-        await session.close()
 
 
 def get_service(
@@ -58,6 +46,12 @@ def get_service(
         audit=AuditService(request.app.state.session_factory),
         enqueue_extract=request.app.state.enqueue_memory_extract,
     )
+
+
+@router.get("/usage", response_model=UsageRead)
+async def monthly_usage(service: AgentService = Depends(get_service)) -> UsageRead:
+    payload = await service.monthly_usage()
+    return UsageRead.model_validate(payload)
 
 
 @router.get("/conversations", response_model=list[ConversationRead])

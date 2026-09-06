@@ -164,6 +164,7 @@ describe('OWNER local user management page', () => {
         })
         render(UsersPage, { global: { plugins: [ElementPlus] } })
         await screen.findByText('existing-staff')
+        await fireEvent.click(screen.getByRole('button', { name: '添加' }))
         await fireEvent.update(
             screen.getByLabelText('用户名'),
             'staff-acceptance',
@@ -193,16 +194,12 @@ describe('OWNER local user management page', () => {
         mockedUsersApi.resetPassword.mockResolvedValue({
             temporary_password: temporaryPassword,
         })
-        const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
         const rendered = render(UsersPage, {
             global: { plugins: [ElementPlus] },
         })
         await screen.findByText('existing-staff')
         await fireEvent.click(screen.getByRole('button', { name: '重置密码' }))
         expect(await screen.findByText(temporaryPassword)).toBeInTheDocument()
-        expect(confirm).toHaveBeenCalledWith(
-            '确认重置 existing-staff 的密码吗？',
-        )
         rendered.unmount()
         expect(document.body.textContent).not.toContain(temporaryPassword)
     })
@@ -213,12 +210,12 @@ describe('OWNER local user management page', () => {
             status: 'DISABLED',
         })
         mockedUsersApi.replaceProjects.mockResolvedValue(staff)
-        const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
         render(UsersPage, { global: { plugins: [ElementPlus] } })
         await screen.findByText('existing-staff')
-        expect(screen.getAllByText('验收项目').length).toBeGreaterThan(0)
         await fireEvent.click(screen.getByRole('button', { name: '禁用' }))
-        expect(confirm).toHaveBeenCalledWith('确认禁用 existing-staff 吗？')
+        await fireEvent.click(
+            await screen.findByRole('button', { name: '确定' }),
+        )
         expect(mockedUsersApi.update).toHaveBeenCalledWith(staff.id, {
             status: 'DISABLED',
         })

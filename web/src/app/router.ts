@@ -11,21 +11,10 @@ import {
     setSessionRefreshedHandler,
 } from '../api/http'
 import type { UserRole } from '../api/auth'
-import AppLayout from '../layouts/AppLayout.vue'
-import ForbiddenPage from '../pages/ForbiddenPage.vue'
-import HealthPage from '../pages/HealthPage.vue'
-import LoginPage from '../pages/LoginPage.vue'
-import PasswordChangePage from '../pages/PasswordChangePage.vue'
-import ProjectDetailPage from '../pages/ProjectDetailPage.vue'
-import AuditPage from '../pages/AuditPage.vue'
-import ChatPage from '../pages/ChatPage.vue'
-import FinancePage from '../pages/FinancePage.vue'
-import KnowledgePage from '../pages/KnowledgePage.vue'
-import MemoryPage from '../pages/MemoryPage.vue'
-import SoulPage from '../pages/SoulPage.vue'
-import DrivePage from '../pages/owner/DrivePage.vue'
-import ProjectsPage from '../pages/owner/ProjectsPage.vue'
-import UsersPage from '../pages/owner/UsersPage.vue'
+import { homePath } from './navigation'
+import AppShell from '../layouts/AppShell.vue'
+
+export { homePath } from './navigation'
 
 export type AppRole = UserRole
 
@@ -33,6 +22,7 @@ declare module 'vue-router' {
     interface RouteMeta {
         requiresAuth?: boolean
         roles?: AppRole[]
+        width?: 'read' | 'table'
     }
 }
 
@@ -61,11 +51,6 @@ function hasUnsafePathText(value: string): boolean {
         }
     }
     return false
-}
-
-export function homePath(role: AppRole | undefined): string {
-    if (role === 'OWNER') return '/chat'
-    return FALLBACK_PATH
 }
 
 export function safePostLoginPath(value: unknown): string {
@@ -116,26 +101,38 @@ export function createAppRouter(
     const router = createRouter({
         history,
         routes: [
-            { path: '/health', name: 'health', component: HealthPage },
-            { path: '/login', name: 'login', component: LoginPage },
+            {
+                path: '/health',
+                name: 'health',
+                component: () => import('../pages/HealthPage.vue'),
+            },
+            {
+                path: '/login',
+                name: 'login',
+                component: () => import('../pages/LoginPage.vue'),
+            },
             {
                 path: '/password/change',
                 name: 'password-change',
-                component: PasswordChangePage,
+                component: () => import('../pages/PasswordChangePage.vue'),
                 meta: { requiresAuth: true },
             },
-            { path: '/forbidden', name: 'forbidden', component: ForbiddenPage },
+            {
+                path: '/forbidden',
+                name: 'forbidden',
+                component: () => import('../pages/ForbiddenPage.vue'),
+            },
             {
                 path: '/',
-                component: AppLayout,
-                meta: { requiresAuth: true, roles: ALL_ROLES },
+                component: AppShell,
+                meta: { requiresAuth: true, roles: ALL_ROLES, width: 'table' },
                 children: [
                     { path: '', redirect: FALLBACK_PATH },
                     {
                         path: 'chat',
                         name: 'chat',
-                        component: ChatPage,
-                        meta: { roles: ['OWNER'] },
+                        component: () => import('../pages/ChatPage.vue'),
+                        meta: { roles: ['OWNER'], width: 'read' },
                         props: {
                             allowedObjectOrigin: configuredObjectOrigin,
                         },
@@ -143,29 +140,31 @@ export function createAppRouter(
                     {
                         path: 'soul',
                         name: 'soul',
-                        component: SoulPage,
-                        meta: { roles: ['OWNER'] },
+                        component: () => import('../pages/SoulPage.vue'),
+                        meta: { roles: ['OWNER'], width: 'read' },
                     },
                     {
                         path: 'memory',
                         name: 'memory',
-                        component: MemoryPage,
+                        component: () => import('../pages/MemoryPage.vue'),
                         meta: { roles: ['OWNER'] },
                     },
                     {
                         path: 'projects',
                         name: 'projects',
-                        component: ProjectsPage,
+                        component: () =>
+                            import('../pages/owner/ProjectsPage.vue'),
                     },
                     {
                         path: 'projects/:projectId',
                         name: 'project-detail',
-                        component: ProjectDetailPage,
+                        component: () =>
+                            import('../pages/ProjectDetailPage.vue'),
                     },
                     {
                         path: 'drive',
                         name: 'drive',
-                        component: DrivePage,
+                        component: () => import('../pages/owner/DrivePage.vue'),
                         props: {
                             allowedObjectOrigin: configuredObjectOrigin,
                         },
@@ -173,25 +172,27 @@ export function createAppRouter(
                     {
                         path: 'finance',
                         name: 'finance',
-                        component: FinancePage,
+                        component: () => import('../pages/FinancePage.vue'),
                     },
                     {
                         path: 'knowledge',
                         name: 'knowledge',
-                        component: KnowledgePage,
+                        component: () => import('../pages/KnowledgePage.vue'),
+                        meta: { width: 'read' },
                     },
                     {
                         path: 'audit',
                         name: 'audit',
-                        component: AuditPage,
+                        component: () => import('../pages/AuditPage.vue'),
                         meta: { roles: ['OWNER'] },
                     },
                     {
-                        path: 'users',
+                        path: 'members',
                         name: 'users',
-                        component: UsersPage,
+                        component: () => import('../pages/owner/UsersPage.vue'),
                         meta: { roles: ['OWNER'] },
                     },
+                    { path: 'users', redirect: '/members' },
                 ],
             },
             {
@@ -221,7 +222,7 @@ export function createAppRouter(
             {
                 path: '/owner/users',
                 redirect: (to) => ({
-                    path: '/users',
+                    path: '/members',
                     query: to.query,
                     hash: to.hash,
                 }),

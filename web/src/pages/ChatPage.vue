@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 
 import {
     agentApi,
@@ -9,7 +9,11 @@ import {
     type AgentMessage,
 } from '../api/agent'
 import { filesApi, type FileUploadCompleted } from '../api/files'
+import { projectsApi } from '../api/projects'
+import ProposalCard from '../components/chat/ProposalCard.vue'
 import MultipartUploader from '../components/files/MultipartUploader.vue'
+import InlineError from '../components/ui/InlineError.vue'
+import { chatCopy } from '../copy/pages/chat'
 
 withDefaults(
     defineProps<{
@@ -17,46 +21,6 @@ withDefaults(
     }>(),
     { allowedObjectOrigin: '' },
 )
-
-const KIND_LABEL: Record<string, string> = {
-    finance_entry: '财务入账',
-    finance_adjust: '财务调整',
-    project_create: '新建项目',
-    project_update: '更新项目',
-    milestone_change: '里程碑',
-    file_move: '移动文件',
-    memory: '记忆',
-    knowledge_ingest: '知识入库',
-}
-
-const FIELD_LABEL: Record<string, string> = {
-    kind: '类型',
-    scope: '范围',
-    project_id: '项目',
-    amount_cents: '金额（分）',
-    occurred_on: '日期',
-    category: '类别',
-    memo: '备注',
-    visibility: '可见范围',
-    name: '名称',
-    title: '标题',
-    description: '说明',
-    filename: '文件名',
-    content: '内容',
-    entry_id: '账目',
-    field: '字段',
-    new_value: '新值',
-    reason: '原因',
-    stage: '阶段',
-    progress_percent: '进度',
-    starts_on: '开始',
-    due_on: '截止',
-    file_id: '文件',
-    target_folder_id: '目标文件夹',
-    new_name: '新文件名',
-    importance: '重要度',
-    pinned: '置顶',
-}
 
 const conversations = ref<AgentConversation[]>([])
 const currentId = ref('')
@@ -71,8 +35,9 @@ const streamingText = ref('')
 const folderId = ref('')
 const pendingFileId = ref('')
 const pendingFileName = ref('')
-const cardNotes = reactive<Record<string, string>>({})
-const cardDrafts = reactive<Record<string, Record<string, string>>>({})
+const pendingPreview = ref('')
+const projectNames = ref<Record<string, string>>({})
+const folderNames = ref<Record<string, string>>({})
 
 const currentCards = computed(() => {
     const byMessage = new Map<string, AgentCard[]>()
@@ -85,56 +50,27 @@ const currentCards = computed(() => {
     return byMessage
 })
 
-function fieldValue(value: unknown): string {
-    if (value === null || value === undefined) return ''
-    if (typeof value === 'object') return JSON.stringify(value)
-    return String(value)
-}
-
-function draftFor(card: AgentCard): Record<string, string> {
-    if (!cardDrafts[card.id]) {
-        cardDrafts[card.id] = Object.fromEntries(
-            Object.entries(card.payload).map(([key, value]) => [
-                key,
-                fieldValue(value),
-            ]),
-        )
+const grouped = computed(() => {
+    const now = Date.now()
+    const startOfToday = new Date()
+    startOfToday.setHours(0, 0, 0, 0)
+    const weekAgo = now - 7 * 24 * 60 * 60 * 1000
+    const groups: {
+        label: string
+        items: AgentConversation[]
+    }[] = [
+        { label: chatCopy.today, items: [] },
+        { label: chatCopy.thisWeek, items: [] },
+        { label: chatCopy.earlier, items: [] },
+    ]
+    for (const item of conversations.value ?? []) {
+        const stamp = new Date(item.last_message_at).getTime()
+        if (stamp >= startOfToday.getTime()) groups[0].items.push(item)
+        else if (stamp >= weekAgo) groups[1].items.push(item)
+        else groups[2].items.push(item)
     }
-    return cardDrafts[card.id]
-}
-
-function parsedDraft(draft: Record<string, string>): Record<string, unknown> {
-    const payload: Record<string, unknown> = {}
-    for (const [key, raw] of Object.entries(draft)) {
-        if (raw === '') {
-            payload[key] = null
-            continue
-        }
-        if (
-            key === 'amount_cents' ||
-            key === 'importance' ||
-            key === 'progress_percent'
-        ) {
-            payload[key] = Number(raw)
-            continue
-        }
-        if (raw === 'true' || raw === 'false') {
-            payload[key] = raw === 'true'
-            continue
-        }
-        if (raw.startsWith('{') || raw.startsWith('[')) {
-            try {
-                payload[key] = JSON.parse(raw) as unknown
-                continue
-            } catch {
-                payload[key] = raw
-                continue
-            }
-        }
-        payload[key] = raw
-    }
-    return payload
-}
+    return groups.filter((group) => group.items.length)
+})
 
 async function loadConversations(): Promise<void> {
     conversations.value = await agentApi.listConversations(
@@ -166,6 +102,15 @@ async function createConversation(): Promise<void> {
     await loadThread()
 }
 
+async function archiveConversation(id: string): Promise<void> {
+    await agentApi.archive(id)
+    conversations.value = conversations.value.filter((item) => item.id !== id)
+    if (currentId.value === id) {
+        currentId.value = conversations.value[0]?.id ?? ''
+        await loadThread()
+    }
+}
+
 async function send(): Promise<void> {
     const content = draft.value.trim()
     const fileId = pendingFileId.value || undefined
@@ -178,6 +123,7 @@ async function send(): Promise<void> {
         draft.value = ''
         pendingFileId.value = ''
         pendingFileName.value = ''
+        pendingPreview.value = ''
         try {
             const turn = await agentApi.stream(
                 currentId.value,
@@ -189,8 +135,22 @@ async function send(): Promise<void> {
             )
             offline.value = turn.offline
         } catch {
-            const turn = await agentApi.send(currentId.value, content, fileId)
-            offline.value = turn.offline
+            const existing = await agentApi.listMessages(currentId.value)
+            const lastUser = [...existing]
+                .reverse()
+                .find((item) => item.role === 'user')
+            const alreadyStored =
+                lastUser &&
+                ((content && lastUser.content.startsWith(content)) ||
+                    (!content && fileId && lastUser.content.includes('附件')))
+            if (!alreadyStored) {
+                const turn = await agentApi.send(
+                    currentId.value,
+                    content,
+                    fileId,
+                )
+                offline.value = turn.offline
+            }
         }
         streamingText.value = ''
         await loadThread()
@@ -224,18 +184,25 @@ async function reject(card: AgentCard): Promise<void> {
     }
 }
 
-async function saveCard(card: AgentCard): Promise<void> {
+async function saveCard(
+    card: AgentCard,
+    payload: Record<string, unknown>,
+    note: string,
+): Promise<void> {
     try {
-        const updated = await agentApi.patch(
-            card.id,
-            parsedDraft(draftFor(card)),
-            cardNotes[card.id] || '',
-        )
+        const updated = await agentApi.patch(card.id, payload, note)
         cards.value = cards.value.map((item) =>
             item.id === updated.id ? updated : item,
         )
-        delete cardDrafts[updated.id]
-        cardNotes[card.id] = ''
+    } catch (error) {
+        errorMessage.value = agentErrorMessage(error)
+    }
+}
+
+async function reviseCard(card: AgentCard, instruction: string): Promise<void> {
+    try {
+        await agentApi.revise(card.id, instruction)
+        await loadThread()
     } catch (error) {
         errorMessage.value = agentErrorMessage(error)
     }
@@ -243,7 +210,15 @@ async function saveCard(card: AgentCard): Promise<void> {
 
 function onUploaded(result: FileUploadCompleted): void {
     pendingFileId.value = result.file_id
-    pendingFileName.value = '已上传，发送时交给霜月'
+}
+
+async function onFilePicked(file: File): Promise<void> {
+    pendingFileName.value = file.name
+    pendingPreview.value = ''
+    if (file.type.startsWith('text/') && file.size < 200_000) {
+        const text = await file.slice(0, 400).text()
+        pendingPreview.value = text
+    }
 }
 
 async function selectConversation(id: string): Promise<void> {
@@ -251,15 +226,29 @@ async function selectConversation(id: string): Promise<void> {
     await loadThread()
 }
 
+watch(search, () => {
+    void loadConversations()
+})
+
 onMounted(async () => {
     try {
         await loadConversations()
         await loadThread()
-        const folders = await filesApi.listFolders()
+        const [folders, projects] = await Promise.all([
+            filesApi.listFolders(),
+            projectsApi.list().catch(() => []),
+        ])
         folderId.value =
+            folders.find((folder) => folder.name === '老板私有')?.id ??
             folders.find((folder) => folder.name === '项目')?.id ??
             folders[0]?.id ??
             ''
+        folderNames.value = Object.fromEntries(
+            folders.map((item) => [item.id, item.name]),
+        )
+        projectNames.value = Object.fromEntries(
+            projects.map((item) => [item.id, item.name]),
+        )
     } catch (error) {
         errorMessage.value = agentErrorMessage(error)
     }
@@ -270,135 +259,122 @@ onMounted(async () => {
     <section class="chat-page" aria-labelledby="chat-title">
         <aside>
             <div class="side-head">
-                <h1 id="chat-title">霜月</h1>
-                <el-button size="small" @click="createConversation"
-                    >新对话</el-button
-                >
+                <h1 id="chat-title">{{ chatCopy.brand }}</h1>
+                <el-button text @click="createConversation">{{
+                    chatCopy.newConversation
+                }}</el-button>
             </div>
             <form class="search" @submit.prevent="loadConversations">
-                <label for="chat-search">搜索会话</label>
-                <el-input id="chat-search" v-model="search" />
-                <el-button native-type="submit">查找</el-button>
+                <label class="sr-only" for="chat-search">{{
+                    chatCopy.searchSessions
+                }}</label>
+                <el-input
+                    id="chat-search"
+                    v-model="search"
+                    :placeholder="chatCopy.search"
+                />
             </form>
-            <button
-                v-for="item in conversations"
-                :key="item.id"
-                type="button"
-                class="conversation"
-                :class="{ active: item.id === currentId }"
-                @click="selectConversation(item.id)"
-            >
-                {{ item.title }}
-            </button>
+            <section v-for="group in grouped" :key="group.label">
+                <h2>{{ group.label }}</h2>
+                <div
+                    v-for="item in group.items"
+                    :key="item.id"
+                    class="conversation"
+                    :class="{ active: item.id === currentId }"
+                >
+                    <el-button
+                        text
+                        class="conversation__open"
+                        @click="selectConversation(item.id)"
+                        >{{ item.title }}</el-button
+                    >
+                    <el-dropdown
+                        trigger="click"
+                        @command="archiveConversation(item.id)"
+                    >
+                        <el-button text native-type="button">···</el-button>
+                        <template #dropdown>
+                            <el-dropdown-menu>
+                                <el-dropdown-item>{{
+                                    chatCopy.archive
+                                }}</el-dropdown-item>
+                            </el-dropdown-menu>
+                        </template>
+                    </el-dropdown>
+                </div>
+            </section>
         </aside>
         <div class="thread">
-            <el-alert v-if="offline" type="warning" :closable="false" show-icon>
-                霜月暂时离线，你仍可以直接使用各页面。
-            </el-alert>
-            <el-alert
-                v-if="errorMessage"
-                type="error"
-                :closable="false"
-                show-icon
-            >
-                {{ errorMessage }}
-            </el-alert>
+            <p v-if="offline" class="offline">{{ chatCopy.offline }}</p>
+            <InlineError :message="errorMessage" />
             <ol class="messages">
                 <li v-for="message in messages" :key="message.id">
-                    <strong>{{
-                        message.role === 'user' ? '你' : '霜月'
-                    }}</strong>
-                    <p class="message-body">{{ message.content }}</p>
-                    <el-card
-                        v-for="card in currentCards.get(message.id) ?? []"
-                        :key="card.id"
-                        shadow="never"
-                    >
-                        <h2>{{ KIND_LABEL[card.kind] || card.kind }}</h2>
-                        <p v-if="card.status === 'COMMITTED'">
-                            已入库
-                            <span v-if="card.committed_object_type">
-                                · {{ card.committed_object_type }}
-                            </span>
-                        </p>
-                        <form
-                            v-else-if="card.status === 'PROPOSED'"
-                            class="card-edit"
-                            @submit.prevent="saveCard(card)"
-                        >
-                            <label
-                                v-for="(value, key) in draftFor(card)"
-                                :key="String(key)"
-                            >
-                                {{ FIELD_LABEL[String(key)] || key }}
-                                <el-input v-model="draftFor(card)[key]" />
-                            </label>
-                            <label>
-                                说明（可选）
-                                <el-input
-                                    v-model="cardNotes[card.id]"
-                                    placeholder="一句话说明这次修改"
-                                />
-                            </label>
-                            <div class="card-actions">
-                                <el-button native-type="submit"
-                                    >保存修改</el-button
-                                >
-                                <el-button
-                                    type="primary"
-                                    native-type="button"
-                                    @click="confirm(card)"
-                                    >确认入库</el-button
-                                >
-                                <el-button
-                                    native-type="button"
-                                    @click="reject(card)"
-                                    >放弃</el-button
-                                >
-                            </div>
-                        </form>
-                        <dl v-else>
-                            <div
-                                v-for="(value, key) in card.payload"
-                                :key="String(key)"
-                            >
-                                <dt>
-                                    {{ FIELD_LABEL[String(key)] || key }}
-                                </dt>
-                                <dd>{{ value }}</dd>
-                            </div>
-                        </dl>
-                    </el-card>
+                    <p v-if="message.role === 'system'" class="receipt">
+                        {{ message.content }}
+                    </p>
+                    <template v-else>
+                        <strong>{{
+                            message.role === 'user'
+                                ? chatCopy.you
+                                : chatCopy.assistant
+                        }}</strong>
+                        <p class="message-body">{{ message.content }}</p>
+                        <ProposalCard
+                            v-for="card in currentCards.get(message.id) ?? []"
+                            :key="card.id"
+                            :card="card"
+                            :project-names="projectNames"
+                            :folder-names="folderNames"
+                            @confirm="confirm(card)"
+                            @reject="reject(card)"
+                            @revise="reviseCard(card, $event)"
+                            @patch="
+                                (payload, note) => saveCard(card, payload, note)
+                            "
+                        />
+                    </template>
                 </li>
                 <li v-if="streamingText">
-                    <strong>霜月</strong>
+                    <strong>{{ chatCopy.assistant }}</strong>
                     <p class="message-body">{{ streamingText }}</p>
                 </li>
             </ol>
             <form class="composer" @submit.prevent="send">
-                <label for="chat-draft">给霜月</label>
-                <el-input
-                    id="chat-draft"
-                    v-model="draft"
-                    type="textarea"
-                    :autosize="{ minRows: 2, maxRows: 6 }"
-                />
                 <p v-if="pendingFileName" class="pending-file">
-                    附件：{{ pendingFileName }}
+                    {{ pendingFileName }}
+                    <span v-if="pendingPreview" class="preview">{{
+                        pendingPreview
+                    }}</span>
                 </p>
-                <MultipartUploader
-                    v-if="allowedObjectOrigin && folderId"
-                    :allowed-object-origin="allowedObjectOrigin"
-                    :folder-id="folderId"
-                    @completed="onUploaded"
-                />
-                <el-button
-                    type="primary"
-                    native-type="submit"
-                    :loading="sending"
-                    :disabled="sending"
-                    >发送</el-button
-                >
+                <div class="composer__row">
+                    <MultipartUploader
+                        v-if="allowedObjectOrigin && folderId"
+                        compact
+                        :allowed-object-origin="allowedObjectOrigin"
+                        :folder-id="folderId"
+                        @completed="onUploaded"
+                        @selected="onFilePicked"
+                    />
+                    <label class="sr-only" for="chat-draft">{{
+                        chatCopy.composerLabel
+                    }}</label>
+                    <el-input
+                        id="chat-draft"
+                        v-model="draft"
+                        type="textarea"
+                        :autosize="{ minRows: 2, maxRows: 6 }"
+                        :placeholder="chatCopy.placeholder"
+                        :disabled="offline"
+                        @keydown.enter.exact.prevent="send"
+                    />
+                    <el-button
+                        type="primary"
+                        native-type="submit"
+                        :loading="sending"
+                        :disabled="sending || offline"
+                        >{{ chatCopy.send }}</el-button
+                    >
+                </div>
             </form>
         </div>
     </section>
@@ -408,48 +384,82 @@ onMounted(async () => {
 .chat-page {
     display: grid;
     grid-template-columns: minmax(180px, 240px) 1fr;
-    gap: 1rem;
+    gap: 32px;
     min-height: 70vh;
 }
-.side-head,
-.card-actions,
-.composer,
-.search {
+.side-head {
     display: flex;
-    gap: 8px;
+    justify-content: space-between;
     align-items: center;
-    flex-wrap: wrap;
+    margin-bottom: 16px;
 }
-.search,
-.card-edit,
-.composer {
-    display: grid;
+.side-head h1 {
+    font-size: var(--sb-lg);
+    font-weight: 600;
+}
+aside h2 {
+    margin: 16px 0 8px;
+    color: var(--sb-ink-3);
+    font-size: var(--sb-xs);
+    font-weight: 400;
 }
 .conversation {
-    display: block;
-    width: 100%;
-    text-align: left;
-    margin-bottom: 6px;
-    padding: 0.6rem;
-    border: 1px solid #dcdfe6;
-    border-radius: 8px;
-    background: #fff;
-    cursor: pointer;
+    display: flex;
+    align-items: center;
+    border-bottom: 1px solid var(--sb-line);
 }
-.conversation.active {
-    border-color: #409eff;
+.conversation.active .conversation__open {
+    font-weight: 600;
+    color: var(--sb-accent);
+}
+.conversation__open {
+    flex: 1;
+    justify-content: flex-start;
 }
 .messages {
     list-style: none;
     padding: 0;
     display: grid;
-    gap: 1rem;
+    gap: 32px;
+}
+.messages strong {
+    display: block;
+    margin-bottom: 6px;
+    color: var(--sb-ink-2);
+    font-size: var(--sb-sm);
+    font-weight: 400;
 }
 .message-body {
     white-space: pre-wrap;
+    font-size: var(--sb-md);
+    line-height: 1.75;
 }
+.receipt,
+.offline,
 .pending-file {
-    color: #909399;
+    color: var(--sb-ink-3);
+    font-size: var(--sb-sm);
+}
+.receipt {
+    text-align: center;
+}
+.preview {
+    display: block;
+    margin-top: 6px;
+    white-space: pre-wrap;
+    max-height: 8em;
+    overflow: hidden;
+}
+.composer {
+    margin-top: 32px;
+}
+.composer__row {
+    display: flex;
+    gap: 8px;
+    align-items: flex-end;
+}
+.composer__row :deep(.el-textarea) {
+    flex: 1;
 }
 @media (max-width: 760px) {
     .chat-page {

@@ -30,7 +30,9 @@ describe('browser HTTP client', () => {
         let calls = 0
         const adapter: AxiosAdapter = async (config) => {
             calls += 1
-            seen.push(`${config.method}:${config.url}:${config.headers?.['X-CSRF-Token'] ?? ''}`)
+            seen.push(
+                `${config.method}:${config.url}:${config.headers?.['X-CSRF-Token'] ?? ''}`,
+            )
             if (config.url === '/auth/refresh') {
                 return response(config, 204, '')
             }
@@ -54,17 +56,25 @@ describe('browser HTTP client', () => {
         const client = createHttpClient({ adapter })
         const result = await client.post('/projects', { name: 'x' })
         expect(result.status).toBe(204)
-        expect(seen.some((item) => item.startsWith('post:/auth/refresh'))).toBe(true)
+        expect(seen.some((item) => item.startsWith('post:/auth/refresh'))).toBe(
+            true,
+        )
         expect(seen[0]).toContain('csrf-token')
     })
 
     test('wraps non-refreshable failures as HttpClientError', async () => {
         const adapter: AxiosAdapter = async (config) => {
             const rejected = response(config, 503, '{"error":{"code":"DOWN"}}')
-            throw new AxiosError('rejected', 'ERR_BAD_REQUEST', config, undefined, rejected)
+            throw new AxiosError(
+                'rejected',
+                'ERR_BAD_REQUEST',
+                config,
+                undefined,
+                rejected,
+            )
         }
-        await expect(createHttpClient({ adapter }).get('/health')).rejects.toBeInstanceOf(
-            HttpClientError,
-        )
+        await expect(
+            createHttpClient({ adapter }).get('/health'),
+        ).rejects.toBeInstanceOf(HttpClientError)
     })
 })

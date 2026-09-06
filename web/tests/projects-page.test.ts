@@ -68,39 +68,40 @@ beforeEach(() => {
 })
 
 describe('OWNER project management page', () => {
-    test('lists OWNER-visible projects and marks test projects with an explicit acceptance label', async () => {
+    test('lists OWNER-visible projects', async () => {
         renderPage()
 
         expect(await screen.findByText('正式项目')).toBeInTheDocument()
         expect(screen.getByText('员工验收沙盒')).toBeInTheDocument()
-        expect(screen.getByText('验收测试')).toBeInTheDocument()
-        expect(screen.queryAllByText('验收测试')).toHaveLength(1)
+        expect(screen.queryByText('验收测试')).not.toBeInTheDocument()
         expect(mockedProjects.list).toHaveBeenCalledTimes(1)
     })
 
-    test('creates an is_test project from accessible form controls and immediately labels it', async () => {
+    test('creates a project from accessible form controls', async () => {
         mockedProjects.create.mockResolvedValue({
             ...acceptance,
             name: '新验收项目',
+            is_test: false,
         })
         renderPage()
         await screen.findByText('正式项目')
+        await fireEvent.click(screen.getByRole('button', { name: '新建' }))
 
         await fireEvent.update(
             screen.getByLabelText('项目名称'),
             ' 新验收项目 ',
         )
-        await fireEvent.click(screen.getByLabelText('设为验收测试项目'))
         await fireEvent.click(screen.getByRole('button', { name: '创建项目' }))
 
         await waitFor(() =>
             expect(mockedProjects.create).toHaveBeenCalledWith({
                 name: '新验收项目',
-                is_test: true,
+                is_test: false,
+                description: '',
+                stage: 'PLANNING',
             }),
         )
         expect(await screen.findByText('新验收项目')).toBeInTheDocument()
-        expect(screen.getAllByText('验收测试')).toHaveLength(2)
     })
 
     test('does not let a stale initial list overwrite a project created while loading', async () => {
@@ -116,19 +117,20 @@ describe('OWNER project management page', () => {
             name: 'race-created',
         })
         renderPage()
+        await fireEvent.click(
+            await screen.findByRole('button', { name: '新建' }),
+        )
 
         await fireEvent.update(
-            await screen.findByRole('textbox'),
+            await screen.findByLabelText('项目名称'),
             'race-created',
         )
-        await fireEvent.click(screen.getByLabelText('设为验收测试项目'))
         await fireEvent.click(screen.getByRole('button', { name: '创建项目' }))
         expect(await screen.findByText('race-created')).toBeInTheDocument()
 
         releaseList()
         expect(await screen.findByText('正式项目')).toBeInTheDocument()
         expect(screen.getByText('race-created')).toBeInTheDocument()
-        expect(screen.getByText('验收测试')).toBeInTheDocument()
     })
 
     test('accepts 255 supplementary Unicode code points without a UTF-16 maxlength barrier', async () => {
@@ -138,6 +140,7 @@ describe('OWNER project management page', () => {
         })
         renderPage()
         await screen.findByText('正式项目')
+        await fireEvent.click(screen.getByRole('button', { name: '新建' }))
         const input = screen.getByLabelText('项目名称') as HTMLInputElement
 
         expect(input.maxLength).toBe(-1)
@@ -149,6 +152,8 @@ describe('OWNER project management page', () => {
             expect(mockedProjects.create).toHaveBeenCalledWith({
                 name: boundary,
                 is_test: false,
+                description: '',
+                stage: 'PLANNING',
             }),
         )
     })
@@ -157,6 +162,7 @@ describe('OWNER project management page', () => {
         mockedProjects.create.mockResolvedValue(acceptance)
         renderPage()
         await screen.findByText('正式项目')
+        await fireEvent.click(screen.getByRole('button', { name: '新建' }))
 
         await fireEvent.update(
             screen.getByLabelText('项目名称'),
@@ -177,6 +183,7 @@ describe('OWNER project management page', () => {
         )
         renderPage()
         await screen.findByText('正式项目')
+        await fireEvent.click(screen.getByRole('button', { name: '新建' }))
 
         const button = screen.getByRole('button', { name: '创建项目' })
         await fireEvent.click(button)
@@ -197,7 +204,7 @@ describe('OWNER project management page', () => {
         renderPage()
 
         expect(
-            await screen.findByText('项目列表暂时无法加载，请稍后重试。'),
+            await screen.findByText('项目列表加载失败。'),
         ).toBeInTheDocument()
         expect(
             screen.queryByText(/sentinel|postgres|traceback/i),

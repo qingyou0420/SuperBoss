@@ -3,6 +3,8 @@ import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { homePath, safePostLoginPath } from '../app/router'
+import InlineError from '../components/ui/InlineError.vue'
+import { authCopy } from '../copy/pages/auth'
 import { useAuthStore } from '../stores/auth'
 
 const currentPassword = ref('')
@@ -24,7 +26,7 @@ async function changePassword(): Promise<void> {
     if (pending.value) return
     errorMessage.value = ''
     if (newPassword.value !== confirmation.value) {
-        errorMessage.value = '两次输入的新密码不一致。'
+        errorMessage.value = authCopy.mismatch
         return
     }
     pending.value = true
@@ -49,13 +51,14 @@ async function changePassword(): Promise<void> {
 </script>
 
 <template>
-    <main class="password-page">
-        <section class="password-card" aria-labelledby="password-title">
-            <p class="password-card__eyebrow">首次登录</p>
-            <h1 id="password-title">设置新密码</h1>
-            <p>继续使用前，请先更换临时密码。</p>
-            <form class="password-form" @submit.prevent="changePassword">
-                <label for="current-password">当前密码</label>
+    <main class="auth-page">
+        <p class="brand">SuperBoss</p>
+        <section class="auth-panel" aria-labelledby="password-title">
+            <h1 id="password-title">{{ authCopy.setPassword }}</h1>
+            <form class="auth-form" @submit.prevent="changePassword">
+                <label for="current-password">{{
+                    authCopy.currentPassword
+                }}</label>
                 <el-input
                     id="current-password"
                     v-model="currentPassword"
@@ -63,7 +66,7 @@ async function changePassword(): Promise<void> {
                     autocomplete="current-password"
                     maxlength="128"
                 />
-                <label for="new-password">新密码</label>
+                <label for="new-password">{{ authCopy.newPassword }}</label>
                 <el-input
                     id="new-password"
                     v-model="newPassword"
@@ -71,7 +74,9 @@ async function changePassword(): Promise<void> {
                     autocomplete="new-password"
                     maxlength="128"
                 />
-                <label for="confirm-password">确认新密码</label>
+                <label for="confirm-password">{{
+                    authCopy.confirmPassword
+                }}</label>
                 <el-input
                     id="confirm-password"
                     v-model="confirmation"
@@ -84,51 +89,40 @@ async function changePassword(): Promise<void> {
                     native-type="submit"
                     :loading="pending"
                 >
-                    更新密码
+                    {{ authCopy.updatePassword }}
                 </el-button>
             </form>
-            <el-alert
-                v-if="errorMessage"
-                type="error"
-                :closable="false"
-                show-icon
-            >
-                {{ errorMessage }}
-            </el-alert>
+            <InlineError :message="errorMessage" />
         </section>
     </main>
 </template>
 
 <style scoped>
-.password-page {
+.auth-page {
     display: grid;
     min-height: 100vh;
     place-items: center;
     padding: 24px;
-    background: #f5f7fa;
+    background: var(--sb-paper);
 }
-
-.password-card {
+.brand {
+    position: absolute;
+    top: 24px;
+    left: 40px;
+    font-size: var(--sb-sm);
+    font-weight: 600;
+}
+.auth-panel {
     display: grid;
-    width: min(460px, 100%);
-    gap: 16px;
-    padding: 36px;
-    background: #fff;
-    border: 1px solid #e4e7ed;
-    border-radius: 12px;
+    width: min(360px, 100%);
+    gap: 24px;
 }
-
-.password-card h1,
-.password-card p {
-    margin: 0;
+.auth-panel h1 {
+    font-size: var(--sb-xl);
+    font-weight: 600;
+    letter-spacing: -0.01em;
 }
-
-.password-card__eyebrow {
-    color: #409eff;
-    font-weight: 700;
-}
-
-.password-form {
+.auth-form {
     display: grid;
     gap: 12px;
 }

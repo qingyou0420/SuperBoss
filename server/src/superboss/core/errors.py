@@ -36,20 +36,20 @@ class PasswordReuseForbiddenError(DomainError):
 
 
 class ForbiddenError(DomainError):
-    def __init__(self, code: str = "PROJECT_FORBIDDEN", message: str = "You cannot access this project") -> None:
+    def __init__(self, code: str = "FORBIDDEN", message: str = "You cannot perform this action") -> None:
         super().__init__(code, message, 403)
 
 
 class NotFoundError(DomainError):
-    def __init__(self, code: str = "PROJECT_NOT_FOUND", message: str = "Project not found") -> None:
+    def __init__(self, code: str = "NOT_FOUND", message: str = "Not found") -> None:
         super().__init__(code, message, 404)
 
 
 class ConflictError(DomainError):
     def __init__(
         self,
-        code: str = "PROJECT_NAME_CONFLICT",
-        message: str = "A project with this name already exists",
+        code: str = "CONFLICT",
+        message: str = "The request conflicts with current state",
     ) -> None:
         super().__init__(code, message, 409)
 

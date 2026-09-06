@@ -1,12 +1,11 @@
 import { apiClient, formatRequestError, type BrowserHttpClient } from './http'
-
-const UUID =
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+import { isRecord, UUID } from './parse'
 
 export interface AuditEvent {
     id: string
     actor_kind: string
     actor_id: string | null
+    actor_name: string | null
     action: string
     object_type: string
     object_id: string | null
@@ -24,10 +23,6 @@ export class AuditContractError extends Error {
     }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-    return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
 function parseEvent(value: unknown): AuditEvent {
     if (
         !isRecord(value) ||
@@ -43,6 +38,8 @@ function parseEvent(value: unknown): AuditEvent {
         id: value.id,
         actor_kind: String(value.actor_kind || ''),
         actor_id: typeof value.actor_id === 'string' ? value.actor_id : null,
+        actor_name:
+            typeof value.actor_name === 'string' ? value.actor_name : null,
         action: value.action,
         object_type: String(value.object_type || ''),
         object_id: typeof value.object_id === 'string' ? value.object_id : null,

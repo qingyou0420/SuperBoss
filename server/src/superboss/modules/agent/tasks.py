@@ -1,6 +1,7 @@
 """Celery delivery for memory extraction."""
 
 import asyncio
+import logging
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -12,6 +13,7 @@ from superboss.modules.agent.service import AgentService
 from superboss.modules.users.models import Role
 from superboss.workers.celery_app import celery_app
 
+_LOG = logging.getLogger(__name__)
 settings = get_settings()
 
 
@@ -84,9 +86,26 @@ async def execute_daily_digest() -> None:
             )
             if not rows:
                 return
-            summary = "；".join(
-                item.content.replace("\n", " ")[:80] for item in rows if item.content
-            )[:1800]
+            transcript = "\n".join(
+                f"{item.role.value}: {item.content}" for item in rows if item.content
+            )[:4000]
+            summary = transcript[:200]
+            llm = llm_from_settings(active)
+            if llm.available:
+                try:
+                    result = await llm.complete(
+                        [
+                            {
+                                "role": "system",
+                                "content": "用不超过 200 字总结昨日对话要点。只写事实与决定。",
+                            },
+                            {"role": "user", "content": transcript},
+                        ],
+                        [],
+                    )
+                    summary = (result.content or "").strip()[:200] or summary
+                except Exception as error:  # noqa: BLE001 -- fall back to a truncated transcript
+                    _LOG.warning("daily digest llm failed: %s", error)
             session.add(
                 AgentMemory(
                     kind=MemoryKind.DAILY_DIGEST,

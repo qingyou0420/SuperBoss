@@ -2,11 +2,21 @@
 import { onMounted, ref } from 'vue'
 
 import { auditApi, auditErrorMessage, type AuditEvent } from '../api/audit'
+import { dateTimeShort } from '../api/parse'
+import InlineError from '../components/ui/InlineError.vue'
+import PageHeader from '../components/ui/PageHeader.vue'
+import {
+    AUDIT_ACTION_LABEL,
+    AUDIT_OUTCOME_LABEL,
+    auditActionLabel,
+} from '../copy/audit'
+import { auditPageCopy } from '../copy/pages/audit'
 
 const events = ref<AuditEvent[]>([])
 const action = ref('')
 const errorMessage = ref('')
 const loading = ref(true)
+const actions = Object.keys(AUDIT_ACTION_LABEL)
 
 async function load(): Promise<void> {
     loading.value = true
@@ -25,37 +35,50 @@ onMounted(load)
 
 <template>
     <section class="audit-page" aria-labelledby="audit-title">
-        <h1 id="audit-title">审计</h1>
-        <form class="filter" @submit.prevent="load">
-            <label for="audit-action">动作</label>
-            <el-input
-                id="audit-action"
+        <PageHeader :title="auditPageCopy.title" heading-id="audit-title">
+            <el-select
                 v-model="action"
-                placeholder="例如 finance.entry.create"
+                clearable
+                :placeholder="auditPageCopy.action"
+                @change="load"
+            >
+                <el-option
+                    v-for="item in actions"
+                    :key="item"
+                    :label="AUDIT_ACTION_LABEL[item]"
+                    :value="item"
+                />
+            </el-select>
+        </PageHeader>
+        <InlineError :message="errorMessage" />
+        <el-table v-loading="loading" :data="events" class="plain-table">
+            <el-table-column :label="auditPageCopy.time" min-width="140">
+                <template #default="{ row }">{{
+                    dateTimeShort(row.created_at)
+                }}</template>
+            </el-table-column>
+            <el-table-column :label="auditPageCopy.who" min-width="120">
+                <template #default="{ row }">{{
+                    row.actor_name || ''
+                }}</template>
+            </el-table-column>
+            <el-table-column :label="auditPageCopy.action" min-width="160">
+                <template #default="{ row }">{{
+                    auditActionLabel(row.action)
+                }}</template>
+            </el-table-column>
+            <el-table-column
+                :label="auditPageCopy.object"
+                min-width="120"
+                prop="object_type"
             />
-            <el-button native-type="submit" type="primary">筛选</el-button>
-        </form>
-        <el-alert v-if="errorMessage" type="error" :closable="false" show-icon>
-            {{ errorMessage }}
-        </el-alert>
-        <el-table v-loading="loading" :data="events" stripe>
-            <el-table-column prop="created_at" label="时间" min-width="180" />
-            <el-table-column prop="action" label="动作" min-width="180" />
-            <el-table-column prop="outcome" label="结果" width="100" />
-            <el-table-column prop="object_type" label="对象" width="140" />
-            <el-table-column prop="actor_kind" label="主体" width="100" />
+            <el-table-column :label="auditPageCopy.result" width="90">
+                <template #default="{ row }">{{
+                    AUDIT_OUTCOME_LABEL[
+                        row.outcome as keyof typeof AUDIT_OUTCOME_LABEL
+                    ] || row.outcome
+                }}</template>
+            </el-table-column>
         </el-table>
     </section>
 </template>
-
-<style scoped>
-.filter {
-    display: flex;
-    gap: 8px;
-    align-items: end;
-    margin-bottom: 1rem;
-}
-.filter label {
-    font-weight: 600;
-}
-</style>
