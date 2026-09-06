@@ -12,7 +12,7 @@ test('OWNER 本地登录进入工作台并可创建验收测试项目', async ({
     const projectName = `验收测试 E2E ${randomUUID()}`
     await page.getByRole('button', { name: '新建' }).click()
     await page.getByLabel('项目名称').fill(projectName)
-    await page.getByRole('button', { name: '创建项目' }).click()
+    await page.getByRole('button', { name: '保存' }).click()
 
     await expect(
         page.getByRole('link', { name: projectName }),

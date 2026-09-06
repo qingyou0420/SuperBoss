@@ -95,7 +95,6 @@ _STOPWORDS = frozenset(
         "现在",
         "什么",
         "状态",
-        "列一",
         "我们",
         "你们",
         "可以",
@@ -129,14 +128,11 @@ def recall_needles(query: str) -> list[str]:
     for token in tokens:
         if token not in _STOPWORDS:
             needles.append(token)
-        if len(token) > 4:
-            for index in range(0, len(token) - 1, 2):
+        if len(token) >= 2:
+            for index in range(len(token) - 1):
                 piece = token[index : index + 2]
-                if piece and piece not in _STOPWORDS:
+                if piece not in _STOPWORDS:
                     needles.append(piece)
-            tail = token[-2:]
-            if tail not in _STOPWORDS:
-                needles.append(tail)
     unique: list[str] = []
     for needle in sorted(needles, key=len, reverse=True):
         if needle not in unique:
@@ -581,9 +577,10 @@ class AgentService:
 
     async def reject_card(self, card_id: UUID) -> CardRead:
         card = await self._card(card_id)
-        if card.status is not CardStatus.PROPOSED:
+        if card.status not in {CardStatus.PROPOSED, CardStatus.FAILED}:
             raise ConflictError("CARD_NOT_OPEN", "Card is not waiting for confirmation")
         card.status = CardStatus.REJECTED
+        card.error = None
         card.decided_at = utcnow()
         return CardRead.model_validate(card)
 
@@ -595,6 +592,9 @@ class AgentService:
         merged = {**card.payload, **command.payload}
         parsed = parse_card_payload(card.kind, merged)
         card.payload = parsed.model_dump(mode="json")
+        if card.status is CardStatus.FAILED:
+            card.status = CardStatus.PROPOSED
+            card.decided_at = None
         if command.note:
             self.session.add(
                 AgentMessage(
@@ -915,16 +915,28 @@ class AgentService:
                         AgentMessage.conversation_id == conversation_id,
                         AgentMessage.seq > watermark,
                         AgentMessage.seq < window_floor,
+                        AgentMessage.role != MessageRole.SYSTEM,
                     )
                     .order_by(AgentMessage.seq.asc())
                 )
             ).all()
         )
-        new_text = "\n".join(
-            f"{item.role.value}: {item.content}" for item in older if (item.content or "").strip()
-        )[:4000]
-        if not new_text:
+        included: list[AgentMessage] = []
+        used = 0
+        for item in older:
+            line = f"{item.role.value}: {item.content or ''}".strip()
+            if not line:
+                continue
+            extra = len(line) + (1 if included else 0)
+            if included and used + extra > 4000:
+                break
+            included.append(item)
+            used += extra
+        if not included:
             return
+        new_text = "\n".join(
+            f"{item.role.value}: {item.content}" for item in included if (item.content or "").strip()
+        )
         prior = (conversation.summary or "").strip()
         payload = f"已有摘要：{prior}\n新增：{new_text}" if prior else new_text
         try:
@@ -943,4 +955,4 @@ class AgentService:
         summary = (result.content or "").strip()[:2000]
         if summary:
             conversation.summary = summary
-            conversation.summarized_until = max(item.seq for item in older)
+            conversation.summarized_until = included[-1].seq

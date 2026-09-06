@@ -53,7 +53,12 @@ onMounted(load)
             </el-select>
         </PageHeader>
         <InlineError :message="errorMessage" />
-        <el-table v-loading="loading" :data="events" class="plain-table">
+        <el-table
+            v-loading="loading"
+            :data="events"
+            class="plain-table"
+            :empty-text="auditPageCopy.empty"
+        >
             <el-table-column :label="auditPageCopy.time" min-width="140">
                 <template #default="{ row }">{{
                     dateTimeShort(row.created_at)

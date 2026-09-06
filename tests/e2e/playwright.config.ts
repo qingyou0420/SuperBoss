@@ -5,6 +5,8 @@ import { e2e } from './specs/support/runtime'
 
 export default defineConfig({
     testDir: './specs',
+    snapshotPathTemplate:
+        '{testDir}/{testFileDir}/{testFileName}-snapshots/{arg}{ext}',
     fullyParallel: false,
     forbidOnly: true,
     retries: 0,

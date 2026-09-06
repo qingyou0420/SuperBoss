@@ -287,7 +287,7 @@ function parseUrl(value: unknown): string {
 }
 
 export function fileErrorMessage(error: unknown): string {
-    return formatRequestError('文件操作失败', error, errorCopy.generic)
+    return formatRequestError(errorCopy.files, error, errorCopy.generic)
 }
 
 export function createFilesApi(client: BrowserHttpClient) {

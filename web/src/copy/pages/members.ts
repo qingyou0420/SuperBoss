@@ -24,6 +24,7 @@ export const membersCopy = {
     displayName: '显示名称',
     addAccount: '添加账号',
     empty: '还没有成员',
+    confirm: '确定',
     conflict: '员工状态与现有记录冲突，请刷新后重试。',
     operateFailed: '员工操作失败',
 }

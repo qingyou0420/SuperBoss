@@ -56,7 +56,7 @@ function parseDoc(value: unknown): KnowledgeDoc {
 }
 
 export function knowledgeErrorMessage(error: unknown): string {
-    return formatRequestError('知识库加载失败', error, errorCopy.generic)
+    return formatRequestError(errorCopy.knowledge, error, errorCopy.generic)
 }
 
 export function createKnowledgeApi(client: BrowserHttpClient) {

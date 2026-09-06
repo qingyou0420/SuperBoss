@@ -12,6 +12,7 @@ Before a release, run the Playwright specs in `tests/e2e/specs/` against a live
 - `owner-login-project.spec.ts`
 - `file-quarantine.spec.ts`
 - `staff-denial.spec.ts`
+- `visual-pages.spec.ts` (six 1280-wide page snapshots; platform-independent names)
 
 Do not substitute `npm run test:contracts`, unit tests, or skipped specs for this gate.
 
@@ -78,6 +79,28 @@ With the OWNER account:
 ```powershell
 docker compose --env-file .env -f docker-compose.dev.yml logs --tail 200 api file-scan-worker clamav
 ```
+
+## Disposable-database 霜月 three-round script
+
+`server/scripts/llm_three_round.py` writes real finance entries and milestones. Use it only
+against a throwaway database. After the run, drop that database; do not point it at production.
+
+```powershell
+$env:SUPERBOSS_API_URL='https://app.localhost'
+$env:E2E_ALLOW_LOCAL_SELF_SIGNED='true'
+$env:E2E_OWNER_USERNAME='<OWNER_USERNAME>'
+$env:E2E_OWNER_PASSWORD='<OWNER_PASSWORD>'
+Push-Location server
+try {
+    uv run python scripts/llm_three_round.py --dry-run
+    uv run python scripts/llm_three_round.py
+} finally {
+    Remove-Item Env:E2E_OWNER_USERNAME,Env:E2E_OWNER_PASSWORD -ErrorAction SilentlyContinue
+    Pop-Location
+}
+```
+
+`--dry-run` sends the three turns and the recall question without confirming cards.
 
 ## Direct STAFF denial and audit evidence
 

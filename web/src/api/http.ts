@@ -54,8 +54,8 @@ export class ApiContractError extends Error {
         this.name = 'ApiContractError'
     }
     static safeMessage(error: unknown): string {
-        return formatRequestError('请求失败', error, errorCopy.generic, {
-            unauthorized: '登录状态已失效，请重新登录。',
+        return formatRequestError(errorCopy.request, error, errorCopy.generic, {
+            unauthorized: errorCopy.unauthorized,
         })
     }
 }

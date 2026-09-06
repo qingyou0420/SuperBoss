@@ -192,40 +192,7 @@ export function createAppRouter(
                         component: () => import('../pages/owner/UsersPage.vue'),
                         meta: { roles: ['OWNER'] },
                     },
-                    { path: 'users', redirect: '/members' },
                 ],
-            },
-            {
-                path: '/owner',
-                redirect: (to) => ({
-                    path: FALLBACK_PATH,
-                    query: to.query,
-                    hash: to.hash,
-                }),
-            },
-            {
-                path: '/owner/projects',
-                redirect: (to) => ({
-                    path: '/projects',
-                    query: to.query,
-                    hash: to.hash,
-                }),
-            },
-            {
-                path: '/owner/drive',
-                redirect: (to) => ({
-                    path: '/drive',
-                    query: to.query,
-                    hash: to.hash,
-                }),
-            },
-            {
-                path: '/owner/users',
-                redirect: (to) => ({
-                    path: '/members',
-                    query: to.query,
-                    hash: to.hash,
-                }),
             },
         ],
     })

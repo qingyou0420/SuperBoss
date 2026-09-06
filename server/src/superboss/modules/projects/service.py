@@ -6,7 +6,7 @@ from datetime import timedelta
 from typing import cast
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -95,10 +95,20 @@ class ProjectService:
             raise NotFoundError("PROJECT_NOT_FOUND", "Project not found")
         return project
 
+    async def _name_taken(self, name: str, *, exclude_id: UUID | None = None) -> bool:
+        statement = select(Project.id).where(func.lower(Project.name) == name.lower())
+        if exclude_id is not None:
+            statement = statement.where(Project.id != exclude_id)
+        return (await self.session.scalar(statement)) is not None
+
     async def create(
         self, actor: Actor, command: ProjectCreate, request_id: UUID | None = None
     ) -> Project:
         await self._require_owner(actor, "project.create", request_id)
+        if await self._name_taken(command.name):
+            raise ConflictError(
+                "PROJECT_NAME_CONFLICT", "A project with this name already exists"
+            )
         project = Project(
             name=command.name,
             description=command.description,
@@ -110,7 +120,6 @@ class ProjectService:
         try:
             await self.session.flush()
         except IntegrityError as error:
-            await self.session.rollback()
             raise ConflictError(
                 "PROJECT_NAME_CONFLICT", "A project with this name already exists"
             ) from error
@@ -162,6 +171,10 @@ class ProjectService:
             await self._record(actor, "project.update", "DENIED", request_id, project_id)
             raise DomainError("VALIDATION_ERROR", "Request validation failed", 422)
         if "name" in values and values["name"] is not None:
+            if await self._name_taken(values["name"], exclude_id=project.id):
+                raise ConflictError(
+                    "PROJECT_NAME_CONFLICT", "A project with this name already exists"
+                )
             project.name = values["name"]
         if "description" in values and values["description"] is not None:
             project.description = values["description"]
@@ -180,7 +193,6 @@ class ProjectService:
         try:
             await self.session.flush()
         except IntegrityError as error:
-            await self.session.rollback()
             raise ConflictError(
                 "PROJECT_NAME_CONFLICT", "A project with this name already exists"
             ) from error

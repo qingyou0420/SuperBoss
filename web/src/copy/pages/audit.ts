@@ -7,4 +7,5 @@ export const auditPageCopy = {
     result: '结果',
     success: '成功',
     denied: '被拒',
+    empty: '还没有记录',
 }

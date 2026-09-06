@@ -207,6 +207,10 @@ describe('OWNER local user management page', () => {
         await fireEvent.click(
             await screen.findByRole('menuitem', { name: '禁用' }),
         )
+        expect(mockedUsersApi.update).not.toHaveBeenCalled()
+        await fireEvent.click(
+            await screen.findByRole('button', { name: '确定' }),
+        )
         expect(mockedUsersApi.update).toHaveBeenCalledWith(staff.id, {
             status: 'DISABLED',
         })

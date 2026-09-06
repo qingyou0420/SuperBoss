@@ -138,20 +138,16 @@ onMounted(load)
         <InlineError :message="errorMessage" />
         <div v-loading="loading">
             <p v-if="project" class="meta">
-                {{ STAGE_LABEL[project.stage] }}
-                ·
                 {{
-                    project.starts_on
-                        ? dateLabel(project.starts_on)
-                        : projectsCopy.start
+                    [
+                        STAGE_LABEL[project.stage],
+                        project.starts_on ? dateLabel(project.starts_on) : '',
+                        project.due_on ? dateLabel(project.due_on) : '',
+                        `${project.progress_percent}%`,
+                    ]
+                        .filter(Boolean)
+                        .join(' · ')
                 }}
-                –
-                {{
-                    project.due_on
-                        ? dateLabel(project.due_on)
-                        : projectsCopy.due
-                }}
-                · {{ project.progress_percent }}%
             </p>
             <p v-if="project?.description" class="body">
                 {{ project.description }}
@@ -173,7 +169,11 @@ onMounted(load)
                             <el-dropdown-menu>
                                 <el-dropdown-item
                                     @click="toggleMilestone(index)"
-                                    >{{ projectsCopy.done }}</el-dropdown-item
+                                    >{{
+                                        item.done_at
+                                            ? projectsCopy.undone
+                                            : projectsCopy.done
+                                    }}</el-dropdown-item
                                 >
                                 <el-dropdown-item
                                     @click="removeMilestone(index)"

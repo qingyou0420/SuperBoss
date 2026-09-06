@@ -1,5 +1,9 @@
 """Live three-round 霜月 acceptance against a running API.
 
+Only use against a disposable database. Confirming cards writes real finance
+entries, milestones, and possibly a 星野合作 project. Pass --dry-run to send
+messages without confirming cards.
+
 Requires E2E_OWNER_USERNAME / E2E_OWNER_PASSWORD (or SUPERBOSS_OWNER_*).
 Does not print the password. Writes a JSON report to stdout.
 """
@@ -116,7 +120,13 @@ def _wait_memories(client: httpx.Client, timeout: float = 90.0) -> list[dict[str
 def main() -> int:
     username = _required("E2E_OWNER_USERNAME", "SUPERBOSS_OWNER_USERNAME")
     password = _required("E2E_OWNER_PASSWORD", "SUPERBOSS_OWNER_PASSWORD")
-    report: dict[str, Any] = {"turns": [], "recall": None, "memories": []}
+    dry_run = "--dry-run" in sys.argv
+    report: dict[str, Any] = {
+        "turns": [],
+        "recall": None,
+        "memories": [],
+        "dry_run": dry_run,
+    }
     failed = False
 
     with _client() as client:
@@ -139,7 +149,7 @@ def main() -> int:
             content = str(message.get("content") or "")
             offline = bool(turn.get("offline"))
             cards = list(turn.get("cards") or [])
-            committed = _confirm_proposed(client, cards)
+            committed = [] if dry_run else _confirm_proposed(client, cards)
             entry = {
                 "prompt": prompt,
                 "offline": offline,

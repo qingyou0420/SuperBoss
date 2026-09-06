@@ -55,7 +55,7 @@ function parseEvent(value: unknown): AuditEvent {
 }
 
 export function auditErrorMessage(error: unknown): string {
-    return formatRequestError('审计记录加载失败', error, errorCopy.generic)
+    return formatRequestError(errorCopy.audit, error, errorCopy.generic)
 }
 
 export function createAuditApi(client: BrowserHttpClient) {

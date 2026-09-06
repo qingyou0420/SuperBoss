@@ -15,7 +15,6 @@ import { moneyLabel } from '../api/parse'
 import { errorCopy } from '../copy/errors'
 import { projectsApi, type Project } from '../api/projects'
 import DateText from '../components/ui/DateText.vue'
-import EmptyLine from '../components/ui/EmptyLine.vue'
 import InlineError from '../components/ui/InlineError.vue'
 import Money from '../components/ui/Money.vue'
 import PageHeader from '../components/ui/PageHeader.vue'
@@ -81,7 +80,19 @@ const projectCostTotal = computed(
             0,
         ) ?? 0,
 )
-const margin = computed(() => companyIncome.value - companyCost.value)
+const projectIncomeTotal = computed(
+    () =>
+        summary.value?.projects.reduce(
+            (sum, item) => sum + (item.income_cents ?? 0),
+            0,
+        ) ?? 0,
+)
+const margin = computed(
+    () =>
+        companyIncome.value +
+        projectIncomeTotal.value -
+        (companyCost.value + projectCostTotal.value),
+)
 
 async function load(): Promise<void> {
     loading.value = true
@@ -227,7 +238,11 @@ onMounted(load)
         <p v-for="item in alerts" :key="item.project_id" class="alert-line">
             {{ item.message }}
         </p>
-        <el-table :data="entries" class="plain-table">
+        <el-table
+            :data="entries"
+            class="plain-table"
+            :empty-text="financeCopy.empty"
+        >
             <el-table-column :label="financeCopy.date" min-width="90">
                 <template #default="{ row }">
                     <DateText :value="row.occurred_on" format="short" />
@@ -270,7 +285,6 @@ onMounted(load)
                 </template>
             </el-table-column>
         </el-table>
-        <EmptyLine v-if="!entries.length" :message="financeCopy.empty" />
         <section v-if="summary?.projects.length" class="pivot">
             <h2>{{ financeCopy.pivot }}</h2>
             <el-table :data="summary.projects" class="plain-table">

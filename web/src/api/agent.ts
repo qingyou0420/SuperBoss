@@ -177,7 +177,7 @@ function parseTurn(value: unknown): ChatTurn {
 }
 
 export function agentErrorMessage(error: unknown): string {
-    return formatRequestError('霜月操作失败', error, errorCopy.generic)
+    return formatRequestError(errorCopy.agent, error, errorCopy.generic)
 }
 
 export function createAgentApi(client: BrowserHttpClient) {

@@ -43,7 +43,7 @@
     --el-table-border-color: var(--sb-line);
 }
 
-.plain-table :deep(.el-table__inner-wrapper::before),
-.plain-table :deep(.el-table__border-left-patch) {
+.plain-table .el-table__inner-wrapper::before,
+.plain-table .el-table__border-left-patch {
     display: none;
 }

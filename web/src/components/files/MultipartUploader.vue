@@ -102,9 +102,19 @@ onBeforeUnmount(cancel)
             :drag="!compact"
             @change="onChange"
         >
-            <span v-if="compact" class="clip" :aria-label="driveCopy.upload"
-                >📎</span
+            <svg
+                v-if="compact"
+                class="clip"
+                width="16"
+                height="16"
+                viewBox="0 0 16 16"
+                :aria-label="driveCopy.upload"
             >
+                <path
+                    fill="currentColor"
+                    d="M4.5 6.5v5.2a3.3 3.3 0 0 0 6.6 0V4.2a2.1 2.1 0 0 0-4.2 0v6.8a.9.9 0 1 0 1.8 0V5.1h1.2v5.9a2.1 2.1 0 1 1-4.2 0V4.2a3.3 3.3 0 0 1 6.6 0v7.5a4.5 4.5 0 0 1-9 0V6.5z"
+                />
+            </svg>
             <span v-else>{{
                 pending ? driveCopy.uploadingEllipsis : driveCopy.upload
             }}</span>

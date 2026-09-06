@@ -3,7 +3,7 @@ import { computed, reactive, ref, watch } from 'vue'
 
 import type { AgentCard } from '../../api/agent'
 import { moneyLabel } from '../../api/parse'
-import { FIELD_LABEL } from '../../copy/glossary'
+import { CARD_ERROR_LABEL, FIELD_LABEL } from '../../copy/glossary'
 import { chatCopy } from '../../copy/pages/chat'
 import {
     committedHref,
@@ -31,7 +31,6 @@ const emit = defineEmits<{
 
 const revising = ref(false)
 const editing = ref(false)
-const retries = ref(0)
 const instruction = ref('')
 const drafts = reactive<Record<string, string>>({})
 const fields = computed(() => editFields(props.card.kind))
@@ -57,11 +56,6 @@ function beginEdit(): void {
     editing.value = true
 }
 
-function retry(): void {
-    retries.value += 1
-    emit('confirm')
-}
-
 function submitPatch(): void {
     emit('patch', payloadFromDrafts(drafts, props.card.payload), '')
     editing.value = false
@@ -84,7 +78,7 @@ function submitRevise(): void {
                 card.status === 'COMMITTED' ||
                 card.status === 'REJECTED' ||
                 card.status === 'REVISED' ||
-                card.status === 'FAILED',
+                (card.status === 'FAILED' && !editing),
         }"
     >
         <p v-if="card.status === 'COMMITTED'" class="folded folded--ok">
@@ -100,17 +94,19 @@ function submitRevise(): void {
         <p v-else-if="card.status === 'REVISED'" class="folded">
             {{ chatCopy.revised }} · {{ kindLabel(card.kind) }} {{ title }}
         </p>
-        <p v-else-if="card.status === 'FAILED'" class="folded folded--danger">
+        <p
+            v-else-if="card.status === 'FAILED' && !editing"
+            class="folded folded--danger"
+        >
             {{ chatCopy.failed }} · {{ kindLabel(card.kind) }} {{ title }}
-            <el-button
-                v-if="retries < 2"
-                text
-                native-type="button"
-                @click="retry"
-                >{{ chatCopy.retry }}</el-button
-            >
-            <el-button v-else text native-type="button" @click="beginEdit">{{
+            <span v-if="card.error">{{
+                CARD_ERROR_LABEL[card.error] || card.error
+            }}</span>
+            <el-button text native-type="button" @click="beginEdit">{{
                 chatCopy.editFields
+            }}</el-button>
+            <el-button text native-type="button" @click="emit('reject')">{{
+                chatCopy.reject
             }}</el-button>
         </p>
         <template v-else>

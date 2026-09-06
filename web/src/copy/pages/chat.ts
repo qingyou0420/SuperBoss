@@ -31,4 +31,5 @@ export const chatCopy = {
     you: '你',
     assistant: '霜月',
     attachment: '附件',
+    empty: '对霜月说一句……',
 }

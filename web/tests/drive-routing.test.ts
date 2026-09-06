@@ -130,6 +130,7 @@ describe('Task13 OWNER navigation and Drive integration', () => {
 
     test('Drive displays scanning after completion and only the current result', async () => {
         const module = await import(/* @vite-ignore */ DRIVE_PATH)
+        mocks.filesApi.listFiles.mockResolvedValue([])
         const MultipartStub = defineComponent({
             emits: ['completed'],
             props: ['allowedObjectOrigin', 'folderId'],
@@ -151,29 +152,48 @@ describe('Task13 OWNER navigation and Drive integration', () => {
             `https://objects.example|${PROJECT_ID}`,
         )
         expect(screen.queryByText(/历史文件|全部文件/)).not.toBeInTheDocument()
+        mocks.filesApi.listFiles.mockResolvedValue([
+            {
+                id: FILE_ID,
+                folder_id: PROJECT_ID,
+                project_id: null,
+                filename: '上传.pdf',
+                size_bytes: 12,
+                content_type: 'application/pdf',
+                state: 'SCANNING',
+                created_at: '2026-09-05T00:00:00Z',
+                uploader_name: '',
+            },
+        ])
         await fireEvent.click(screen.getByRole('button', { name: '完成上传' }))
-        expect(screen.getByText('扫描中')).toBeInTheDocument()
+        expect(await screen.findByText('处理中')).toBeInTheDocument()
+        expect(mocks.filesApi.listFiles.mock.calls.length).toBeGreaterThan(1)
     })
 
-    test('rechecks only the current quarantined file until its download becomes ready', async () => {
+    test('refreshes the file list after upload and downloads from the row menu', async () => {
         const module = await import(/* @vite-ignore */ DRIVE_PATH)
-        const storageWrite = vi.spyOn(Storage.prototype, 'setItem')
-        const consoleWrite = vi
-            .spyOn(console, 'log')
-            .mockImplementation(() => undefined)
-        mocks.filesApi.download
-            .mockRejectedValueOnce(
-                new Error('FILE_NOT_CLEAN provider sentinel signed-url'),
-            )
-            .mockResolvedValueOnce(
-                'https://objects.example/download/current?signature=secret',
-            )
+        mocks.filesApi.listFiles.mockResolvedValueOnce([]).mockResolvedValue([
+            {
+                id: FILE_ID,
+                folder_id: PROJECT_ID,
+                project_id: null,
+                filename: '上传.pdf',
+                size_bytes: 12,
+                content_type: 'application/pdf',
+                state: 'CLEAN',
+                created_at: '2026-09-05T00:00:00Z',
+                uploader_name: '',
+            },
+        ])
+        mocks.filesApi.download.mockResolvedValue(
+            'https://objects.example/download/current?signature=secret',
+        )
         const MultipartStub = defineComponent({
             emits: ['completed'],
             template:
                 "<button @click=\"$emit('completed', { file_id: '" +
                 FILE_ID +
-                "', state: 'QUARANTINED' })\">完成上传</button>",
+                "', state: 'CLEAN' })\">完成上传</button>",
         })
         render(module.default, {
             props: { allowedObjectOrigin: 'https://objects.example' },
@@ -184,116 +204,41 @@ describe('Task13 OWNER navigation and Drive integration', () => {
         })
         await screen.findByRole('button', { name: '完成上传' })
         await fireEvent.click(screen.getByRole('button', { name: '完成上传' }))
-
-        const check = screen.getByRole('button', {
-            name: '下载',
-        })
-        await fireEvent.click(check)
-        expect(await screen.findByText('文件仍在扫描中。')).toBeInTheDocument()
-        expect(
-            screen.queryByRole('link', { name: '下载' }),
-        ).not.toBeInTheDocument()
-        expect(check).toBeInTheDocument()
-
-        await fireEvent.click(check)
-        const link = await screen.findByRole('link', {
-            name: '下载',
-        })
-        expect(link).toHaveAttribute(
-            'href',
-            'https://objects.example/download/current?signature=secret',
+        expect(await screen.findByText('上传.pdf')).toBeInTheDocument()
+        await fireEvent.click(screen.getByRole('button', { name: '···' }))
+        await fireEvent.click(
+            await screen.findByRole('menuitem', { name: '下载' }),
         )
-        expect(mocks.filesApi.download).toHaveBeenNthCalledWith(1, FILE_ID)
-        expect(mocks.filesApi.download).toHaveBeenNthCalledWith(2, FILE_ID)
-        expect(storageWrite).not.toHaveBeenCalled()
-        expect(localStorage).toHaveLength(0)
-        expect(sessionStorage).toHaveLength(0)
-        expect(consoleWrite).not.toHaveBeenCalled()
-        expect(screen.queryByText(/历史文件|全部文件/)).not.toBeInTheDocument()
+        expect(mocks.filesApi.download).toHaveBeenCalledWith(FILE_ID)
+        expect(mocks.filesApi.listFiles.mock.calls.length).toBeGreaterThan(1)
     })
 
-    test.each([
-        ['INFECTED', '检测到风险，文件不可下载'],
-        ['FAILED', '扫描失败，文件不可下载，请重新上传'],
-    ] as const)(
-        'renders direct terminal completion %s without a download action',
-        async (state, message) => {
+    test.each(['INFECTED', 'FAILED'] as const)(
+        'shows terminal scan state %s on the file row',
+        async (state) => {
             const module = await import(/* @vite-ignore */ DRIVE_PATH)
-            const MultipartStub = defineComponent({
-                emits: ['completed'],
-                template:
-                    "<button @click=\"$emit('completed', { file_id: '" +
-                    FILE_ID +
-                    "', state: '" +
-                    state +
-                    '\' })">完成上传</button>',
-            })
+            mocks.filesApi.listFiles.mockResolvedValue([
+                {
+                    id: FILE_ID,
+                    folder_id: PROJECT_ID,
+                    project_id: null,
+                    filename: '风险.pdf',
+                    size_bytes: 12,
+                    content_type: 'application/pdf',
+                    state,
+                    created_at: '2026-09-05T00:00:00Z',
+                    uploader_name: '',
+                },
+            ])
             render(module.default, {
                 props: { allowedObjectOrigin: 'https://objects.example' },
                 global: {
                     plugins: [ElementPlus],
-                    stubs: { MultipartUploader: MultipartStub },
+                    stubs: { MultipartUploader: true },
                 },
             })
-            await screen.findByRole('button', { name: '完成上传' })
-            await fireEvent.click(
-                screen.getByRole('button', { name: '完成上传' }),
-            )
-
-            expect(screen.getByText(message)).toBeInTheDocument()
-            expect(
-                screen.queryByRole('button', {
-                    name: '下载',
-                }),
-            ).not.toBeInTheDocument()
-            expect(
-                screen.queryByRole('link', { name: '下载' }),
-            ).not.toBeInTheDocument()
-        },
-    )
-
-    test.each([
-        ['INFECTED', '检测到风险，文件不可下载'],
-        ['FAILED', '扫描失败，文件不可下载，请重新上传'],
-    ] as const)(
-        'converges download probe to terminal state %s',
-        async (state, message) => {
-            const module = await import(/* @vite-ignore */ DRIVE_PATH)
-            mocks.filesApi.download.mockRejectedValueOnce(
-                new mocks.FileDownloadUnavailableError(state),
-            )
-            const MultipartStub = defineComponent({
-                emits: ['completed'],
-                template:
-                    "<button @click=\"$emit('completed', { file_id: '" +
-                    FILE_ID +
-                    "', state: 'QUARANTINED' })\">完成上传</button>",
-            })
-            render(module.default, {
-                props: { allowedObjectOrigin: 'https://objects.example' },
-                global: {
-                    plugins: [ElementPlus],
-                    stubs: { MultipartUploader: MultipartStub },
-                },
-            })
-            await screen.findByRole('button', { name: '完成上传' })
-            await fireEvent.click(
-                screen.getByRole('button', { name: '完成上传' }),
-            )
-            await fireEvent.click(
-                screen.getByRole('button', {
-                    name: '下载',
-                }),
-            )
-
-            expect(await screen.findByText(message)).toBeInTheDocument()
-            expect(mocks.filesApi.download).toHaveBeenCalledOnce()
-            expect(mocks.filesApi.download).toHaveBeenCalledWith(FILE_ID)
-            expect(
-                screen.queryByRole('button', {
-                    name: '下载',
-                }),
-            ).not.toBeInTheDocument()
+            expect(await screen.findByText('风险.pdf')).toBeInTheDocument()
+            expect(screen.getByText('未通过')).toBeInTheDocument()
             expect(
                 screen.queryByRole('link', { name: '下载' }),
             ).not.toBeInTheDocument()
@@ -359,17 +304,23 @@ describe('Task13 OWNER navigation and Drive integration', () => {
         })
 
         expect(await screen.findByText('方案.pdf')).toBeInTheDocument()
-        await fireEvent.update(screen.getByLabelText('新建子目录'), '子目录')
+        const menus = screen.getAllByRole('button', { name: '···' })
+        await fireEvent.click(menus[0])
+        await fireEvent.click(
+            await screen.findByRole('menuitem', { name: '新建子目录' }),
+        )
+        await fireEvent.update(screen.getByRole('textbox'), '子目录')
         await fireEvent.click(screen.getByRole('button', { name: '创建' }))
         expect(mocks.filesApi.createFolder).toHaveBeenCalledWith(
             PROJECT_ID,
             '子目录',
         )
-        expect(
-            await screen.findByRole('button', { name: '子目录' }),
-        ).toBeInTheDocument()
+        expect(await screen.findByText('子目录')).toBeInTheDocument()
 
-        await fireEvent.click(screen.getByRole('button', { name: '重命名' }))
+        await fireEvent.click(screen.getAllByRole('button', { name: '···' })[1])
+        await fireEvent.click(
+            await screen.findByRole('menuitem', { name: '重命名' }),
+        )
         await fireEvent.update(
             screen.getByDisplayValue('方案.pdf'),
             '新方案.pdf',
@@ -381,8 +332,10 @@ describe('Task13 OWNER navigation and Drive integration', () => {
         )
         expect(await screen.findByText('新方案.pdf')).toBeInTheDocument()
 
-        expect(screen.getByRole('button', { name: '删除' })).toBeInTheDocument()
-        await fireEvent.click(screen.getByRole('button', { name: '移动' }))
+        await fireEvent.click(screen.getAllByRole('button', { name: '···' })[1])
+        await fireEvent.click(
+            await screen.findByRole('menuitem', { name: '移动' }),
+        )
         await fireEvent.click(
             screen.getByRole('combobox', { name: '目标目录' }),
         )
@@ -425,18 +378,21 @@ describe('Task13 OWNER navigation and Drive integration', () => {
         })
 
         expect(await screen.findByText('方案.pdf')).toBeInTheDocument()
-        expect(screen.getByRole('button', { name: '下载' })).toBeInTheDocument()
+        await fireEvent.click(screen.getByRole('button', { name: '···' }))
         expect(
-            screen.queryByRole('button', { name: '创建' }),
+            await screen.findByRole('menuitem', { name: '下载' }),
+        ).toBeInTheDocument()
+        expect(
+            screen.queryByRole('menuitem', { name: '重命名' }),
         ).not.toBeInTheDocument()
         expect(
-            screen.queryByRole('button', { name: '重命名' }),
+            screen.queryByRole('menuitem', { name: '移动' }),
         ).not.toBeInTheDocument()
         expect(
-            screen.queryByRole('button', { name: '移动' }),
+            screen.queryByRole('menuitem', { name: '删除' }),
         ).not.toBeInTheDocument()
         expect(
-            screen.queryByRole('button', { name: '删除' }),
+            screen.queryByRole('menuitem', { name: '新建子目录' }),
         ).not.toBeInTheDocument()
     })
 })

@@ -88,7 +88,7 @@ describe('OWNER project management page', () => {
             screen.getByLabelText('项目名称'),
             ' 新验收项目 ',
         )
-        await fireEvent.click(screen.getByRole('button', { name: '创建项目' }))
+        await fireEvent.click(screen.getByRole('button', { name: '保存' }))
 
         await waitFor(() =>
             expect(mockedProjects.create).toHaveBeenCalledWith({
@@ -123,7 +123,7 @@ describe('OWNER project management page', () => {
             await screen.findByLabelText('项目名称'),
             'race-created',
         )
-        await fireEvent.click(screen.getByRole('button', { name: '创建项目' }))
+        await fireEvent.click(screen.getByRole('button', { name: '保存' }))
         expect(await screen.findByText('race-created')).toBeInTheDocument()
 
         releaseList()
@@ -144,7 +144,7 @@ describe('OWNER project management page', () => {
         expect(input.maxLength).toBe(-1)
         const boundary = '\u{1f600}'.repeat(255)
         await fireEvent.update(input, boundary)
-        await fireEvent.click(screen.getByRole('button', { name: '创建项目' }))
+        await fireEvent.click(screen.getByRole('button', { name: '保存' }))
 
         await waitFor(() =>
             expect(mockedProjects.create).toHaveBeenCalledWith({
@@ -167,7 +167,7 @@ describe('OWNER project management page', () => {
             screen.getByLabelText('项目名称'),
             '\u{1f600}'.repeat(256),
         )
-        await fireEvent.click(screen.getByRole('button', { name: '创建项目' }))
+        await fireEvent.click(screen.getByRole('button', { name: '保存' }))
 
         expect(mockedProjects.create).not.toHaveBeenCalled()
         expect(screen.getByRole('alert')).toHaveTextContent(/255/)
@@ -184,7 +184,7 @@ describe('OWNER project management page', () => {
         await screen.findByText('正式项目')
         await fireEvent.click(screen.getByRole('button', { name: '新建' }))
 
-        const button = screen.getByRole('button', { name: '创建项目' })
+        const button = screen.getByRole('button', { name: '保存' })
         await fireEvent.click(button)
         expect(mockedProjects.create).not.toHaveBeenCalled()
 

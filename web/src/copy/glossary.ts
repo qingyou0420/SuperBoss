@@ -53,6 +53,15 @@ export const CARD_KIND_LABEL = {
     knowledge_ingest: '知识入库',
 } as const
 
+export const CARD_ERROR_LABEL: Record<string, string> = {
+    FINANCE_PROJECT_NOT_FOUND: '项目不存在',
+    PROJECT_NAME_CONFLICT: '同名项目已存在',
+    PROJECT_NOT_FOUND: '项目不存在',
+    CARD_COMMIT_FAILED: '入库失败',
+    FOLDER_FORBIDDEN: '没有权限',
+    FILE_NOT_FOUND: '文件不存在',
+}
+
 export const CARD_STATUS_LABEL = {
     PROPOSED: '待确认',
     CONFIRMED: '入库中',

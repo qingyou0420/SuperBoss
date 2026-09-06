@@ -280,7 +280,7 @@ describe('local-auth route guards', () => {
     test('sends anonymous protected navigation to login with an internal return path', async () => {
         mockedAuth.me.mockRejectedValue(unauthorized())
         const router = createAppRouter(createMemoryHistory())
-        await router.push('/owner/projects?view=all')
+        await router.push('/projects?view=all')
         expect(router.currentRoute.value.name).toBe('login')
         expect(router.currentRoute.value.query).toEqual({
             redirect: '/projects?view=all',
@@ -293,7 +293,7 @@ describe('local-auth route guards', () => {
             must_change_password: true,
         })
         const router = createAppRouter(createMemoryHistory())
-        await router.push('/owner/projects')
+        await router.push('/projects')
         expect(router.currentRoute.value.name).toBe('password-change')
         expect(router.currentRoute.value.query).toEqual({
             redirect: '/projects',
@@ -319,7 +319,7 @@ describe('local-auth route guards', () => {
         )
         mockedAuth.me.mockResolvedValue(owner)
         const router = createAppRouter(createMemoryHistory())
-        await router.push('/owner/projects')
+        await router.push('/projects')
         const handler = registration.mock.calls.at(-1)?.[0]
         await handler?.()
         expect(router.currentRoute.value.name).toBe('login')
@@ -327,8 +327,8 @@ describe('local-auth route guards', () => {
     })
 
     test('accepts only same-origin business destinations', () => {
-        expect(safePostLoginPath('/owner/projects?view=all')).toBe(
-            '/owner/projects?view=all',
+        expect(safePostLoginPath('/projects?view=all')).toBe(
+            '/projects?view=all',
         )
         for (const unsafe of [
             '//evil.example/path',
@@ -353,7 +353,7 @@ describe('LoginPage', () => {
         )
         mockedAuth.me.mockResolvedValue(owner)
         const router = await renderPagesAt(
-            '/login?redirect=%2Fowner%2Fprojects%3Fview%3Dall',
+            '/login?redirect=%2Fprojects%3Fview%3Dall',
         )
         const username = screen.getByLabelText('用户名')
         const password = screen.getByLabelText('密码')
@@ -377,7 +377,7 @@ describe('LoginPage', () => {
         release()
         await waitFor(() =>
             expect(router.currentRoute.value.fullPath).toBe(
-                '/owner/projects?view=all',
+                '/projects?view=all',
             ),
         )
     })
@@ -388,9 +388,7 @@ describe('LoginPage', () => {
             ...owner,
             must_change_password: true,
         })
-        const router = await renderPagesAt(
-            '/login?redirect=%2Fowner%2Fprojects',
-        )
+        const router = await renderPagesAt('/login?redirect=%2Fprojects')
         await fireEvent.update(screen.getByLabelText('用户名'), 'owner')
         await fireEvent.update(
             screen.getByLabelText('密码'),
@@ -542,7 +540,7 @@ describe('server-authoritative role refresh routing', () => {
                 role: 'STAFF',
                 must_change_password: false,
             })
-        const router = await renderAt('/users')
+        const router = await renderAt('/members')
         expect(
             await screen.findByRole('heading', { name: '成员' }),
         ).toBeInTheDocument()
@@ -577,7 +575,7 @@ describe('server-authoritative role refresh routing', () => {
                 role: 'OWNER',
                 must_change_password: false,
             })
-        const router = await renderAt('/users')
+        const router = await renderAt('/members')
         expect(router.currentRoute.value.name).toBe('forbidden')
 
         await sessionRefreshedHandler()()
@@ -606,13 +604,13 @@ describe('server-authoritative role refresh routing', () => {
                 role: 'OWNER',
                 must_change_password: true,
             })
-        const router = await renderAt('/owner/projects')
+        const router = await renderAt('/projects')
         await sessionRefreshedHandler()()
         await waitFor(() =>
             expect(router.currentRoute.value.name).toBe('password-change'),
         )
         expect(
-            screen.queryByRole('button', { name: '创建项目' }),
+            screen.queryByRole('button', { name: '保存' }),
         ).not.toBeInTheDocument()
     })
 })

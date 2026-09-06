@@ -113,11 +113,14 @@ class OwnerUserService:
             role=command.role,
             status=UserStatus.ACTIVE,
         )
+        taken = await self.session.scalar(select(User.id).where(User.username == command.username))
+        if taken is not None:
+            await self._record(actor, "user.create", "DENIED", request_id, reason="USERNAME_CONFLICT")
+            raise ConflictError("USERNAME_CONFLICT", "Username already exists")
         try:
             self.session.add(user)
             await self.session.flush()
         except IntegrityError as error:
-            await self.session.rollback()
             await self._record(actor, "user.create", "DENIED", request_id, reason="USERNAME_CONFLICT")
             raise ConflictError("USERNAME_CONFLICT", "Username already exists") from error
         return StaffCredentialResult(await self._view(user), temporary_password)

@@ -310,40 +310,47 @@ onMounted(async () => {
             </section>
         </aside>
         <div class="thread">
-            <p v-if="offline" class="offline">{{ chatCopy.offline }}</p>
-            <InlineError :message="errorMessage" />
-            <ol class="messages">
-                <li v-for="message in messages" :key="message.id">
-                    <p v-if="message.role === 'system'" class="receipt">
-                        {{ message.content }}
-                    </p>
-                    <template v-else>
-                        <strong>{{
-                            message.role === 'user'
-                                ? chatCopy.you
-                                : chatCopy.assistant
-                        }}</strong>
-                        <p class="message-body">{{ message.content }}</p>
-                        <ProposalCard
-                            v-for="card in currentCards.get(message.id) ?? []"
-                            :key="card.id"
-                            :card="card"
-                            :project-names="projectNames"
-                            :folder-names="folderNames"
-                            @confirm="confirm(card)"
-                            @reject="reject(card)"
-                            @revise="reviseCard(card, $event)"
-                            @patch="
-                                (payload, note) => saveCard(card, payload, note)
-                            "
-                        />
-                    </template>
-                </li>
-                <li v-if="streamingText">
-                    <strong>{{ chatCopy.assistant }}</strong>
-                    <p class="message-body">{{ streamingText }}</p>
-                </li>
-            </ol>
+            <div class="thread__body">
+                <p v-if="offline" class="offline">{{ chatCopy.offline }}</p>
+                <InlineError :message="errorMessage" />
+                <p v-if="!messages.length && !streamingText" class="empty">
+                    {{ chatCopy.empty }}
+                </p>
+                <ol class="messages">
+                    <li v-for="message in messages" :key="message.id">
+                        <p v-if="message.role === 'system'" class="receipt">
+                            {{ message.content }}
+                        </p>
+                        <template v-else>
+                            <strong>{{
+                                message.role === 'user'
+                                    ? chatCopy.you
+                                    : chatCopy.assistant
+                            }}</strong>
+                            <p class="message-body">{{ message.content }}</p>
+                            <ProposalCard
+                                v-for="card in currentCards.get(message.id) ??
+                                []"
+                                :key="card.id"
+                                :card="card"
+                                :project-names="projectNames"
+                                :folder-names="folderNames"
+                                @confirm="confirm(card)"
+                                @reject="reject(card)"
+                                @revise="reviseCard(card, $event)"
+                                @patch="
+                                    (payload, note) =>
+                                        saveCard(card, payload, note)
+                                "
+                            />
+                        </template>
+                    </li>
+                    <li v-if="streamingText">
+                        <strong>{{ chatCopy.assistant }}</strong>
+                        <p class="message-body">{{ streamingText }}</p>
+                    </li>
+                </ol>
+            </div>
             <form class="composer" @submit.prevent="send">
                 <p v-if="pendingFileName" class="pending-file">
                     {{ pendingFileName }}
@@ -391,6 +398,21 @@ onMounted(async () => {
     grid-template-columns: minmax(180px, 240px) 1fr;
     gap: 32px;
     min-height: 70vh;
+}
+.thread {
+    display: grid;
+    grid-template-rows: 1fr auto;
+    min-height: 70vh;
+}
+.thread__body {
+    display: grid;
+    align-content: start;
+}
+.empty {
+    align-self: center;
+    margin: auto 0;
+    color: var(--sb-ink-3);
+    text-align: center;
 }
 .side-head {
     display: flex;
@@ -456,7 +478,7 @@ aside h2 {
     overflow: hidden;
 }
 .composer {
-    margin-top: 32px;
+    margin-top: 0;
 }
 .composer__row {
     display: flex;

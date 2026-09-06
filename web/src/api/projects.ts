@@ -219,9 +219,9 @@ export function projectErrorMessage(error: unknown): string {
         isRecord(error.data.error) &&
         error.data.error.code === 'PROJECT_NAME_CONFLICT'
     ) {
-        return '项目名称已存在。'
+        return errorCopy.projectNameConflict
     }
-    return formatRequestError('项目操作失败', error, errorCopy.generic)
+    return formatRequestError(errorCopy.projects, error, errorCopy.generic)
 }
 
 export function createProjectsApi(client: BrowserHttpClient) {

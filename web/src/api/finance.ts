@@ -226,7 +226,7 @@ function parseSummary(value: unknown): FinanceSummary {
 }
 
 export function financeErrorMessage(error: unknown): string {
-    return formatRequestError('财务操作失败', error, errorCopy.generic)
+    return formatRequestError(errorCopy.finance, error, errorCopy.generic)
 }
 
 export function yuanFromCents(centsValue: number): string {

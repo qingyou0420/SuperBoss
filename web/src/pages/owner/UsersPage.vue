@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import { dateTimeShort } from '../../api/parse'
 import { userErrorMessage, usersApi, type OwnerUser } from '../../api/users'
-import EmptyLine from '../../components/ui/EmptyLine.vue'
 import InlineError from '../../components/ui/InlineError.vue'
 import PageHeader from '../../components/ui/PageHeader.vue'
 import { ACCOUNT_STATUS_LABEL, ROLE_LABEL } from '../../copy/glossary'
@@ -19,6 +18,13 @@ const drawerOpen = ref(false)
 const loading = ref(false)
 const saving = ref(false)
 const errorMessage = ref('')
+const pendingDisable = ref<OwnerUser>()
+const disableOpen = computed({
+    get: () => pendingDisable.value !== undefined,
+    set: (open: boolean) => {
+        if (!open) pendingDisable.value = undefined
+    },
+})
 
 function replace(user: OwnerUser): void {
     users.value = users.value.map((current) =>
@@ -92,9 +98,14 @@ async function toggle(user: OwnerUser): Promise<void> {
     const status = user.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE'
     try {
         replace(await usersApi.update(user.id, { status }))
+        pendingDisable.value = undefined
     } catch (error) {
         errorMessage.value = userErrorMessage(error)
     }
+}
+
+function requestDisable(user: OwnerUser): void {
+    pendingDisable.value = user
 }
 
 async function setRole(
@@ -130,7 +141,12 @@ onBeforeUnmount(clearTemporaryPassword)
             }}</el-button>
         </PageHeader>
         <InlineError :message="errorMessage" />
-        <el-table v-loading="loading" :data="users" class="plain-table">
+        <el-table
+            v-loading="loading"
+            :data="users"
+            class="plain-table"
+            :empty-text="membersCopy.empty"
+        >
             <el-table-column :label="membersCopy.name" min-width="120">
                 <template #default="{ row }">{{ row.display_name }}</template>
             </el-table-column>
@@ -177,7 +193,7 @@ onBeforeUnmount(clearTemporaryPassword)
                                 }}</el-dropdown-item>
                                 <el-dropdown-item
                                     v-if="row.status === 'ACTIVE'"
-                                    @click="toggle(row)"
+                                    @click="requestDisable(row)"
                                     >{{ membersCopy.disable }}</el-dropdown-item
                                 >
                                 <el-dropdown-item v-else @click="toggle(row)">{{
@@ -189,7 +205,24 @@ onBeforeUnmount(clearTemporaryPassword)
                 </template>
             </el-table-column>
         </el-table>
-        <EmptyLine v-if="!users.length" :message="membersCopy.empty" />
+        <el-dialog
+            v-model="disableOpen"
+            :title="membersCopy.disable"
+            width="360px"
+            :close-on-click-modal="false"
+        >
+            <p>{{ membersCopy.disableConfirm }}</p>
+            <template #footer>
+                <el-button @click="pendingDisable = undefined">{{
+                    membersCopy.close
+                }}</el-button>
+                <el-button
+                    type="primary"
+                    @click="pendingDisable && toggle(pendingDisable)"
+                    >{{ membersCopy.confirm }}</el-button
+                >
+            </template>
+        </el-dialog>
         <el-drawer v-model="drawerOpen" :title="membersCopy.add" size="400px">
             <form class="drawer-form" @submit.prevent="add">
                 <label for="username">{{ membersCopy.username }}</label>

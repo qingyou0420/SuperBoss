@@ -20,5 +20,6 @@ export const projectsCopy = {
     tooLong: '项目名称不能超过 255 个字符。',
     loadFailed: '项目列表加载失败。',
     nameRequired: '请输入项目名称。',
-    createSubmit: '创建项目',
+    createSubmit: '保存',
+    undone: '取消完成',
 }
