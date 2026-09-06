@@ -1,5 +1,7 @@
 # SuperBoss 审查与迭代方案：修复后记分卡（Fable 5.1，第四版）
 
+> **后续**：本文所列 N3-b / N5-b / N17–N26、E2 / U1-b / G 清单与决策点 K / N / O / R–U 在 `79e2dd3` 上的复核结果见第五版 [`审查与迭代方案-Fable51-UI-第五版-79e2dd3.md`](./审查与迭代方案-Fable51-UI-第五版-79e2dd3.md)。
+
 日期：2026-09-06。基于 **`feature/p0-drop-devices-imports@67e843e`**（提交 "feat: complete Fable v3 E1/U1, drop project_members, and add visual plus LLM gates"，相对上一 tip `2563abf` 改动 85 个文件，+1401 / −744 行；相对第三版基线 `d43f91b` 的代码改动同为这一个提交）的逐文件核查与本机实测。
 
 **本文是第三版（[`审查与迭代方案-Fable51-UI-第三版-d43f91b.md`](./审查与迭代方案-Fable51-UI-第三版-d43f91b.md)）的后续，只回答一个问题：第三版列出的 N1–N16、网盘 / 成员 / 对话页三处收尾、以及决策点 K–Q，在 `67e843e` 里哪些修好了、哪些修了一半、哪些没动，又引入了什么。** 第二版第三章的 UI 规格仍是唯一规格；第三版第五章的 E1 / U1 / U2 清单是本文对照的底稿。
