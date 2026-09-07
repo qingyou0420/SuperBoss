@@ -110,7 +110,7 @@ function user(value: unknown): OwnerUser {
         typeof value.id !== 'string' ||
         !UUID.test(value.id) ||
         !username(value.username) ||
-        !text(value.display_name) ||
+        (value.display_name !== '' && !text(value.display_name)) ||
         (value.role !== 'OWNER' &&
             value.role !== 'MANAGER' &&
             value.role !== 'STAFF') ||
@@ -123,7 +123,9 @@ function user(value: unknown): OwnerUser {
     return {
         id: value.id,
         username: value.username,
-        display_name: value.display_name,
+        display_name: text(value.display_name)
+            ? value.display_name
+            : value.username,
         role: value.role,
         status: value.status,
         last_login_at: value.last_login_at,

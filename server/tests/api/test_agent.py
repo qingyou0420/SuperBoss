@@ -158,9 +158,17 @@ async def test_owner_recall_probe_returns_matching_memory(
     await db_session.commit()
     client = agent_client
     _login(client)
+    listed = client.get("/api/v1/agent/memories")
+    assert listed.status_code == 200
+    before = next(item["recall_count"] for item in listed.json() if "星野合作" in item["content"])
     response = client.get("/api/v1/agent/recall", params={"q": "看一下星野项目"})
     assert response.status_code == 200
     assert any("星野合作" in item["content"] for item in response.json())
+    after = client.get("/api/v1/agent/memories")
+    assert (
+        next(item["recall_count"] for item in after.json() if "星野合作" in item["content"])
+        == before
+    )
 
 
 @pytest.mark.asyncio

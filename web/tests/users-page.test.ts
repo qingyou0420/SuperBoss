@@ -119,6 +119,15 @@ describe('OWNER local user API', () => {
         expect(seen[1]?.url).toBe(`/owner/users/${staff.id}/password-reset`)
     })
 
+    test('lists a user with empty display_name using the username', async () => {
+        const adapter: AxiosAdapter = async (config) =>
+            response(config, [{ ...staff, display_name: '' }])
+        const api = createUsersApi(createHttpClient({ adapter }))
+        await expect(api.list()).resolves.toEqual([
+            { ...staff, display_name: staff.username },
+        ])
+    })
+
     test.each([{ user: staff, temporary_password: '' }])(
         'rejects malformed credential envelopes %#',
         async (body) => {
@@ -142,6 +151,13 @@ describe('OWNER local user API', () => {
 })
 
 describe('OWNER local user management page', () => {
+    test('renders a row when display_name is empty', async () => {
+        mockedUsersApi.list.mockResolvedValue([{ ...staff, display_name: '' }])
+        render(UsersPage, { global: { plugins: [ElementPlus] } })
+        expect(await screen.findAllByText('existing-staff')).not.toHaveLength(0)
+        expect(screen.queryByText('操作失败。')).not.toBeInTheDocument()
+    })
+
     test('shows a created temporary password once without storage or clipboard writes', async () => {
         mockedUsersApi.create.mockResolvedValue({
             user: { ...staff, username: 'staff-acceptance' },

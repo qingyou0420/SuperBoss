@@ -15,6 +15,7 @@ import MultipartUploader from '../components/files/MultipartUploader.vue'
 import InlineError from '../components/ui/InlineError.vue'
 import { FOLDER_NAME } from '../copy/glossary'
 import { chatCopy } from '../copy/pages/chat'
+import { driveCopy } from '../copy/pages/drive'
 
 withDefaults(
     defineProps<{
@@ -37,6 +38,8 @@ const folderId = ref('')
 const pendingFileId = ref('')
 const pendingFileName = ref('')
 const pendingPreview = ref('')
+const pendingStatus = ref('')
+const drafting = ref(false)
 const projectNames = ref<Record<string, string>>({})
 const folderNames = ref<Record<string, string>>({})
 
@@ -77,7 +80,7 @@ async function loadConversations(): Promise<void> {
     conversations.value = await agentApi.listConversations(
         search.value.trim() || undefined,
     )
-    if (!currentId.value && conversations.value[0]) {
+    if (!drafting.value && !currentId.value && conversations.value[0]) {
         currentId.value = conversations.value[0].id
     }
 }
@@ -100,7 +103,15 @@ async function createConversation(): Promise<void> {
     const created = await agentApi.createConversation()
     conversations.value.unshift(created)
     currentId.value = created.id
+    drafting.value = false
     await loadThread()
+}
+
+function beginDraft(): void {
+    drafting.value = true
+    currentId.value = ''
+    messages.value = []
+    cards.value = []
 }
 
 async function archiveConversation(id: string): Promise<void> {
@@ -125,6 +136,7 @@ async function send(): Promise<void> {
         pendingFileId.value = ''
         pendingFileName.value = ''
         pendingPreview.value = ''
+        pendingStatus.value = ''
         try {
             const turn = await agentApi.stream(
                 currentId.value,
@@ -213,11 +225,18 @@ async function reviseCard(card: AgentCard, instruction: string): Promise<void> {
 
 function onUploaded(result: FileUploadCompleted): void {
     pendingFileId.value = result.file_id
+    pendingStatus.value = driveCopy.scanning
+}
+
+function onUploadFailed(message: string): void {
+    pendingFileId.value = ''
+    pendingStatus.value = message
 }
 
 async function onFilePicked(file: File): Promise<void> {
     pendingFileName.value = file.name
     pendingPreview.value = ''
+    pendingStatus.value = ''
     if (file.type.startsWith('text/') && file.size < 200_000) {
         const text = await file.slice(0, 400).text()
         pendingPreview.value = text
@@ -225,6 +244,7 @@ async function onFilePicked(file: File): Promise<void> {
 }
 
 async function selectConversation(id: string): Promise<void> {
+    drafting.value = false
     currentId.value = id
     await loadThread()
 }
@@ -265,7 +285,7 @@ onMounted(async () => {
         <aside>
             <div class="side-head">
                 <h1 id="chat-title">{{ chatCopy.brand }}</h1>
-                <el-button text @click="createConversation">{{
+                <el-button text @click="beginDraft">{{
                     chatCopy.newConversation
                 }}</el-button>
             </div>
@@ -354,9 +374,11 @@ onMounted(async () => {
             <form class="composer" @submit.prevent="send">
                 <p v-if="pendingFileName" class="pending-file">
                     {{ pendingFileName }}
-                    <span v-if="pendingPreview" class="preview">{{
-                        pendingPreview
-                    }}</span>
+                    <span
+                        v-if="pendingStatus || pendingPreview"
+                        class="preview"
+                        >{{ pendingStatus || pendingPreview }}</span
+                    >
                 </p>
                 <div class="composer__row">
                     <MultipartUploader
@@ -366,6 +388,7 @@ onMounted(async () => {
                         :folder-id="folderId"
                         @completed="onUploaded"
                         @selected="onFilePicked"
+                        @failed="onUploadFailed"
                     />
                     <label class="sr-only" for="chat-draft">{{
                         chatCopy.composerLabel

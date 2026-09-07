@@ -261,4 +261,27 @@ describe('chat page', () => {
             )
         })
     })
+
+    test('new conversation waits until the first message', async () => {
+        const pinia = createPinia()
+        setActivePinia(pinia)
+        useAuthStore().user = {
+            username: 'owner',
+            display_name: '清游',
+            role: 'OWNER',
+            must_change_password: false,
+        }
+        render(ChatPage, { global: { plugins: [pinia, ElementPlus] } })
+        expect(await screen.findByText('请确认房租。')).toBeInTheDocument()
+        mocks.agentApi.listMessages.mockResolvedValue([])
+        mocks.agentApi.listCards.mockResolvedValue([])
+        await fireEvent.click(
+            screen.getByRole('button', { name: chatCopy.newConversation }),
+        )
+        expect(mocks.agentApi.createConversation).not.toHaveBeenCalled()
+        expect(screen.getByText(chatCopy.empty)).toBeInTheDocument()
+        expect(
+            document.querySelector('.composer__row [role="status"]'),
+        ).not.toBeInTheDocument()
+    })
 })

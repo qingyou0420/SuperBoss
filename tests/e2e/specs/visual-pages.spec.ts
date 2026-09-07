@@ -25,6 +25,7 @@ test.describe('六页视觉回归 1280', () => {
         await expect(page.getByRole('heading', { name: '霜月' })).toBeVisible()
         await page.getByRole('button', { name: '新对话' }).click()
         await expect(page.getByText('对霜月说一句……')).toBeVisible()
+        await expect(page.locator('[role="alert"]')).toHaveCount(0)
         await expect(page).toHaveScreenshot('chat.png', {
             ...SNAPSHOT,
             mask: [page.locator('.shell__account')],
@@ -69,6 +70,8 @@ test.describe('六页视觉回归 1280', () => {
 
         await page.goto('/members')
         await expect(page.getByRole('heading', { name: '成员' })).toBeVisible()
+        await expect(page.getByText('操作失败。')).toHaveCount(0)
+        await expect(page.getByRole('row')).toHaveCount(3)
         await expect(page).toHaveScreenshot('members.png', {
             ...SNAPSHOT,
             mask: [page.locator('.shell__account')],

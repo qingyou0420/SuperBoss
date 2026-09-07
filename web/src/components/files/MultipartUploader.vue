@@ -6,7 +6,7 @@ import {
     filesApi,
     type FileUploadCompleted,
 } from '../../api/files'
-import { driveCopy, uploadingPercent } from '../../copy/pages/drive'
+import { driveCopy } from '../../copy/pages/drive'
 import {
     createMultipartUploader,
     createPresignedUploadTransport,
@@ -25,13 +25,10 @@ const props = withDefaults(
 const emit = defineEmits<{
     completed: [result: FileUploadCompleted]
     selected: [file: File]
+    failed: [message: string]
 }>()
 
 const pending = ref(false)
-const status = ref('')
-const errorMessage = ref('')
-const uploadedBytes = ref(0)
-const totalBytes = ref(0)
 let activeUploader: ReturnType<typeof createMultipartUploader> | undefined
 
 function userErrorText(error: UploadUserError): string {
@@ -44,38 +41,26 @@ async function uploadFile(file: File): Promise<void> {
     if (pending.value) return
     emit('selected', file)
     pending.value = true
-    status.value = ''
-    errorMessage.value = ''
-    uploadedBytes.value = 0
-    totalBytes.value = file.size
     try {
         const transport = createPresignedUploadTransport({
             allowedObjectOrigin: props.allowedObjectOrigin,
         })
         activeUploader = createMultipartUploader({
             filesApi,
-            onProgress(done, total) {
-                uploadedBytes.value = done
-                totalBytes.value = total
-                const percent =
-                    total === 0 ? 0 : Math.round((done / total) * 100)
-                status.value = uploadingPercent(percent)
-            },
             uploadPart: transport.put,
         })
         const result = await activeUploader.upload({
             file,
             folder_id: props.folderId,
         })
-        status.value = driveCopy.scanning
         emit('completed', result)
     } catch (error) {
-        if (error instanceof UploadUserError) {
-            errorMessage.value = userErrorText(error)
-        } else {
-            errorMessage.value = fileErrorMessage(error)
-        }
-        status.value = ''
+        emit(
+            'failed',
+            error instanceof UploadUserError
+                ? userErrorText(error)
+                : fileErrorMessage(error),
+        )
     } finally {
         pending.value = false
         activeUploader = undefined
@@ -119,8 +104,6 @@ onBeforeUnmount(cancel)
                 pending ? driveCopy.uploadingEllipsis : driveCopy.upload
             }}</span>
         </el-upload>
-        <p v-if="status" role="status">{{ status }}</p>
-        <p v-if="errorMessage" role="alert">{{ errorMessage }}</p>
     </div>
 </template>
 

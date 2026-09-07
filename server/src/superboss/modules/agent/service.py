@@ -717,7 +717,7 @@ class AgentService:
         await self.session.flush()
         return MemoryRead.model_validate(memory)
 
-    async def recall(self, query: str) -> list[dict[str, str]]:
+    async def recall(self, query: str, *, touch: bool = True) -> list[dict[str, str]]:
         pinned = list(
             (
                 await self.session.scalars(
@@ -745,16 +745,6 @@ class AgentService:
         searched: list[AgentMemory] = []
         needles = recall_needles(query)
         if needles:
-            total_active = int(
-                (
-                    await self.session.scalar(
-                        select(func.count())
-                        .select_from(AgentMemory)
-                        .where(AgentMemory.status == MemoryStatus.ACTIVE)
-                    )
-                )
-                or 0
-            )
             scored: list[tuple[int, str]] = []
             for term in needles:
                 hits = await self.session.scalar(
@@ -766,10 +756,7 @@ class AgentService:
                     )
                 )
                 scored.append((int(hits or 0), term))
-            positive = [(hits, term) for hits, term in scored if hits > 0]
-            threshold = total_active * 0.3
-            specific = [(hits, term) for hits, term in positive if hits <= threshold]
-            pool = specific if specific else positive
+            pool = [(hits, term) for hits, term in scored if hits > 0]
             pool.sort(key=lambda item: (item[0], -len(item[1])))
             ranked = [term for _hits, term in pool][:8]
             if not ranked:
@@ -783,6 +770,10 @@ class AgentService:
                             .where(
                                 AgentMemory.status == MemoryStatus.ACTIVE,
                                 or_(*matches),
+                            )
+                            .order_by(
+                                AgentMemory.importance.desc(),
+                                AgentMemory.created_at.desc(),
                             )
                             .limit(200)
                         )
@@ -805,8 +796,9 @@ class AgentService:
             if memory.id in seen:
                 continue
             seen.add(memory.id)
-            memory.recall_count += 1
-            memory.last_recalled_at = utcnow()
+            if touch:
+                memory.recall_count += 1
+                memory.last_recalled_at = utcnow()
             items.append(
                 {"id": str(memory.id), "kind": memory.kind.value, "content": memory.content}
             )

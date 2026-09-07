@@ -140,3 +140,49 @@ async def test_recall_ranks_rare_names_above_generic_meeting_noise(
     recalled = await service.recall("把星野合作项目的交付节点和财务成本收入汇总一下发给对接人")
     assert recalled
     assert "星野合作" in recalled[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_recall_keeps_frequent_proper_names_with_a_rare_term(
+    db_session: AsyncSession, active_owner: User
+) -> None:
+    for index in range(40):
+        db_session.add(
+            AgentMemory(
+                kind=MemoryKind.FACT,
+                content=f"星野合作第 {index + 1} 次沟通纪要",
+                importance=3,
+                status=MemoryStatus.ACTIVE,
+            )
+        )
+    for index in range(58):
+        db_session.add(
+            AgentMemory(
+                kind=MemoryKind.FACT,
+                content=f"日常第 {index + 1} 周例会纪要",
+                importance=2,
+                status=MemoryStatus.ACTIVE,
+            )
+        )
+    db_session.add(
+        AgentMemory(
+            kind=MemoryKind.FACT,
+            content="星野的对接人是陈工",
+            importance=4,
+            status=MemoryStatus.ACTIVE,
+        )
+    )
+    db_session.add(
+        AgentMemory(
+            kind=MemoryKind.FACT,
+            content="验收测试的对接人是林工",
+            importance=4,
+            status=MemoryStatus.ACTIVE,
+        )
+    )
+    await db_session.flush()
+    service = AgentService(db_session, Actor(active_owner.id, Role.OWNER))
+    recalled = await service.recall("星野的对接人是谁")
+    contents = [item["content"] for item in recalled]
+    assert any("星野" in item for item in contents)
+    assert any("对接人" in item for item in contents)

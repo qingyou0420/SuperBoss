@@ -26,6 +26,7 @@ from superboss.modules.agent.models import (
     CardStatus,
     MessageRole,
 )
+from superboss.modules.agent.service import receipt_line
 from superboss.modules.auth.passwords import (
     PasswordPolicyError,
     hash_password,
@@ -38,6 +39,8 @@ from superboss.modules.users.models import Role, User, UserStatus
 NORMAL_PROJECT_NAME = "M1 正常项目"
 TEST_PROJECT_NAME = "验收测试"
 VISUAL_CHAT_TITLE = "房租确认"
+OWNER_DISPLAY_NAME = "验收老板"
+STAFF_DISPLAY_NAME = "验收员工"
 
 PasswordReader = Callable[[str], str]
 
@@ -99,16 +102,19 @@ async def _acceptance_user(
     username: str,
     password: str,
     role: Role,
+    display_name: str,
 ) -> User:
     existing = await session.scalar(select(User).where(User.username == username).with_for_update())
     if existing is not None:
         if existing.role != role or (role == Role.STAFF and existing.status != UserStatus.ACTIVE):
             raise SeedRefusedError("Acceptance seed conflicts with an existing identity.")
+        if not existing.display_name:
+            existing.display_name = display_name
         return existing
     now = datetime.now(UTC)
     user = User(
         username=username,
-        display_name="",
+        display_name=display_name,
         password_hash=hash_password(password),
         must_change_password=False,
         password_changed_at=now,
@@ -146,10 +152,28 @@ async def _visual_chat_thread(session: AsyncSession, owner_id: UUID) -> None:
         )
     )
     if existing is not None:
-        return
+        for card in (
+            await session.scalars(select(AgentCard).where(AgentCard.conversation_id == existing.id))
+        ).all():
+            await session.delete(card)
+        for message in (
+            await session.scalars(
+                select(AgentMessage).where(AgentMessage.conversation_id == existing.id)
+            )
+        ).all():
+            await session.delete(message)
+        await session.delete(existing)
+        await session.flush()
     conversation = AgentConversation(owner_id=owner_id, title=VISUAL_CHAT_TITLE)
     session.add(conversation)
     await session.flush()
+    payload = {
+        "kind": "COST",
+        "scope": "COMPANY",
+        "amount_cents": 800000,
+        "occurred_on": "2026-09-01",
+        "category": "房租",
+    }
     user = AgentMessage(
         conversation_id=conversation.id,
         role=MessageRole.USER,
@@ -157,34 +181,46 @@ async def _visual_chat_thread(session: AsyncSession, owner_id: UUID) -> None:
     )
     session.add(user)
     await session.flush()
-    assistant = AgentMessage(
+    proposed_message = AgentMessage(
         conversation_id=conversation.id,
         role=MessageRole.ASSISTANT,
         content="请确认这张房租卡片。",
     )
-    session.add(assistant)
+    session.add(proposed_message)
     await session.flush()
-    card = AgentCard(
+    proposed = AgentCard(
         conversation_id=conversation.id,
-        message_id=assistant.id,
+        message_id=proposed_message.id,
         kind=CardKind.FINANCE_ENTRY,
-        payload={
-            "kind": "COST",
-            "scope": "COMPANY",
-            "amount_cents": 800000,
-            "occurred_on": "2026-09-01",
-            "category": "房租",
-        },
+        payload=payload,
         status=CardStatus.PROPOSED,
     )
-    session.add(card)
+    session.add(proposed)
     await session.flush()
-    assistant.card_ids = [card.id]
+    proposed_message.card_ids = [proposed.id]
+    committed_message = AgentMessage(
+        conversation_id=conversation.id,
+        role=MessageRole.ASSISTANT,
+        content="房租已按你的确认入库。",
+    )
+    session.add(committed_message)
+    await session.flush()
+    committed = AgentCard(
+        conversation_id=conversation.id,
+        message_id=committed_message.id,
+        kind=CardKind.FINANCE_ENTRY,
+        payload=payload,
+        status=CardStatus.COMMITTED,
+        decided_at=datetime.now(UTC),
+    )
+    session.add(committed)
+    await session.flush()
+    committed_message.card_ids = [committed.id]
     session.add(
         AgentMessage(
             conversation_id=conversation.id,
             role=MessageRole.SYSTEM,
-            content="已入库 · 记一笔 房租 ¥ 8,000.00",
+            content=receipt_line(CardKind.FINANCE_ENTRY.value, payload),
         )
     )
 
@@ -209,12 +245,16 @@ async def seed(
                 username=owner_username,
                 password=owner_password,
                 role=Role.OWNER,
+                display_name=OWNER_DISPLAY_NAME,
             )
+            if not owner.display_name:
+                owner.display_name = OWNER_DISPLAY_NAME
             staff = await _acceptance_user(
                 session,
                 username=staff_username,
                 password=staff_password,
                 role=Role.STAFF,
+                display_name=STAFF_DISPLAY_NAME,
             )
             normal_project = await _acceptance_project(session, name=NORMAL_PROJECT_NAME)
             test_project = await _acceptance_project(session, name=TEST_PROJECT_NAME)

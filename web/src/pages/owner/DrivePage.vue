@@ -252,7 +252,10 @@ onMounted(loadFolders)
                     v-if="validObjectOrigin && currentId"
                     id="drive-upload"
                     ref="headerFile"
-                    class="sr-only"
+                    hidden
+                    multiple
+                    tabindex="-1"
+                    aria-hidden="true"
                     type="file"
                     @change="onHeaderFiles"
                 />

@@ -201,7 +201,7 @@ async def recall_memories(
     q: str = Query(..., min_length=1, max_length=80),
     service: AgentService = Depends(get_service),
 ) -> list[dict[str, str]]:
-    return await service.recall(q)
+    return await service.recall(q, touch=False)
 
 
 @router.patch("/memories/{memory_id}", response_model=MemoryRead)

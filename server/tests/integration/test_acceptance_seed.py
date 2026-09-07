@@ -98,15 +98,16 @@ def test_seed_empty_database_and_repeat_are_idempotent(postgres_database: str) -
         rows = _run(
             _fetch(
                 postgres_database,
-                "SELECT username, role, password_hash, must_change_password "
+                "SELECT username, display_name, role, password_hash, must_change_password "
                 "FROM users WHERE username = ANY($1::text[]) ORDER BY username",
                 [owner, staff],
             )
         )
-        assert [(row["username"], row["role"]) for row in rows] == [
-            (owner, "OWNER"),
-            (staff, "STAFF"),
+        assert [(row["username"], row["display_name"], row["role"]) for row in rows] == [
+            (owner, module.OWNER_DISPLAY_NAME, "OWNER"),
+            (staff, module.STAFF_DISPLAY_NAME, "STAFF"),
         ]
+        assert all(row["display_name"] for row in rows)
         assert verify_password(rows[0]["password_hash"], OWNER_PASSWORD).valid
         assert verify_password(rows[1]["password_hash"], STAFF_PASSWORD).valid
         assert all(row["must_change_password"] is False for row in rows)

@@ -88,6 +88,7 @@ jobs:
       SUPERBOSS_DATABASE_URL: postgresql+asyncpg://superboss:superboss@127.0.0.1:5432/superboss
       SUPERBOSS_ENVIRONMENT: development
       SUPERBOSS_JWT_SECRET: ci-visual-jwt-secret-change-before-deploy
+      E2E_TEST_TIMEOUT_MS: "120000"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

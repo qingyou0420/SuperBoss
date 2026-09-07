@@ -178,6 +178,10 @@ describe('Task13 OWNER navigation and Drive integration', () => {
         ).toBeInTheDocument()
         expect(screen.getAllByRole('button', { name: '上传' })).toHaveLength(1)
         expect(
+            (document.querySelector('#drive-upload') as HTMLInputElement | null)
+                ?.tabIndex,
+        ).toBe(-1)
+        expect(
             document.querySelector('.page-header__actions [role="status"]'),
         ).not.toBeInTheDocument()
         expect(screen.queryByText(/历史文件|全部文件/)).not.toBeInTheDocument()

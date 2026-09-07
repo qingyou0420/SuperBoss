@@ -149,7 +149,9 @@ onBeforeUnmount(clearTemporaryPassword)
             :empty-text="membersCopy.empty"
         >
             <el-table-column :label="membersCopy.name" min-width="120">
-                <template #default="{ row }">{{ row.display_name }}</template>
+                <template #default="{ row }">{{
+                    row.display_name || row.username
+                }}</template>
             </el-table-column>
             <el-table-column :label="membersCopy.username" min-width="140">
                 <template #default="{ row }">{{ row.username }}</template>
