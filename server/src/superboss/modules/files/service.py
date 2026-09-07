@@ -257,8 +257,10 @@ class FileService:
 
     @staticmethod
     def _is_idempotency_conflict(error: IntegrityError) -> bool:
-        cause = getattr(error.orig, "__cause__", None)
-        return getattr(cause, "constraint_name", None) == "uq_files_upload_idempotency"
+        orig = error.orig
+        cause = getattr(orig, "__cause__", None)
+        name = getattr(cause, "constraint_name", None) or getattr(orig, "constraint_name", None)
+        return name == "uq_files_upload_idempotency"
 
     @staticmethod
     def _fingerprint(command: UploadStart) -> str:

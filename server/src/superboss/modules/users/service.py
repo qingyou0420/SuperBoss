@@ -48,35 +48,55 @@ class OwnerUserService:
         self.audit_service = audit_service
 
     async def _record(
-        self, actor: Actor, action: str, outcome: str, request_id: UUID, user_id: UUID | None = None, *, reason: str | None = None
+        self,
+        actor: Actor,
+        action: str,
+        outcome: str,
+        request_id: UUID,
+        user_id: UUID | None = None,
+        *,
+        reason: str | None = None,
     ) -> None:
         if self.audit_service is None:
             return
         metadata: dict[str, object] = {} if reason is None else {"reason": reason}
         await self.audit_service.record(
             AuditEventInput(
-                actor=actor, action=action, object_type="user", object_id=user_id,
-                outcome=outcome, request_id=request_id, metadata=metadata,
+                actor=actor,
+                action=action,
+                object_type="user",
+                object_id=user_id,
+                outcome=outcome,
+                request_id=request_id,
+                metadata=metadata,
             )
         )
 
-    async def _require_owner(self, actor: Actor, action: str, request_id: UUID, user_id: UUID | None = None) -> None:
+    async def _require_owner(
+        self, actor: Actor, action: str, request_id: UUID, user_id: UUID | None = None
+    ) -> None:
         if actor.role == Role.OWNER:
             return
         await self._record(actor, action, "DENIED", request_id, user_id, reason="OWNER_REQUIRED")
         raise ForbiddenError("OWNER_REQUIRED", "Owner access required")
 
-    async def _staff_for_update(self, actor: Actor, action: str, user_id: UUID, request_id: UUID) -> User:
+    async def _staff_for_update(
+        self, actor: Actor, action: str, user_id: UUID, request_id: UUID
+    ) -> User:
         await self._require_owner(actor, action, request_id, user_id)
         user = cast(
             User | None,
             await self.session.scalar(select(User).where(User.id == user_id).with_for_update()),
         )
         if user is None:
-            await self._record(actor, action, "DENIED", request_id, user_id, reason="USER_NOT_FOUND")
+            await self._record(
+                actor, action, "DENIED", request_id, user_id, reason="USER_NOT_FOUND"
+            )
             raise NotFoundError("USER_NOT_FOUND", "User not found")
         if user.role == Role.OWNER:
-            await self._record(actor, action, "DENIED", request_id, user_id, reason="OWNER_PROTECTED")
+            await self._record(
+                actor, action, "DENIED", request_id, user_id, reason="OWNER_PROTECTED"
+            )
             raise ConflictError("OWNER_PROTECTED", "The OWNER account is protected")
         return user
 
@@ -90,8 +110,12 @@ class OwnerUserService:
 
     async def _view(self, user: User) -> OwnerUserView:
         return OwnerUserView(
-            id=user.id, username=user.username, display_name=user.display_name,
-            role=user.role, status=user.status, last_login_at=user.last_login_at,
+            id=user.id,
+            username=user.username,
+            display_name=user.display_name,
+            role=user.role,
+            status=user.status,
+            last_login_at=user.last_login_at,
         )
 
     async def list_users(self, actor: Actor, request_id: UUID) -> list[OwnerUserView]:
@@ -115,21 +139,29 @@ class OwnerUserService:
         )
         taken = await self.session.scalar(select(User.id).where(User.username == command.username))
         if taken is not None:
-            await self._record(actor, "user.create", "DENIED", request_id, reason="USERNAME_CONFLICT")
+            await self._record(
+                actor, "user.create", "DENIED", request_id, reason="USERNAME_CONFLICT"
+            )
             raise ConflictError("USERNAME_CONFLICT", "Username already exists")
         try:
             self.session.add(user)
             await self.session.flush()
         except IntegrityError as error:
-            await self._record(actor, "user.create", "DENIED", request_id, reason="USERNAME_CONFLICT")
+            await self._record(
+                actor, "user.create", "DENIED", request_id, reason="USERNAME_CONFLICT"
+            )
             raise ConflictError("USERNAME_CONFLICT", "Username already exists") from error
         return StaffCredentialResult(await self._view(user), temporary_password)
 
-    async def update_staff(self, actor: Actor, user_id: UUID, command: StaffUpdate, request_id: UUID) -> OwnerUserView:
+    async def update_staff(
+        self, actor: Actor, user_id: UUID, command: StaffUpdate, request_id: UUID
+    ) -> OwnerUserView:
         user = await self._staff_for_update(actor, "user.update", user_id, request_id)
         values = command.model_dump(exclude_none=True)
         if not values:
-            await self._record(actor, "user.update", "DENIED", request_id, user_id, reason="EMPTY_UPDATE")
+            await self._record(
+                actor, "user.update", "DENIED", request_id, user_id, reason="EMPTY_UPDATE"
+            )
             raise DomainError("VALIDATION_ERROR", "Request validation failed", 422)
         if "display_name" in values:
             user.display_name = values["display_name"]
@@ -158,7 +190,9 @@ class OwnerUserService:
         await self.session.flush()
         return PasswordResetResult(temporary_password)
 
-    async def commit_and_record_success(self, actor: Actor, action: str, request_id: UUID, user_id: UUID | None = None) -> None:
+    async def commit_and_record_success(
+        self, actor: Actor, action: str, request_id: UUID, user_id: UUID | None = None
+    ) -> None:
         """Commit the business mutation and SUCCESS evidence atomically."""
         self.session.add(
             AuditLog(
@@ -168,9 +202,7 @@ class OwnerUserService:
                 object_type="user",
                 object_id=user_id,
                 outcome="SUCCESS",
-                metadata_json={
-                    "actor_role": actor.role.value if actor.role is not None else None
-                },
+                metadata_json={"actor_role": actor.role.value if actor.role is not None else None},
                 request_id=request_id,
             )
         )

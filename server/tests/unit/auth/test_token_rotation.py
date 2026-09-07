@@ -48,9 +48,20 @@ async def test_logout_revokes_both_access_and_refresh_tokens(
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("role", "ROOT"), ("sub", 1), ("sub", True), ("sub", "bad-uuid"),
-        ("session_id", 1), ("session_id", "bad-uuid"), ("jti", 1), ("jti", ""),
-        ("iat", "1"), ("iat", 1.5), ("iat", False), ("exp", "1"), ("exp", 1.5), ("exp", False),
+        ("role", "ROOT"),
+        ("sub", 1),
+        ("sub", True),
+        ("sub", "bad-uuid"),
+        ("session_id", 1),
+        ("session_id", "bad-uuid"),
+        ("jti", 1),
+        ("jti", ""),
+        ("iat", "1"),
+        ("iat", 1.5),
+        ("iat", False),
+        ("exp", "1"),
+        ("exp", 1.5),
+        ("exp", False),
     ],
 )
 async def test_access_claim_anomalies_are_rejected(
@@ -59,7 +70,12 @@ async def test_access_claim_anomalies_are_rejected(
     """Invalid exact-six-claim tokens must not authenticate a live session."""
     service = AuthService(db_session, test_settings)
     pair = await service.issue_session(active_owner)
-    claims = jwt.decode(pair.access_token, test_settings.jwt_secret, algorithms=["HS256"], options={"verify_exp": False})
+    claims = jwt.decode(
+        pair.access_token,
+        test_settings.jwt_secret,
+        algorithms=["HS256"],
+        options={"verify_exp": False},
+    )
     claims[field] = value
     forged = jwt.encode(claims, test_settings.jwt_secret, algorithm="HS256")
     with pytest.raises(InvalidSession):

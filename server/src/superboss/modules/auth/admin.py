@@ -113,9 +113,7 @@ async def reset_owner_password(
     password = _read_confirmed_password(password_reader)
     now = datetime.now(UTC)
     async with session_factory() as session, session.begin():
-        owner = await session.scalar(
-            select(User).where(User.role == Role.OWNER).with_for_update()
-        )
+        owner = await session.scalar(select(User).where(User.role == Role.OWNER).with_for_update())
         if owner is None:
             raise LocalAdminError("The local OWNER does not exist.")
         owner.password_hash = hash_password(password)

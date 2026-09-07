@@ -103,9 +103,14 @@ async def test_staff_sees_all_projects_and_cannot_create(
     assert assigned_detail.status_code == 200
     hidden_detail = api_client.get(f"/api/v1/projects/{hidden.id}")
     assert hidden_detail.status_code == 200
-    _assert_error(api_client.post(
-        "/api/v1/projects", json={"name": "Denied"}, headers=_csrf_headers(api_client)
-    ), 403, "FORBIDDEN", "You cannot perform this action")
+    _assert_error(
+        api_client.post(
+            "/api/v1/projects", json={"name": "Denied"}, headers=_csrf_headers(api_client)
+        ),
+        403,
+        "FORBIDDEN",
+        "You cannot perform this action",
+    )
 
 
 @pytest.mark.asyncio
@@ -127,20 +132,28 @@ async def test_cookie_actor_precedes_bearer_without_fallback(
 
     api_client.cookies.clear()
     api_client.cookies.set("access_token", owner_token, domain="testserver.local", path="/")
-    owner_cookie = api_client.get("/api/v1/projects", headers={"Authorization": f"Bearer {staff_token}"})
+    owner_cookie = api_client.get(
+        "/api/v1/projects", headers={"Authorization": f"Bearer {staff_token}"}
+    )
     assert {item["name"] for item in owner_cookie.json()} == {"Source Assigned", "Source Hidden"}
 
     api_client.cookies.clear()
     api_client.cookies.set("access_token", staff_token, domain="testserver.local", path="/")
-    staff_cookie = api_client.get("/api/v1/projects", headers={"Authorization": f"Bearer {owner_token}"})
+    staff_cookie = api_client.get(
+        "/api/v1/projects", headers={"Authorization": f"Bearer {owner_token}"}
+    )
     assert {item["name"] for item in staff_cookie.json()} == {"Source Assigned", "Source Hidden"}
 
     api_client.cookies.set("access_token", "invalid", domain="testserver.local", path="/")
-    invalid_cookie = api_client.get("/api/v1/projects", headers={"Authorization": f"Bearer {owner_token}"})
+    invalid_cookie = api_client.get(
+        "/api/v1/projects", headers={"Authorization": f"Bearer {owner_token}"}
+    )
     assert invalid_cookie.status_code == 401
 
     api_client.cookies.clear()
-    header_only = api_client.get("/api/v1/projects", headers={"Authorization": f"Bearer {owner_token}"})
+    header_only = api_client.get(
+        "/api/v1/projects", headers={"Authorization": f"Bearer {owner_token}"}
+    )
     assert header_only.status_code == 401
 
 
@@ -195,8 +208,23 @@ def test_valid_uuid_request_id_is_canonicalized_and_propagated(
     assert actual == "bba39a39-47ba-4ac5-9250-ccdba1d7f25e"
 
 
-@pytest.mark.parametrize("request_id", ["a", "x" * 128, "x" * 129, "evil\r\nX: y", "\t", "bad\x00id", b"\xe4\xb8\xad\xe6\x96\x87", "   ", "x" * 9000])
-def test_invalid_request_id_is_replaced_with_generated_uuid(api_client: TestClient, request_id: str | bytes) -> None:
+@pytest.mark.parametrize(
+    "request_id",
+    [
+        "a",
+        "x" * 128,
+        "x" * 129,
+        "evil\r\nX: y",
+        "\t",
+        "bad\x00id",
+        b"\xe4\xb8\xad\xe6\x96\x87",
+        "   ",
+        "x" * 9000,
+    ],
+)
+def test_invalid_request_id_is_replaced_with_generated_uuid(
+    api_client: TestClient, request_id: str | bytes
+) -> None:
     response = api_client.get("/api/v1/projects", headers={"X-Request-ID": request_id})
     _assert_error(response, 401, "AUTHENTICATION_REQUIRED", "Authentication required")
     actual = response.json()["error"]["request_id"]
@@ -233,7 +261,9 @@ def test_http_normalizes_every_supported_edge_whitespace(api_client: TestClient,
     """API and database must agree on every configured edge-whitespace character."""
     _login(api_client, "owner-code")
     response = api_client.post(
-        "/api/v1/projects", json={"name": f"{edge}Unicode项目{edge}"}, headers=_csrf_headers(api_client)
+        "/api/v1/projects",
+        json={"name": f"{edge}Unicode项目{edge}"},
+        headers=_csrf_headers(api_client),
     )
     assert response.status_code == 201
     assert response.json()["name"] == "Unicode项目"
@@ -253,7 +283,9 @@ def test_project_name_trims_and_rejects_case_insensitive_aliases(api_client: Tes
     duplicate = api_client.post(
         "/api/v1/projects", json={"name": "core"}, headers=_csrf_headers(api_client)
     )
-    _assert_error(duplicate, 409, "PROJECT_NAME_CONFLICT", "A project with this name already exists")
+    _assert_error(
+        duplicate, 409, "PROJECT_NAME_CONFLICT", "A project with this name already exists"
+    )
 
 
 def test_unknown_create_fields_are_ignored_or_rejected(api_client: TestClient) -> None:
@@ -273,9 +305,7 @@ async def test_concurrent_canonical_name_creates_have_one_winner(
     owner = local_user("owner-revoked", display_name="Owner", role=Role.OWNER)
     db_session.add(owner)
     await db_session.flush()
-    token = (
-        await AuthService(db_session, test_settings).issue_session(owner)
-    ).access_token
+    token = (await AuthService(db_session, test_settings).issue_session(owner)).access_token
     await db_session.commit()
     transport = httpx.ASGITransport(app=create_app(test_settings))
     csrf = "concurrent-csrf"
@@ -302,13 +332,17 @@ async def test_concurrent_canonical_name_creates_have_one_winner(
         await db_session.commit()
 
 
-def test_missing_project_and_invalid_creation_use_safe_error_mapping(api_client: TestClient) -> None:
+def test_missing_project_and_invalid_creation_use_safe_error_mapping(
+    api_client: TestClient,
+) -> None:
     """Falling back to FastAPI defaults would break safe 404/422 API error contracts."""
     _login(api_client, "owner-code")
     missing = api_client.get(f"/api/v1/projects/{uuid4()}")
     _assert_error(missing, 404, "PROJECT_NOT_FOUND", "Project not found")
 
-    invalid = api_client.post("/api/v1/projects", json={"name": ""}, headers=_csrf_headers(api_client))
+    invalid = api_client.post(
+        "/api/v1/projects", json={"name": ""}, headers=_csrf_headers(api_client)
+    )
     _assert_error(invalid, 422, "VALIDATION_ERROR", "Request validation failed")
 
 

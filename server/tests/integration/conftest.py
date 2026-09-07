@@ -40,7 +40,9 @@ def postgres_database() -> Iterator[str]:
         return
 
     with PostgresContainer("postgres:17-alpine") as postgres:
-        database_url = postgres.get_connection_url().replace("postgresql+psycopg2", "postgresql+asyncpg")
+        database_url = postgres.get_connection_url().replace(
+            "postgresql+psycopg2", "postgresql+asyncpg"
+        )
         migrate_database(database_url)
         yield database_url
         get_settings.cache_clear()

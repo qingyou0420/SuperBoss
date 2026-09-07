@@ -12,7 +12,8 @@ Before a release, run the Playwright specs in `tests/e2e/specs/` against a live
 - `owner-login-project.spec.ts`
 - `file-quarantine.spec.ts`
 - `staff-denial.spec.ts`
-- `visual-pages.spec.ts` (currently `test.fixme` until Linux CI recaptures baselines)
+
+`visual-pages.spec.ts` is the CI visual gate (seven baselines under `tests/e2e/specs/visual-pages.spec.ts-snapshots/`). Recapture only from Linux CI: `workflow_dispatch` with `update_snapshots=true`, download the artifact, and commit those PNGs. Do not commit screenshots taken on Windows or macOS.
 
 Do not substitute `npm run test:contracts`, unit tests, or skipped specs for this gate.
 

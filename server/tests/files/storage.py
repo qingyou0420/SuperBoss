@@ -1,4 +1,5 @@
 """Behavioral in-memory object storage for file service tests."""
+
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -33,7 +34,9 @@ class InMemoryObjectStorage:
 
     async def create_multipart(self, object_key: str, content_type: str) -> str:
         self.create_calls += 1
-        upload_id = self.created_multipart_id if self.created_multipart_id is not None else str(uuid4())
+        upload_id = (
+            self.created_multipart_id if self.created_multipart_id is not None else str(uuid4())
+        )
         self.active[upload_id] = object_key
         if self.create_barrier is not None:
             await self.create_barrier.wait()
@@ -58,13 +61,18 @@ class InMemoryObjectStorage:
         self.objects.pop(object_key, None)
         self.deleted.append(object_key)
 
-    async def presign_upload_part(self, object_key: str, multipart_id: str, part_number: int, expires_seconds: int) -> str:
+    async def presign_upload_part(
+        self, object_key: str, multipart_id: str, part_number: int, expires_seconds: int
+    ) -> str:
         self.expiries.append(expires_seconds)
         return f"memory://part/{multipart_id}/{part_number}"
 
-    async def complete_multipart(self, object_key: str, multipart_id: str, parts: list[CompletedPart]) -> ObjectMetadata:
+    async def complete_multipart(
+        self, object_key: str, multipart_id: str, parts: list[CompletedPart]
+    ) -> ObjectMetadata:
         self.complete_calls += 1
         if self.complete_late_success_delay is not None:
+
             async def complete_later() -> None:
                 await asyncio.sleep(self.complete_late_success_delay)
                 self.active.pop(multipart_id, None)

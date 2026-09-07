@@ -36,7 +36,9 @@ class PasswordReuseForbiddenError(DomainError):
 
 
 class ForbiddenError(DomainError):
-    def __init__(self, code: str = "FORBIDDEN", message: str = "You cannot perform this action") -> None:
+    def __init__(
+        self, code: str = "FORBIDDEN", message: str = "You cannot perform this action"
+    ) -> None:
         super().__init__(code, message, 403)
 
 

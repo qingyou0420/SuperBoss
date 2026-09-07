@@ -33,7 +33,9 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = 60.0
     scan_enabled: bool = True
 
-    model_config = SettingsConfigDict(env_prefix="SUPERBOSS_", extra="forbid", hide_input_in_errors=True)
+    model_config = SettingsConfigDict(
+        env_prefix="SUPERBOSS_", extra="forbid", hide_input_in_errors=True
+    )
 
     @model_validator(mode="after")
     def validate_secure_jwt_secret(self) -> "Settings":
@@ -94,9 +96,20 @@ class Settings(BaseSettings):
             if base64.urlsafe_b64encode(material).rstrip(b"=").decode("ascii") != candidate:
                 raise ValueError("JWT secret must be canonical base64url random material")
             markers = (
-                "change-me", "change_me", "changeme", "example", "placeholder", "password", "common", "secret",
+                "change-me",
+                "change_me",
+                "changeme",
+                "example",
+                "placeholder",
+                "password",
+                "common",
+                "secret",
             )
-            if len(material) < 32 or len(set(material)) < 16 or any(marker in candidate.lower() for marker in markers):
+            if (
+                len(material) < 32
+                or len(set(material)) < 16
+                or any(marker in candidate.lower() for marker in markers)
+            ):
                 raise ValueError("JWT secret must be canonical base64url random material")
         return self
 

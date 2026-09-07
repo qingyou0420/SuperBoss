@@ -18,9 +18,8 @@ const props = withDefaults(
         allowedObjectOrigin: string
         folderId: string
         compact?: boolean
-        textButton?: boolean
     }>(),
-    { compact: false, textButton: false },
+    { compact: false },
 )
 
 const emit = defineEmits<{
@@ -100,14 +99,11 @@ onBeforeUnmount(cancel)
             :auto-upload="false"
             :show-file-list="false"
             :disabled="pending"
-            :drag="!compact && !textButton"
+            :drag="!compact"
             @change="onChange"
         >
-            <el-button v-if="textButton" text :disabled="pending">{{
-                driveCopy.upload
-            }}</el-button>
             <svg
-                v-else-if="compact"
+                v-if="compact"
                 class="clip"
                 width="16"
                 height="16"

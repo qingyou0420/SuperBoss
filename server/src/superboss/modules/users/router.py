@@ -29,22 +29,39 @@ def request_id(request: Request) -> UUID:
 
 
 @router.get("", response_model=list[OwnerUserRead])
-async def list_users(request: Request, actor: Actor = Depends(get_actor), service: OwnerUserService = Depends(get_service)) -> list[OwnerUserRead]:
+async def list_users(
+    request: Request,
+    actor: Actor = Depends(get_actor),
+    service: OwnerUserService = Depends(get_service),
+) -> list[OwnerUserRead]:
     current_request_id = request_id(request)
     users = await service.list_users(actor, current_request_id)
     return [OwnerUserRead.model_validate(user) for user in users]
 
 
 @router.post("", response_model=StaffCreateRead, status_code=status.HTTP_201_CREATED)
-async def create_staff(request: Request, command: StaffCreate, actor: Actor = Depends(get_actor), service: OwnerUserService = Depends(get_service)) -> StaffCreateRead:
+async def create_staff(
+    request: Request,
+    command: StaffCreate,
+    actor: Actor = Depends(get_actor),
+    service: OwnerUserService = Depends(get_service),
+) -> StaffCreateRead:
     current_request_id = request_id(request)
     created = await service.create_staff(actor, command, current_request_id)
-    await service.commit_and_record_success(actor, "user.create", current_request_id, created.user.id)
+    await service.commit_and_record_success(
+        actor, "user.create", current_request_id, created.user.id
+    )
     return StaffCreateRead.model_validate(created)
 
 
 @router.patch("/{user_id}", response_model=OwnerUserRead)
-async def update_staff(request: Request, user_id: UUID, command: StaffUpdate, actor: Actor = Depends(get_actor), service: OwnerUserService = Depends(get_service)) -> OwnerUserRead:
+async def update_staff(
+    request: Request,
+    user_id: UUID,
+    command: StaffUpdate,
+    actor: Actor = Depends(get_actor),
+    service: OwnerUserService = Depends(get_service),
+) -> OwnerUserRead:
     current_request_id = request_id(request)
     user = await service.update_staff(actor, user_id, command, current_request_id)
     await service.commit_and_record_success(actor, "user.update", current_request_id, user.id)

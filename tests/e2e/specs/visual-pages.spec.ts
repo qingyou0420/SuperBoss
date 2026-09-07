@@ -9,7 +9,7 @@ const SNAPSHOT = {
     maxDiffPixelRatio: 0.005,
 }
 
-test.describe.fixme('六页视觉回归 1280', () => {
+test.describe('六页视觉回归 1280', () => {
     test.use({ viewport: { width: 1280, height: 800 } })
 
     test('登录', async ({ page }) => {
@@ -23,7 +23,21 @@ test.describe.fixme('六页视觉回归 1280', () => {
 
         await page.goto('/chat')
         await expect(page.getByRole('heading', { name: '霜月' })).toBeVisible()
+        await page.getByRole('button', { name: '新对话' }).click()
+        await expect(page.getByText('对霜月说一句……')).toBeVisible()
         await expect(page).toHaveScreenshot('chat.png', {
+            ...SNAPSHOT,
+            mask: [page.locator('.shell__account')],
+        })
+
+        await page.getByRole('button', { name: '房租确认' }).click()
+        await expect(
+            page.getByRole('button', { name: '确认入库' }),
+        ).toBeVisible()
+        await expect(
+            page.getByText('已入库 · 记一笔 房租 ¥ 8,000.00'),
+        ).toBeVisible()
+        await expect(page).toHaveScreenshot('chat-with-card.png', {
             ...SNAPSHOT,
             mask: [page.locator('.shell__account')],
         })

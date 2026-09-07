@@ -12,7 +12,6 @@ import DateText from '../../components/ui/DateText.vue'
 import Dot from '../../components/ui/Dot.vue'
 import DropZone from '../../components/files/DropZone.vue'
 import InlineError from '../../components/ui/InlineError.vue'
-import MultipartUploader from '../../components/files/MultipartUploader.vue'
 import PageHeader from '../../components/ui/PageHeader.vue'
 import UploadTray from '../../components/files/UploadTray.vue'
 import { useMultipartUpload } from '../../components/files/useMultipartUpload'
@@ -40,6 +39,7 @@ const renamingId = ref('')
 const renameValue = ref('')
 const movingFile = ref<DriveFile>()
 const moveTarget = ref('')
+const headerFile = ref<HTMLInputElement | null>(null)
 const pendingRemove = ref<DriveFile>()
 const removeOpen = computed({
     get: () => pendingRemove.value !== undefined,
@@ -184,6 +184,7 @@ async function confirmRemove(): Promise<void> {
         files.value = files.value.filter((item) => item.id !== file.id)
         pendingRemove.value = undefined
     } catch {
+        pendingRemove.value = undefined
         errorMessage.value = driveCopy.deleteFailed
     }
 }
@@ -223,6 +224,17 @@ async function onDropped(list: File[]): Promise<void> {
     }
 }
 
+async function onHeaderFiles(event: Event): Promise<void> {
+    const input = event.target as HTMLInputElement
+    const list = input.files ? Array.from(input.files) : []
+    input.value = ''
+    await onDropped(list)
+}
+
+function openHeaderFile(): void {
+    headerFile.value?.click()
+}
+
 watch(currentId, () => {
     void loadFiles()
 })
@@ -236,14 +248,20 @@ onMounted(loadFolders)
                 <span v-if="!validObjectOrigin" class="hint">{{
                     driveCopy.unconfigured
                 }}</span>
-                <MultipartUploader
+                <input
                     v-if="validObjectOrigin && currentId"
-                    compact
-                    text-button
-                    :allowed-object-origin="allowedObjectOrigin"
-                    :folder-id="currentId"
-                    @completed="() => showCompleted()"
+                    id="drive-upload"
+                    ref="headerFile"
+                    class="sr-only"
+                    type="file"
+                    @change="onHeaderFiles"
                 />
+                <el-button
+                    v-if="validObjectOrigin && currentId"
+                    text
+                    @click="openHeaderFile"
+                    >{{ driveCopy.upload }}</el-button
+                >
                 <el-dropdown v-if="canManage && currentId" trigger="click">
                     <el-button text>···</el-button>
                     <template #dropdown>
@@ -416,7 +434,7 @@ onMounted(loadFolders)
                         driveCopy.close
                     }}</el-button>
                     <el-button type="primary" @click="confirmRemove">{{
-                        driveCopy.confirmRemove
+                        driveCopy.confirm
                     }}</el-button>
                 </template>
             </el-dialog>

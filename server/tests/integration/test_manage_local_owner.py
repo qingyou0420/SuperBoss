@@ -43,11 +43,7 @@ def _reader(*values: str):
 
 def test_cli_parser_has_no_password_argument() -> None:
     parser = _admin().build_parser()
-    options = {
-        option
-        for action in parser._actions
-        for option in action.option_strings
-    }
+    options = {option for action in parser._actions for option in action.option_strings}
     assert "--password" not in options
     assert "--password-file" not in options
     assert parser.parse_args(["bootstrap", "--username", "owner", "--display-name", "Owner"])
@@ -132,7 +128,9 @@ async def test_bootstrap_creates_exactly_one_owner_and_secret_free_audit(
     )
     assert owner.must_change_password is False
     assert verify_password(owner.password_hash, INITIAL_PASSWORD).valid
-    event = await db_session.scalar(select(AuditLog).where(AuditLog.action == "auth.owner.bootstrap"))
+    event = await db_session.scalar(
+        select(AuditLog).where(AuditLog.action == "auth.owner.bootstrap")
+    )
     assert event is not None
     assert (event.actor_id, event.object_id, event.outcome, event.metadata_json) == (
         owner.id,

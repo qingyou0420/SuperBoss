@@ -76,9 +76,7 @@ class ClamAVScanner:
                         frame = chunk[offset : offset + self.max_chunk_bytes]
                         if total_bytes > self.max_stream_bytes - len(frame):
                             raise ClamAVScanError()
-                        await self._write(
-                            connected_writer, struct.pack("!I", len(frame)) + frame
-                        )
+                        await self._write(connected_writer, struct.pack("!I", len(frame)) + frame)
                         total_bytes += len(frame)
                 await self._write(connected_writer, struct.pack("!I", 0))
                 response = await asyncio.wait_for(

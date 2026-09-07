@@ -39,9 +39,7 @@ def test_browser_access_token_expires_exactly_two_hours_after_issuance(
     settings = _settings()
     monkeypatch.setattr(security, "utcnow", lambda: issued_at)
 
-    token, returned_expires_at = issue_access_token(
-        settings, uuid4(), Role.OWNER.value, uuid4()
-    )
+    token, returned_expires_at = issue_access_token(settings, uuid4(), Role.OWNER.value, uuid4())
 
     claims = _claims(token, settings)
     expected_expires_at = issued_at.replace(microsecond=0) + timedelta(hours=2)

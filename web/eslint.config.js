@@ -21,6 +21,8 @@ export default tseslint.config(
             globals: {
                 File: 'readonly',
                 DragEvent: 'readonly',
+                Event: 'readonly',
+                HTMLInputElement: 'readonly',
                 navigator: 'readonly',
             },
         },

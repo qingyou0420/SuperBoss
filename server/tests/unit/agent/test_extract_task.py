@@ -56,7 +56,9 @@ async def test_extract_memories_with_system_actor_writes_memory_and_summary(
     await service.extract_memories(conversation.id)
     await db_session.flush()
     count = await db_session.scalar(
-        select(func.count()).select_from(AgentMemory).where(AgentMemory.status == MemoryStatus.ACTIVE)
+        select(func.count())
+        .select_from(AgentMemory)
+        .where(AgentMemory.status == MemoryStatus.ACTIVE)
     )
     saved = await db_session.get(AgentConversation, conversation.id)
     assert count and count > 0

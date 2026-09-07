@@ -18,6 +18,14 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from superboss.modules.agent.models import (
+    AgentCard,
+    AgentConversation,
+    AgentMessage,
+    CardKind,
+    CardStatus,
+    MessageRole,
+)
 from superboss.modules.auth.passwords import (
     PasswordPolicyError,
     hash_password,
@@ -29,6 +37,7 @@ from superboss.modules.users.models import Role, User, UserStatus
 
 NORMAL_PROJECT_NAME = "M1 正常项目"
 TEST_PROJECT_NAME = "验收测试"
+VISUAL_CHAT_TITLE = "房租确认"
 
 PasswordReader = Callable[[str], str]
 
@@ -52,20 +61,28 @@ def _required_username(name: str) -> str:
     return value
 
 
+def _validate_seed_password(password: str) -> str:
+    try:
+        validate_password(password)
+    except PasswordPolicyError as error:
+        raise SeedRefusedError("Password does not meet the local policy.") from error
+    return password
+
+
 async def _read_passwords(password_reader: PasswordReader) -> tuple[str, str]:
+    owner_env = os.getenv("SUPERBOSS_OWNER_PASSWORD", "")
+    staff_env = os.getenv("SUPERBOSS_ACCEPTANCE_STAFF_PASSWORD", "")
+    if owner_env or staff_env:
+        if not owner_env or not staff_env:
+            raise SeedRefusedError("Acceptance seed passwords must both come from the environment.")
+        return _validate_seed_password(owner_env), _validate_seed_password(staff_env)
     values: list[str] = []
     for label in ("OWNER", "STAFF"):
         password = await asyncio.to_thread(password_reader, f"{label} password: ")
-        confirmation = await asyncio.to_thread(
-            password_reader, f"Confirm {label} password: "
-        )
+        confirmation = await asyncio.to_thread(password_reader, f"Confirm {label} password: ")
         if password != confirmation:
             raise SeedRefusedError("Password confirmation does not match.")
-        try:
-            validate_password(password)
-        except PasswordPolicyError as error:
-            raise SeedRefusedError("Password does not meet the local policy.") from error
-        values.append(password)
+        values.append(_validate_seed_password(password))
     return values[0], values[1]
 
 
@@ -83,13 +100,9 @@ async def _acceptance_user(
     password: str,
     role: Role,
 ) -> User:
-    existing = await session.scalar(
-        select(User).where(User.username == username).with_for_update()
-    )
+    existing = await session.scalar(select(User).where(User.username == username).with_for_update())
     if existing is not None:
-        if existing.role != role or (
-            role == Role.STAFF and existing.status != UserStatus.ACTIVE
-        ):
+        if existing.role != role or (role == Role.STAFF and existing.status != UserStatus.ACTIVE):
             raise SeedRefusedError("Acceptance seed conflicts with an existing identity.")
         return existing
     now = datetime.now(UTC)
@@ -125,6 +138,57 @@ async def _acceptance_project(
     return project
 
 
+async def _visual_chat_thread(session: AsyncSession, owner_id: UUID) -> None:
+    existing = await session.scalar(
+        select(AgentConversation).where(
+            AgentConversation.owner_id == owner_id,
+            AgentConversation.title == VISUAL_CHAT_TITLE,
+        )
+    )
+    if existing is not None:
+        return
+    conversation = AgentConversation(owner_id=owner_id, title=VISUAL_CHAT_TITLE)
+    session.add(conversation)
+    await session.flush()
+    user = AgentMessage(
+        conversation_id=conversation.id,
+        role=MessageRole.USER,
+        content="这个月房租 8000",
+    )
+    session.add(user)
+    await session.flush()
+    assistant = AgentMessage(
+        conversation_id=conversation.id,
+        role=MessageRole.ASSISTANT,
+        content="请确认这张房租卡片。",
+    )
+    session.add(assistant)
+    await session.flush()
+    card = AgentCard(
+        conversation_id=conversation.id,
+        message_id=assistant.id,
+        kind=CardKind.FINANCE_ENTRY,
+        payload={
+            "kind": "COST",
+            "scope": "COMPANY",
+            "amount_cents": 800000,
+            "occurred_on": "2026-09-01",
+            "category": "房租",
+        },
+        status=CardStatus.PROPOSED,
+    )
+    session.add(card)
+    await session.flush()
+    assistant.card_ids = [card.id]
+    session.add(
+        AgentMessage(
+            conversation_id=conversation.id,
+            role=MessageRole.SYSTEM,
+            content="已入库 · 记一笔 房租 ¥ 8,000.00",
+        )
+    )
+
+
 async def seed(
     database_url: str,
     owner_username: str,
@@ -139,9 +203,7 @@ async def seed(
         async with factory() as session, session.begin():
             existing_owner = await _sole_owner(session)
             if existing_owner is not None and existing_owner.username != owner_username:
-                raise SeedRefusedError(
-                    "Acceptance seed does not match the protected OWNER."
-                )
+                raise SeedRefusedError("Acceptance seed does not match the protected OWNER.")
             owner = existing_owner or await _acceptance_user(
                 session,
                 username=owner_username,
@@ -154,12 +216,9 @@ async def seed(
                 password=staff_password,
                 role=Role.STAFF,
             )
-            normal_project = await _acceptance_project(
-                session, name=NORMAL_PROJECT_NAME
-            )
-            test_project = await _acceptance_project(
-                session, name=TEST_PROJECT_NAME
-            )
+            normal_project = await _acceptance_project(session, name=NORMAL_PROJECT_NAME)
+            test_project = await _acceptance_project(session, name=TEST_PROJECT_NAME)
+            await _visual_chat_thread(session, owner.id)
         return SeedIds(owner.id, staff.id, normal_project.id, test_project.id)
     finally:
         await engine.dispose()

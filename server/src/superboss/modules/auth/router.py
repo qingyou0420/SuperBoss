@@ -64,9 +64,7 @@ async def _stage_auth_audit(session: AsyncSession, event: AuditEventInput) -> No
             outcome=event.outcome,
             metadata_json={
                 **event.metadata,
-                "actor_role": (
-                    event.actor.role.value if event.actor.role is not None else None
-                ),
+                "actor_role": (event.actor.role.value if event.actor.role is not None else None),
             },
             request_id=event.request_id,
             event_key=event.event_key,
@@ -114,7 +112,7 @@ async def _record_login(
             outcome=outcome,
             request_id=UUID(request.state.request_id),
             metadata=metadata,
-        )
+        ),
     )
 
 
@@ -133,9 +131,7 @@ async def login(
     try:
         completed = await service.login(command.username, command.password)
     except LoginFailure as failure:
-        await _record_login(
-            request, service.session, completed=None, failure=failure
-        )
+        await _record_login(request, service.session, completed=None, failure=failure)
         await service.session.commit()
         raise AuthenticationFailedError() from failure
     await _record_login(request, service.session, completed=completed, failure=None)
@@ -197,7 +193,7 @@ async def change_password(
             outcome="SUCCESS",
             request_id=UUID(request.state.request_id),
             metadata={},
-        )
+        ),
     )
     await service.session.commit()
     _set_session_cookies(response, completed.pair)

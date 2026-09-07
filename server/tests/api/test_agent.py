@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from superboss.core.config import Settings
 from superboss.core.llm import LLMResult, LLMStreamChunk, LLMToolCall
 from superboss.main import create_app
+from superboss.modules.agent.models import AgentMemory, MemoryKind, MemoryStatus
 from superboss.modules.files.models import FileState
 from superboss.modules.users.models import User
 from tests.files.factory import add_folder, make_file
@@ -83,7 +84,7 @@ async def agent_client(db_session: AsyncSession, test_settings: Settings, active
                             }
                         ),
                     )
-                ]
+                ],
             ),
             LLMResult(content="请确认这张房租卡片。"),
         ]
@@ -143,6 +144,26 @@ def test_owner_chat_proposes_and_confirms_finance_card(agent_client) -> None:
 
 
 @pytest.mark.asyncio
+async def test_owner_recall_probe_returns_matching_memory(
+    agent_client, db_session: AsyncSession
+) -> None:
+    db_session.add(
+        AgentMemory(
+            kind=MemoryKind.FACT,
+            content="星野合作是合作类项目",
+            importance=4,
+            status=MemoryStatus.ACTIVE,
+        )
+    )
+    await db_session.commit()
+    client = agent_client
+    _login(client)
+    response = client.get("/api/v1/agent/recall", params={"q": "看一下星野项目"})
+    assert response.status_code == 200
+    assert any("星野合作" in item["content"] for item in response.json())
+
+
+@pytest.mark.asyncio
 async def test_staff_cannot_use_agent(agent_client, db_session: AsyncSession) -> None:
     client = agent_client
     db_session.add(local_user("staff-1", display_name="Staff"))
@@ -151,6 +172,8 @@ async def test_staff_cannot_use_agent(agent_client, db_session: AsyncSession) ->
     listed = client.get("/api/v1/agent/conversations")
     assert listed.status_code == 403
     assert listed.json()["error"]["code"] == "FORBIDDEN"
+    recall = client.get("/api/v1/agent/recall", params={"q": "星野项目"})
+    assert recall.status_code == 403
 
 
 def test_soul_defaults_and_preview(agent_client) -> None:

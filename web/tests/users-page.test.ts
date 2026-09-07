@@ -219,4 +219,25 @@ describe('OWNER local user management page', () => {
             screen.queryByRole('button', { name: /删除/i }),
         ).not.toBeInTheDocument()
     })
+
+    test('closes the disable dialog and shows an error when update fails', async () => {
+        mockedUsersApi.update.mockRejectedValue(new Error('nope'))
+        render(UsersPage, { global: { plugins: [ElementPlus] } })
+        await screen.findByText('existing-staff')
+        await fireEvent.click(screen.getByRole('button', { name: '···' }))
+        await fireEvent.click(
+            await screen.findByRole('menuitem', { name: '禁用' }),
+        )
+        await fireEvent.click(
+            await screen.findByRole('button', { name: '确定' }),
+        )
+        expect(
+            await screen.findByText('员工操作暂时无法完成，请稍后重试。'),
+        ).toBeInTheDocument()
+        await waitFor(() =>
+            expect(
+                screen.queryByRole('dialog', { name: '禁用' }),
+            ).not.toBeInTheDocument(),
+        )
+    })
 })

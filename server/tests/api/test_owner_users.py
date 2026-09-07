@@ -19,9 +19,7 @@ from tests.identity import LOCAL_TEST_PASSWORD, local_user
 
 
 @pytest_asyncio.fixture
-async def owner_users_client(
-    db_session: AsyncSession, test_settings: Settings, active_owner: User
-):
+async def owner_users_client(db_session: AsyncSession, test_settings: Settings, active_owner: User):
     del active_owner
     await db_session.commit()
     app = create_app(test_settings)
@@ -50,7 +48,9 @@ def error(response: httpx.Response, status: int, code: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_owner_creates_and_lists_staff_with_strict_contracts(owner_users_client: TestClient, db_session: AsyncSession) -> None:
+async def test_owner_creates_and_lists_staff_with_strict_contracts(
+    owner_users_client: TestClient, db_session: AsyncSession
+) -> None:
     login(owner_users_client)
     created = owner_users_client.post(
         "/api/v1/owner/users",
@@ -68,7 +68,11 @@ async def test_owner_creates_and_lists_staff_with_strict_contracts(owner_users_c
         "status",
         "last_login_at",
     }
-    assert body["user"]["username"] == "staff-acceptance" and body["user"]["role"] == "STAFF" and body["user"]["status"] == "ACTIVE"
+    assert (
+        body["user"]["username"] == "staff-acceptance"
+        and body["user"]["role"] == "STAFF"
+        and body["user"]["status"] == "ACTIVE"
+    )
     persisted = await db_session.scalar(select(User).where(User.username == "staff-acceptance"))
     assert persisted is not None
     assert verify_password(persisted.password_hash, body["temporary_password"]).valid
@@ -85,7 +89,9 @@ async def test_owner_creates_and_lists_staff_with_strict_contracts(owner_users_c
 
 
 @pytest.mark.asyncio
-async def test_user_routes_reject_staff_duplicate_role_and_owner_mutation(owner_users_client: TestClient, db_session: AsyncSession) -> None:
+async def test_user_routes_reject_staff_duplicate_role_and_owner_mutation(
+    owner_users_client: TestClient, db_session: AsyncSession
+) -> None:
     staff = local_user("staff-1", display_name="Staff")
     db_session.add(staff)
     await db_session.commit()
@@ -93,8 +99,20 @@ async def test_user_routes_reject_staff_duplicate_role_and_owner_mutation(owner_
     error(owner_users_client.get("/api/v1/owner/users"), 403, "OWNER_REQUIRED")
     owner_users_client.cookies.clear()
     login(owner_users_client)
-    error(owner_users_client.post("/api/v1/owner/users", json={"username": "staff-1", "display_name": "Again"}, headers=csrf(owner_users_client)), 409, "USERNAME_CONFLICT")
-    invalid = owner_users_client.post("/api/v1/owner/users", json={"username": "staff-2", "display_name": "Bad", "role": "OWNER"}, headers=csrf(owner_users_client))
+    error(
+        owner_users_client.post(
+            "/api/v1/owner/users",
+            json={"username": "staff-1", "display_name": "Again"},
+            headers=csrf(owner_users_client),
+        ),
+        409,
+        "USERNAME_CONFLICT",
+    )
+    invalid = owner_users_client.post(
+        "/api/v1/owner/users",
+        json={"username": "staff-2", "display_name": "Bad", "role": "OWNER"},
+        headers=csrf(owner_users_client),
+    )
     error(invalid, 422, "VALIDATION_ERROR")
     extra = owner_users_client.post(
         "/api/v1/owner/users",
@@ -104,7 +122,15 @@ async def test_user_routes_reject_staff_duplicate_role_and_owner_mutation(owner_
     error(extra, 422, "VALIDATION_ERROR")
     owner = await db_session.scalar(select(User).where(User.username == "owner"))
     assert owner is not None
-    error(owner_users_client.patch(f"/api/v1/owner/users/{owner.id}", json={"status": "DISABLED"}, headers=csrf(owner_users_client)), 409, "OWNER_PROTECTED")
+    error(
+        owner_users_client.patch(
+            f"/api/v1/owner/users/{owner.id}",
+            json={"status": "DISABLED"},
+            headers=csrf(owner_users_client),
+        ),
+        409,
+        "OWNER_PROTECTED",
+    )
 
 
 @pytest.mark.asyncio
@@ -119,38 +145,82 @@ async def test_staff_is_denied_from_every_owner_user_route_with_bounded_audit(
 
     routes = [
         ("get", "/api/v1/owner/users", None, "user.list", None),
-        ("post", "/api/v1/owner/users", {"username": "blocked-create", "display_name": "Blocked"}, "user.create", None),
-        ("patch", f"/api/v1/owner/users/{target.id}", {"display_name": "Blocked update"}, "user.update", target.id),
+        (
+            "post",
+            "/api/v1/owner/users",
+            {"username": "blocked-create", "display_name": "Blocked"},
+            "user.create",
+            None,
+        ),
+        (
+            "patch",
+            f"/api/v1/owner/users/{target.id}",
+            {"display_name": "Blocked update"},
+            "user.update",
+            target.id,
+        ),
     ]
     for method, path, body, action, object_id in routes:
         request_id = uuid4()
         request = getattr(owner_users_client, method)
         headers = {**csrf(owner_users_client), "X-Request-ID": str(request_id)}
-        response = request(path, headers=headers) if body is None else request(path, json=body, headers=headers)
+        response = (
+            request(path, headers=headers)
+            if body is None
+            else request(path, json=body, headers=headers)
+        )
         error(response, 403, "OWNER_REQUIRED")
         event = await db_session.scalar(select(AuditLog).where(AuditLog.request_id == request_id))
         assert event is not None
         assert (event.action, event.outcome, event.object_id, event.metadata_json) == (
-            action, "DENIED", object_id, {"actor_role": "STAFF", "reason": "OWNER_REQUIRED"}
+            action,
+            "DENIED",
+            object_id,
+            {"actor_role": "STAFF", "reason": "OWNER_REQUIRED"},
         )
         assert "staff-1" not in str(event.metadata_json)
 
 
 @pytest.mark.asyncio
-async def test_disable_revokes_sessions(owner_users_client: TestClient, db_session: AsyncSession) -> None:
+async def test_disable_revokes_sessions(
+    owner_users_client: TestClient, db_session: AsyncSession
+) -> None:
     staff = local_user("staff-1", display_name="Staff")
     db_session.add(staff)
     await db_session.commit()
     login(owner_users_client)
-    disabled = owner_users_client.patch(f"/api/v1/owner/users/{staff.id}", json={"status": "DISABLED"}, headers=csrf(owner_users_client))
+    disabled = owner_users_client.patch(
+        f"/api/v1/owner/users/{staff.id}",
+        json={"status": "DISABLED"},
+        headers=csrf(owner_users_client),
+    )
     assert disabled.status_code == 200
-    assert all(item.revoked_at is not None for item in (await db_session.scalars(select(AuthSession).where(AuthSession.user_id == staff.id))).all())
+    assert all(
+        item.revoked_at is not None
+        for item in (
+            await db_session.scalars(select(AuthSession).where(AuthSession.user_id == staff.id))
+        ).all()
+    )
 
 
-def test_owner_user_writes_retain_browser_csrf_and_anonymous_401(owner_users_client: TestClient) -> None:
-    error(owner_users_client.post("/api/v1/owner/users", json={"username": "new", "display_name": "New"}), 401, "AUTHENTICATION_REQUIRED")
+def test_owner_user_writes_retain_browser_csrf_and_anonymous_401(
+    owner_users_client: TestClient,
+) -> None:
+    error(
+        owner_users_client.post(
+            "/api/v1/owner/users", json={"username": "new", "display_name": "New"}
+        ),
+        401,
+        "AUTHENTICATION_REQUIRED",
+    )
     login(owner_users_client)
-    error(owner_users_client.post("/api/v1/owner/users", json={"username": "new", "display_name": "New"}), 403, "CSRF_VALIDATION_FAILED")
+    error(
+        owner_users_client.post(
+            "/api/v1/owner/users", json={"username": "new", "display_name": "New"}
+        ),
+        403,
+        "CSRF_VALIDATION_FAILED",
+    )
 
 
 @pytest.mark.asyncio

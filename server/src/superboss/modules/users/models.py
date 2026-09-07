@@ -38,12 +38,8 @@ class User(Base):
     __table_args__ = (
         CheckConstraint("role IN ('OWNER', 'MANAGER', 'STAFF')", name="ck_users_role"),
         CheckConstraint("status IN ('ACTIVE', 'DISABLED')", name="ck_users_status"),
-        CheckConstraint(
-            "username ~ '^[a-z][a-z0-9._-]{2,31}$'", name="ck_users_username"
-        ),
-        CheckConstraint(
-            r"password_hash ~ '^\$argon2id\$'", name="ck_users_password_hash"
-        ),
+        CheckConstraint("username ~ '^[a-z][a-z0-9._-]{2,31}$'", name="ck_users_username"),
+        CheckConstraint(r"password_hash ~ '^\$argon2id\$'", name="ck_users_password_hash"),
         CheckConstraint(
             "failed_login_count >= 0 AND failed_login_count <= 32767",
             name="ck_users_failed_login_count",

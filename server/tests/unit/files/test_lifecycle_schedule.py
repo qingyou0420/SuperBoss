@@ -64,9 +64,7 @@ async def test_execution_layer_awaits_stale_recovery(
         ) -> None:
             seen.append((received_factory, received_storage, received_dispatcher))
 
-        async def recover_stale_uploads(
-            self, *, now: object = None, limit: int = 100
-        ) -> int:
+        async def recover_stale_uploads(self, *, now: object = None, limit: int = 100) -> int:
             del now, limit
             return 13
 

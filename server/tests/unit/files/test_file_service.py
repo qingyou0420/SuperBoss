@@ -96,6 +96,39 @@ async def test_same_idempotency_key_reuses_one_active_multipart(db_session, acti
 
 
 @pytest.mark.asyncio
+async def test_start_upload_reuses_winner_after_idempotency_integrity_error(
+    db_session, active_owner
+) -> None:
+    """A lookup miss plus unique conflict must reuse the committed row, not raise."""
+    from superboss.modules.files.service import FileService
+
+    storage = InMemoryObjectStorage()
+    actor = Actor(active_owner.id, Role.OWNER)
+    folder = await add_folder(db_session, active_owner.id)
+    command = _start(folder.id)
+    service = FileService(db_session, storage)
+    first = await service.start_upload(actor, command, "race")
+    original = db_session.scalar
+    skipped = False
+
+    async def scalar(statement, **kwargs):
+        nonlocal skipped
+        compiled = str(statement)
+        if not skipped and "idempotency_key" in compiled:
+            skipped = True
+            return None
+        return await original(statement, **kwargs)
+
+    db_session.scalar = scalar  # type: ignore[method-assign]
+    try:
+        second = await service.start_upload(actor, command, "race")
+    finally:
+        db_session.scalar = original  # type: ignore[method-assign]
+    assert second.id == first.id
+    assert len(storage.active) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "change",
     [

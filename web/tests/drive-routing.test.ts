@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/vue'
+import { fireEvent, render, screen, waitFor } from '@testing-library/vue'
 import ElementPlus from 'element-plus'
 import { createPinia, setActivePinia } from 'pinia'
 import { defineComponent } from 'vue'
@@ -34,6 +34,9 @@ const mocks = vi.hoisted(() => {
             remove: vi.fn(),
         },
         projectsApi: { list: vi.fn() },
+        upload: vi.fn(),
+        clearTray: vi.fn(),
+        tray: { value: [] as { name: string; status: string }[] },
     }
 })
 
@@ -43,9 +46,40 @@ vi.mock('../src/api/files', () => ({
     filesApi: mocks.filesApi,
 }))
 vi.mock('../src/api/projects', () => ({ projectsApi: mocks.projectsApi }))
+vi.mock('../src/components/files/useMultipartUpload', async () => {
+    const { ref } = await import('vue')
+    const tray = ref<{ name: string; status: string }[]>([])
+    mocks.tray = tray
+    return {
+        useMultipartUpload: () => ({
+            tray,
+            upload: mocks.upload,
+            clearTray: mocks.clearTray,
+        }),
+    }
+})
+
+async function chooseHeaderFile(name = '上传.pdf'): Promise<void> {
+    const input = document.querySelector('#drive-upload')
+    expect(input).toBeInstanceOf(HTMLInputElement)
+    const file = new File(['x'], name, { type: 'application/pdf' })
+    Object.defineProperty(input, 'files', {
+        configurable: true,
+        value: [file],
+    })
+    await fireEvent.change(input as HTMLInputElement)
+}
 
 beforeEach(() => {
     vi.clearAllMocks()
+    mocks.tray.value = []
+    mocks.upload.mockImplementation(async (file: File) => {
+        mocks.tray.value = [{ name: file.name, status: '扫描中' }]
+        return { file_id: FILE_ID, state: 'QUARANTINED' }
+    })
+    mocks.clearTray.mockImplementation(() => {
+        mocks.tray.value = []
+    })
     mocks.filesApi.download.mockReset()
     mocks.filesApi.listFolders.mockResolvedValue([
         {
@@ -131,26 +165,21 @@ describe('Task13 OWNER navigation and Drive integration', () => {
     test('Drive displays scanning after completion and only the current result', async () => {
         const module = await import(/* @vite-ignore */ DRIVE_PATH)
         mocks.filesApi.listFiles.mockResolvedValue([])
-        const MultipartStub = defineComponent({
-            emits: ['completed'],
-            props: ['allowedObjectOrigin', 'folderId'],
-            template:
-                "<div><span data-testid=\"upload-boundary\">{{ allowedObjectOrigin }}|{{ folderId }}</span><button @click=\"$emit('completed', { file_id: 'file-1', state: 'QUARANTINED' })\">完成上传</button></div>",
-        })
         render(module.default, {
             props: { allowedObjectOrigin: 'https://objects.example' },
-            global: {
-                plugins: [ElementPlus],
-                stubs: { MultipartUploader: MultipartStub },
-            },
+            global: { plugins: [ElementPlus] },
         })
 
         expect(
             screen.getByRole('heading', { name: '网盘' }),
         ).toBeInTheDocument()
-        expect(await screen.findByTestId('upload-boundary')).toHaveTextContent(
-            `https://objects.example|${PROJECT_ID}`,
-        )
+        expect(
+            await screen.findByRole('button', { name: '上传' }),
+        ).toBeInTheDocument()
+        expect(screen.getAllByRole('button', { name: '上传' })).toHaveLength(1)
+        expect(
+            document.querySelector('.page-header__actions [role="status"]'),
+        ).not.toBeInTheDocument()
         expect(screen.queryByText(/历史文件|全部文件/)).not.toBeInTheDocument()
         mocks.filesApi.listFiles.mockResolvedValue([
             {
@@ -165,8 +194,13 @@ describe('Task13 OWNER navigation and Drive integration', () => {
                 uploader_name: '',
             },
         ])
-        await fireEvent.click(screen.getByRole('button', { name: '完成上传' }))
+        await chooseHeaderFile()
         expect(await screen.findByText('处理中')).toBeInTheDocument()
+        expect(mocks.upload).toHaveBeenCalled()
+        expect(mocks.clearTray).toHaveBeenCalled()
+        expect(
+            document.querySelector('.page-header__actions [role="status"]'),
+        ).not.toBeInTheDocument()
         expect(mocks.filesApi.listFiles.mock.calls.length).toBeGreaterThan(1)
     })
 
@@ -188,22 +222,12 @@ describe('Task13 OWNER navigation and Drive integration', () => {
         mocks.filesApi.download.mockResolvedValue(
             'https://objects.example/download/current?signature=secret',
         )
-        const MultipartStub = defineComponent({
-            emits: ['completed'],
-            template:
-                "<button @click=\"$emit('completed', { file_id: '" +
-                FILE_ID +
-                "', state: 'CLEAN' })\">完成上传</button>",
-        })
         render(module.default, {
             props: { allowedObjectOrigin: 'https://objects.example' },
-            global: {
-                plugins: [ElementPlus],
-                stubs: { MultipartUploader: MultipartStub },
-            },
+            global: { plugins: [ElementPlus] },
         })
-        await screen.findByRole('button', { name: '完成上传' })
-        await fireEvent.click(screen.getByRole('button', { name: '完成上传' }))
+        await screen.findByRole('button', { name: '上传' })
+        await chooseHeaderFile()
         expect(await screen.findByText('上传.pdf')).toBeInTheDocument()
         await fireEvent.click(screen.getByRole('button', { name: '···' }))
         await fireEvent.click(
@@ -232,10 +256,7 @@ describe('Task13 OWNER navigation and Drive integration', () => {
             ])
             render(module.default, {
                 props: { allowedObjectOrigin: 'https://objects.example' },
-                global: {
-                    plugins: [ElementPlus],
-                    stubs: { MultipartUploader: true },
-                },
+                global: { plugins: [ElementPlus] },
             })
             expect(await screen.findByText('风险.pdf')).toBeInTheDocument()
             expect(screen.getByText('未通过')).toBeInTheDocument()
@@ -297,10 +318,7 @@ describe('Task13 OWNER navigation and Drive integration', () => {
         const module = await import(/* @vite-ignore */ DRIVE_PATH)
         render(module.default, {
             props: { allowedObjectOrigin: 'https://objects.example' },
-            global: {
-                plugins: [pinia, ElementPlus],
-                stubs: { MultipartUploader: true },
-            },
+            global: { plugins: [pinia, ElementPlus] },
         })
 
         expect(await screen.findByText('方案.pdf')).toBeInTheDocument()
@@ -373,10 +391,7 @@ describe('Task13 OWNER navigation and Drive integration', () => {
         const module = await import(/* @vite-ignore */ DRIVE_PATH)
         render(module.default, {
             props: { allowedObjectOrigin: 'https://objects.example' },
-            global: {
-                plugins: [pinia, ElementPlus],
-                stubs: { MultipartUploader: true },
-            },
+            global: { plugins: [pinia, ElementPlus] },
         })
         expect(await screen.findByText('方案.pdf')).toBeInTheDocument()
         await fireEvent.click(screen.getAllByRole('button', { name: '···' })[1])
@@ -386,6 +401,48 @@ describe('Task13 OWNER navigation and Drive integration', () => {
         expect(mocks.filesApi.remove).not.toHaveBeenCalled()
         await fireEvent.click(screen.getByRole('button', { name: '确定' }))
         expect(mocks.filesApi.remove).toHaveBeenCalledWith(FILE_ID)
+    })
+
+    test('closes the delete dialog and shows an error when remove fails', async () => {
+        const pinia = createPinia()
+        setActivePinia(pinia)
+        useAuthStore().user = {
+            username: 'owner',
+            display_name: 'Owner',
+            role: 'OWNER',
+            must_change_password: false,
+        }
+        mocks.filesApi.listFiles.mockResolvedValue([
+            {
+                id: FILE_ID,
+                folder_id: PROJECT_ID,
+                project_id: null,
+                filename: '方案.pdf',
+                size_bytes: 12,
+                content_type: 'application/pdf',
+                state: 'CLEAN',
+                created_at: '2026-09-05T00:00:00Z',
+                uploader_name: '',
+            },
+        ])
+        mocks.filesApi.remove.mockRejectedValue(new Error('nope'))
+        const module = await import(/* @vite-ignore */ DRIVE_PATH)
+        render(module.default, {
+            props: { allowedObjectOrigin: 'https://objects.example' },
+            global: { plugins: [pinia, ElementPlus] },
+        })
+        expect(await screen.findByText('方案.pdf')).toBeInTheDocument()
+        await fireEvent.click(screen.getAllByRole('button', { name: '···' })[1])
+        await fireEvent.click(
+            await screen.findByRole('menuitem', { name: '删除' }),
+        )
+        await fireEvent.click(screen.getByRole('button', { name: '确定' }))
+        expect(await screen.findByText('无法删除文件。')).toBeInTheDocument()
+        await waitFor(() =>
+            expect(
+                screen.queryByRole('dialog', { name: '删除' }),
+            ).not.toBeInTheDocument(),
+        )
     })
 
     test('STAFF can download but cannot manage folders or files', async () => {
@@ -412,10 +469,7 @@ describe('Task13 OWNER navigation and Drive integration', () => {
         const module = await import(/* @vite-ignore */ DRIVE_PATH)
         render(module.default, {
             props: { allowedObjectOrigin: 'https://objects.example' },
-            global: {
-                plugins: [pinia, ElementPlus],
-                stubs: { MultipartUploader: true },
-            },
+            global: { plugins: [pinia, ElementPlus] },
         })
 
         expect(await screen.findByText('方案.pdf')).toBeInTheDocument()
@@ -467,10 +521,7 @@ describe('Task13 OWNER navigation and Drive integration', () => {
             }
             render(module.default, {
                 props: { allowedObjectOrigin: 'https://objects.example' },
-                global: {
-                    plugins: [ElementPlus],
-                    stubs: { MultipartUploader: true },
-                },
+                global: { plugins: [ElementPlus] },
             })
             expect(await screen.findByText('方案.pdf')).toBeInTheDocument()
             await fireEvent.click(screen.getByRole('button', { name: '···' }))

@@ -745,6 +745,16 @@ class AgentService:
         searched: list[AgentMemory] = []
         needles = recall_needles(query)
         if needles:
+            total_active = int(
+                (
+                    await self.session.scalar(
+                        select(func.count())
+                        .select_from(AgentMemory)
+                        .where(AgentMemory.status == MemoryStatus.ACTIVE)
+                    )
+                )
+                or 0
+            )
             scored: list[tuple[int, str]] = []
             for term in needles:
                 hits = await self.session.scalar(
@@ -756,13 +766,17 @@ class AgentService:
                     )
                 )
                 scored.append((int(hits or 0), term))
-            scored.sort(key=lambda item: (-item[0], -len(item[1])))
-            ranked = [term for hits, term in scored if hits > 0][:8]
+            positive = [(hits, term) for hits, term in scored if hits > 0]
+            threshold = total_active * 0.3
+            specific = [(hits, term) for hits, term in positive if hits <= threshold]
+            pool = specific if specific else positive
+            pool.sort(key=lambda item: (item[0], -len(item[1])))
+            ranked = [term for _hits, term in pool][:8]
             if not ranked:
                 ranked = [term for term in needles if term not in _STOPWORDS][:8]
             matches = [AgentMemory.content.ilike(f"%{term}%") for term in ranked]
             if matches:
-                searched = list(
+                candidates = list(
                     (
                         await self.session.scalars(
                             select(AgentMemory)
@@ -770,11 +784,21 @@ class AgentService:
                                 AgentMemory.status == MemoryStatus.ACTIVE,
                                 or_(*matches),
                             )
-                            .order_by(AgentMemory.importance.desc())
-                            .limit(8)
+                            .limit(200)
                         )
                     ).all()
                 )
+                hit_by_term = {term: hits for hits, term in pool if term in set(ranked)}
+                weighted: list[tuple[float, int, AgentMemory]] = []
+                for memory in candidates:
+                    content = (memory.content or "").casefold()
+                    matched = [term for term in ranked if term.casefold() in content]
+                    inverse = sum(
+                        1 / hit_by_term[term] for term in matched if hit_by_term.get(term)
+                    )
+                    weighted.append((len(matched) + inverse, memory.importance, memory))
+                weighted.sort(key=lambda item: (-item[0], -item[1]))
+                searched = [item[2] for item in weighted[:8]]
         seen: set[UUID] = set()
         items: list[dict[str, str]] = []
         for memory in [*pinned, *digest, *searched]:

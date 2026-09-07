@@ -211,9 +211,7 @@ async def list_files(
     uploader_ids = {item.uploader_id for item in files}
     names: dict[UUID, str] = {}
     if uploader_ids:
-        users = (
-            await service.session.scalars(select(User).where(User.id.in_(uploader_ids)))
-        ).all()
+        users = (await service.session.scalars(select(User).where(User.id.in_(uploader_ids)))).all()
         names = {user.id: user.display_name or user.username for user in users}
     return [
         FileRead.model_validate(item).model_copy(

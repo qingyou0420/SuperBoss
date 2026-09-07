@@ -72,9 +72,7 @@ async def test_records_denied_staff_project_update_with_response_request_id(
     assert response.status_code == 403
     events = list(
         (
-            await db_session.scalars(
-                select(AuditLog).where(AuditLog.action == "project.update")
-            )
+            await db_session.scalars(select(AuditLog).where(AuditLog.action == "project.update"))
         ).all()
     )
     assert len(events) == 1
@@ -189,11 +187,7 @@ async def test_records_successful_project_create_list_and_read(
     assert read.status_code == 200
 
     events = list(
-        (
-            await db_session.scalars(
-                select(AuditLog).where(AuditLog.action.like("project.%"))
-            )
-        ).all()
+        (await db_session.scalars(select(AuditLog).where(AuditLog.action.like("project.%")))).all()
     )
     by_action = {event.action: event for event in events}
     assert set(by_action) == {"project.create"}

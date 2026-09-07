@@ -26,7 +26,9 @@ async def test_record_redacts_forbidden_metadata_keys_at_every_depth(
     db_session.add(project)
     await db_session.commit()
     assert db_session.bind is not None
-    event_id = await AuditService(async_sessionmaker(db_session.bind, expire_on_commit=False)).record(
+    event_id = await AuditService(
+        async_sessionmaker(db_session.bind, expire_on_commit=False)
+    ).record(
         AuditEventInput(
             actor=Actor(actor_id, Role.OWNER),
             action="project.read",
@@ -91,6 +93,59 @@ async def test_record_reuses_identical_event_key_without_second_audit_row(
     assert first == second and [row.id for row in rows] == [first]
 
 
+@pytest.mark.asyncio
+async def test_record_reuses_competitor_row_after_savepoint_conflict(
+    db_session: AsyncSession,
+) -> None:
+    """A concurrent insert of the same event_key must reuse the winner, not abort the session."""
+    from unittest.mock import patch
+
+    from superboss.modules.audit.service import write_audit
+
+    actor = Actor(uuid4(), Role.OWNER)
+    event_key = uuid4()
+    event = AuditEventInput(
+        actor=actor,
+        action="file.upload.complete",
+        object_type="file",
+        object_id=uuid4(),
+        outcome="SUCCESS",
+        request_id=uuid4(),
+        metadata={"state": "QUARANTINED", "size_bytes": 1},
+        event_key=event_key,
+    )
+    assert db_session.bind is not None
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    service = AuditService(factory)
+    first = await service.record(event)
+    calls = {"n": 0}
+
+    async def miss_then_real(session: AsyncSession, **kwargs: object) -> object:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            session.add(
+                AuditLog(
+                    actor_kind="user",
+                    actor_id=kwargs["actor_id"],
+                    action=str(kwargs["action"]),
+                    object_type=str(kwargs["object_type"]),
+                    object_id=kwargs["object_id"],
+                    project_id=kwargs["project_id"],
+                    outcome=str(kwargs["outcome"]),
+                    metadata_json=kwargs["metadata"],
+                    request_id=kwargs["request_id"],
+                    event_key=kwargs["event_key"],
+                )
+            )
+            await session.flush()
+        return await write_audit(session, **kwargs)
+
+    with patch("superboss.modules.audit.service.write_audit", miss_then_real):
+        second = await service.record(event)
+    rows = list(await db_session.scalars(select(AuditLog).where(AuditLog.event_key == event_key)))
+    assert first == second and [row.id for row in rows] == [first]
+
+
 def test_audit_metadata_rejects_non_json_objects() -> None:
     """Coercing arbitrary objects can persist opaque, non-portable audit metadata."""
     with pytest.raises(ValidationError, match="invalid audit metadata"):
@@ -149,7 +204,8 @@ def test_audit_metadata_rejects_cycles_and_excessive_depth(metadata: dict[str, o
 
 
 @pytest.mark.parametrize(
-    "key", ["access_token", "refresh_token", "authorization", "cookie", "file_content", "model_input"]
+    "key",
+    ["access_token", "refresh_token", "authorization", "cookie", "file_content", "model_input"],
 )
 @pytest.mark.parametrize("invalid", [object(), float("nan"), float("inf")])
 def test_forbidden_metadata_values_are_still_validated(key: str, invalid: object) -> None:
@@ -167,7 +223,8 @@ def test_forbidden_metadata_values_are_still_validated(key: str, invalid: object
 
 
 @pytest.mark.parametrize(
-    "key", ["access_token", "refresh_token", "authorization", "cookie", "file_content", "model_input"]
+    "key",
+    ["access_token", "refresh_token", "authorization", "cookie", "file_content", "model_input"],
 )
 def test_forbidden_metadata_cycles_are_still_rejected(key: str) -> None:
     """A sensitive key cannot hide a self-referential structure from validation."""
@@ -185,7 +242,9 @@ def test_forbidden_metadata_cycles_are_still_rejected(key: str) -> None:
 
 
 @pytest.mark.parametrize("metadata", [{"n": 10**100000}, {"text": "x" * (64 * 1024)}])
-def test_audit_metadata_rejects_values_that_exceed_json_size_budget(metadata: dict[str, object]) -> None:
+def test_audit_metadata_rejects_values_that_exceed_json_size_budget(
+    metadata: dict[str, object],
+) -> None:
     """Oversized accepted values would otherwise fail later in the database JSON serializer."""
     with pytest.raises(ValidationError, match="invalid audit metadata"):
         AuditEventInput(

@@ -11,7 +11,19 @@ from superboss.main import create_app
 PUBLIC_S3_ORIGIN = "https://objects.nightforest.com"
 
 
-@pytest.mark.parametrize("secret", ["", "x" * 31, "x" * 32, "password" * 4, "CHANGE_ME_" * 4, "abcdefgh" * 4, "12345678" * 4, "0123456789abcdef" * 2])
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "",
+        "x" * 31,
+        "x" * 32,
+        "password" * 4,
+        "CHANGE_ME_" * 4,
+        "abcdefgh" * 4,
+        "12345678" * 4,
+        "0123456789abcdef" * 2,
+    ],
+)
 def test_staging_and_production_reject_weak_jwt_keys(secret: str) -> None:
     """Removing startup validation would make weak signing keys boot successfully."""
     for environment in ("staging", "production"):

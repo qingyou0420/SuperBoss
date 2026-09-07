@@ -11,9 +11,7 @@ def test_settings_reads_environment_from_superboss_prefix(
 ) -> None:
     monkeypatch.setenv("SUPERBOSS_ENVIRONMENT", "production")
     monkeypatch.setenv("SUPERBOSS_JWT_SECRET", VALID_DEPLOYMENT_JWT)
-    monkeypatch.setenv(
-        "SUPERBOSS_S3_PUBLIC_ENDPOINT_URL", "https://objects.nightforest.com"
-    )
+    monkeypatch.setenv("SUPERBOSS_S3_PUBLIC_ENDPOINT_URL", "https://objects.nightforest.com")
 
     assert Settings().environment == "production"
 

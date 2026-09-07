@@ -85,16 +85,8 @@ def test_seed_empty_database_and_repeat_are_idempotent(postgres_database: str) -
     owner, staff = "acceptance-owner", "acceptance-staff"
     _cleanup(postgres_database, [owner, staff])
     try:
-        first = _run(
-            module.seed(
-                postgres_database, owner, OWNER_PASSWORD, staff, STAFF_PASSWORD
-            )
-        )
-        second = _run(
-            module.seed(
-                postgres_database, owner, OWNER_PASSWORD, staff, STAFF_PASSWORD
-            )
-        )
+        first = _run(module.seed(postgres_database, owner, OWNER_PASSWORD, staff, STAFF_PASSWORD))
+        second = _run(module.seed(postgres_database, owner, OWNER_PASSWORD, staff, STAFF_PASSWORD))
 
         assert first == second
         assert set(first.__dict__) == {
@@ -137,18 +129,17 @@ def test_seed_rolls_back_users_on_project_conflict(postgres_database: str) -> No
     )
     try:
         with pytest.raises(module.SeedRefusedError):
+            _run(module.seed(postgres_database, owner, OWNER_PASSWORD, staff, STAFF_PASSWORD))
+        assert (
             _run(
-                module.seed(
-                    postgres_database, owner, OWNER_PASSWORD, staff, STAFF_PASSWORD
+                _fetch(
+                    postgres_database,
+                    "SELECT username FROM users WHERE username = ANY($1::text[])",
+                    [owner, staff],
                 )
             )
-        assert _run(
-            _fetch(
-                postgres_database,
-                "SELECT username FROM users WHERE username = ANY($1::text[])",
-                [owner, staff],
-            )
-        ) == []
+            == []
+        )
     finally:
         _run(
             _execute(
@@ -178,6 +169,33 @@ def test_seed_refuses_production_before_reading_passwords(
     with pytest.raises(module.SeedRefusedError):
         _run(module.run_from_environment(False, forbidden_reader))
     assert calls == 0
+
+
+def test_seed_reads_passwords_from_environment(
+    postgres_database: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module()
+    owner, staff = "env-owner", "env-staff"
+    monkeypatch.setenv("SUPERBOSS_DATABASE_URL", postgres_database)
+    monkeypatch.setenv("SUPERBOSS_ENVIRONMENT", "development")
+    monkeypatch.setenv("SUPERBOSS_OWNER_USERNAME", owner)
+    monkeypatch.setenv("SUPERBOSS_ACCEPTANCE_STAFF_USERNAME", staff)
+    monkeypatch.setenv("SUPERBOSS_OWNER_PASSWORD", OWNER_PASSWORD)
+    monkeypatch.setenv("SUPERBOSS_ACCEPTANCE_STAFF_PASSWORD", STAFF_PASSWORD)
+    _cleanup(postgres_database, [owner, staff])
+    calls = 0
+
+    def forbidden_reader(_prompt: str) -> str:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("environment passwords must not prompt")
+
+    try:
+        result = _run(module.run_from_environment(False, forbidden_reader))
+        assert calls == 0
+        assert result.owner_id and result.staff_id
+    finally:
+        _cleanup(postgres_database, [owner, staff])
 
 
 def test_seed_preserves_existing_owner_and_rejects_username_mismatch(
@@ -244,11 +262,7 @@ def test_seed_reuses_matching_owner_without_modifying_credentials(
         )
     )
     try:
-        _run(
-            module.seed(
-                postgres_database, owner, OWNER_PASSWORD, staff, STAFF_PASSWORD
-            )
-        )
+        _run(module.seed(postgres_database, owner, OWNER_PASSWORD, staff, STAFF_PASSWORD))
         row = _run(
             _fetch(
                 postgres_database,
@@ -272,9 +286,7 @@ def test_cli_has_no_password_arguments_or_password_environment_inputs(
 ) -> None:
     module = _module()
     parser = module.build_parser()
-    options = {
-        option for action in parser._actions for option in action.option_strings
-    }
+    options = {option for action in parser._actions for option in action.option_strings}
     assert "--password" not in options and "--password-file" not in options
     monkeypatch.setenv("SUPERBOSS_OWNER_PASSWORD", "forbidden environment secret")
     monkeypatch.setenv("SUPERBOSS_ACCEPTANCE_STAFF_PASSWORD", "forbidden staff secret")

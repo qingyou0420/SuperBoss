@@ -112,3 +112,31 @@ async def test_recall_keeps_late_keywords_in_long_sentences(
     assert any("星野合作" in item["content"] for item in brief)
     status = await service.recall("帮我看看星野合作项目这个月的交付节点怎么样了")
     assert any("星野合作" in item["content"] for item in status)
+
+
+@pytest.mark.asyncio
+async def test_recall_ranks_rare_names_above_generic_meeting_noise(
+    db_session: AsyncSession, active_owner: User
+) -> None:
+    for week in range(1, 61):
+        db_session.add(
+            AgentMemory(
+                kind=MemoryKind.FACT,
+                content=f"第 {week} 周项目例会：交付节点、财务成本收入汇总要发给老板",
+                importance=4,
+                status=MemoryStatus.ACTIVE,
+            )
+        )
+    db_session.add(
+        AgentMemory(
+            kind=MemoryKind.FACT,
+            content="星野合作是合作类项目",
+            importance=3,
+            status=MemoryStatus.ACTIVE,
+        )
+    )
+    await db_session.flush()
+    service = AgentService(db_session, Actor(active_owner.id, Role.OWNER))
+    recalled = await service.recall("把星野合作项目的交付节点和财务成本收入汇总一下发给对接人")
+    assert recalled
+    assert "星野合作" in recalled[0]["content"]

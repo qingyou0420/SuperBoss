@@ -59,6 +59,7 @@ def postgres_database() -> Iterator[str]:
 @pytest_asyncio.fixture
 async def db_session(postgres_database: str) -> AsyncIterator[AsyncSession]:
     engine = create_async_engine(postgres_database)
+
     async def clear() -> None:
         async with engine.begin() as connection:
             await connection.execute(delete(AuditLog))

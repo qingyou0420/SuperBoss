@@ -106,9 +106,7 @@ class ProjectService:
     ) -> Project:
         await self._require_owner(actor, "project.create", request_id)
         if await self._name_taken(command.name):
-            raise ConflictError(
-                "PROJECT_NAME_CONFLICT", "A project with this name already exists"
-            )
+            raise ConflictError("PROJECT_NAME_CONFLICT", "A project with this name already exists")
         project = Project(
             name=command.name,
             description=command.description,

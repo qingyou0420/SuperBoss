@@ -100,6 +100,7 @@ async function toggle(user: OwnerUser): Promise<void> {
         replace(await usersApi.update(user.id, { status }))
         pendingDisable.value = undefined
     } catch (error) {
+        pendingDisable.value = undefined
         errorMessage.value = userErrorMessage(error)
     }
 }

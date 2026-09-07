@@ -189,11 +189,7 @@ class AuthService:
         ):
             raise InvalidSession("Access token is invalid")
         user = await self.session.get(User, user_id)
-        if (
-            user is None
-            or user.status != UserStatus.ACTIVE
-            or user.role.value != token_role
-        ):
+        if user is None or user.status != UserStatus.ACTIVE or user.role.value != token_role:
             raise InvalidSession("Access token is invalid")
         return user
 

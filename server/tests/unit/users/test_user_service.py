@@ -32,7 +32,9 @@ def staff_actor(user: User) -> Actor:
 async def test_create_always_makes_active_staff(
     db_session: AsyncSession, active_owner: User
 ) -> None:
-    service = OwnerUserService(db_session, AuditService(async_sessionmaker(db_session.bind, expire_on_commit=False)))
+    service = OwnerUserService(
+        db_session, AuditService(async_sessionmaker(db_session.bind, expire_on_commit=False))
+    )
 
     created = await service.create_staff(
         owner_actor(active_owner),
@@ -63,7 +65,9 @@ async def test_staff_cannot_use_any_owner_user_service_operation(
     with pytest.raises(ForbiddenError):
         await service.list_users(staff_actor(staff), uuid4())
     with pytest.raises(ForbiddenError):
-        await service.update_staff(staff_actor(staff), staff.id, StaffUpdate(display_name="x"), uuid4())
+        await service.update_staff(
+            staff_actor(staff), staff.id, StaffUpdate(display_name="x"), uuid4()
+        )
 
 
 @pytest.mark.asyncio
@@ -74,7 +78,9 @@ async def test_owner_target_is_rejected_by_every_staff_mutation(
     owner = owner_actor(active_owner)
 
     with pytest.raises(ConflictError):
-        await service.update_staff(owner, active_owner.id, StaffUpdate(status=UserStatus.DISABLED), uuid4())
+        await service.update_staff(
+            owner, active_owner.id, StaffUpdate(status=UserStatus.DISABLED), uuid4()
+        )
 
 
 @pytest.mark.asyncio
@@ -85,24 +91,47 @@ async def test_disabling_staff_revokes_every_browser_session_in_same_business_tr
     db_session.add(staff)
     await db_session.flush()
     now = utcnow()
-    db_session.add_all([
-        AuthSession(user_id=staff.id, access_jti="a" * 32, refresh_token_hash="b" * 64, access_expires_at=now + timedelta(hours=1), refresh_expires_at=now + timedelta(days=1)),
-        AuthSession(user_id=staff.id, access_jti="c" * 32, refresh_token_hash="d" * 64, access_expires_at=now + timedelta(hours=1), refresh_expires_at=now + timedelta(days=1)),
-    ])
+    db_session.add_all(
+        [
+            AuthSession(
+                user_id=staff.id,
+                access_jti="a" * 32,
+                refresh_token_hash="b" * 64,
+                access_expires_at=now + timedelta(hours=1),
+                refresh_expires_at=now + timedelta(days=1),
+            ),
+            AuthSession(
+                user_id=staff.id,
+                access_jti="c" * 32,
+                refresh_token_hash="d" * 64,
+                access_expires_at=now + timedelta(hours=1),
+                refresh_expires_at=now + timedelta(days=1),
+            ),
+        ]
+    )
     await db_session.flush()
     service = OwnerUserService(db_session, None)
 
-    await service.update_staff(owner_actor(active_owner), staff.id, StaffUpdate(status=UserStatus.DISABLED), uuid4())
+    await service.update_staff(
+        owner_actor(active_owner), staff.id, StaffUpdate(status=UserStatus.DISABLED), uuid4()
+    )
 
     assert staff.status == UserStatus.DISABLED
-    assert all(item.revoked_at is not None for item in (await db_session.scalars(select(AuthSession).where(AuthSession.user_id == staff.id))).all())
+    assert all(
+        item.revoked_at is not None
+        for item in (
+            await db_session.scalars(select(AuthSession).where(AuthSession.user_id == staff.id))
+        ).all()
+    )
 
 
 @pytest.mark.asyncio
 async def test_denied_events_are_bounded_and_success_audit_is_only_written_after_commit(
     db_session: AsyncSession, active_owner: User
 ) -> None:
-    service = OwnerUserService(db_session, AuditService(async_sessionmaker(db_session.bind, expire_on_commit=False)))
+    service = OwnerUserService(
+        db_session, AuditService(async_sessionmaker(db_session.bind, expire_on_commit=False))
+    )
     request_id = uuid4()
     with pytest.raises(ForbiddenError):
         await service.list_users(Actor(uuid4(), Role.STAFF), request_id)
@@ -110,8 +139,14 @@ async def test_denied_events_are_bounded_and_success_audit_is_only_written_after
     assert denied is not None and denied.outcome == "DENIED"
     assert denied.metadata_json == {"actor_role": "STAFF", "reason": "OWNER_REQUIRED"}
 
-    created = await service.create_staff(owner_actor(active_owner), StaffCreate(username="staff-audit", display_name="Audit"), uuid4())
-    await service.commit_and_record_success(owner_actor(active_owner), "user.create", uuid4(), created.user.id)
+    created = await service.create_staff(
+        owner_actor(active_owner),
+        StaffCreate(username="staff-audit", display_name="Audit"),
+        uuid4(),
+    )
+    await service.commit_and_record_success(
+        owner_actor(active_owner), "user.create", uuid4(), created.user.id
+    )
 
 
 @pytest.mark.asyncio
@@ -135,9 +170,7 @@ async def test_password_reset_rotates_secret_and_revokes_all_sessions(
     await db_session.flush()
     service = OwnerUserService(db_session, None)
 
-    reset = await service.reset_staff_password(
-        owner_actor(active_owner), staff.id, uuid4()
-    )
+    reset = await service.reset_staff_password(owner_actor(active_owner), staff.id, uuid4())
 
     assert staff.password_hash != original_hash
     assert staff.must_change_password is True
@@ -156,6 +189,4 @@ async def test_owner_password_cannot_be_reset_by_owner_web_service(
     service = OwnerUserService(db_session, None)
 
     with pytest.raises(ConflictError):
-        await service.reset_staff_password(
-            owner_actor(active_owner), active_owner.id, uuid4()
-        )
+        await service.reset_staff_password(owner_actor(active_owner), active_owner.id, uuid4())

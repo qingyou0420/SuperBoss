@@ -135,6 +135,8 @@ def main() -> int:
         listed.raise_for_status()
         names = {str(item.get("name") or "") for item in listed.json()}
         if not any("星野" in name for name in names):
+            if dry_run:
+                raise SystemExit("需要先有星野项目")
             created = client.post(
                 "/api/v1/projects",
                 json={"name": "星野合作"},
@@ -170,18 +172,22 @@ def main() -> int:
         for prompt in RECALLS:
             recall = _send(client, recall_id, prompt)
             recall_content = str((recall.get("message") or {}).get("content") or "")
+            probed = client.get("/api/v1/agent/recall", params={"q": prompt})
+            probed.raise_for_status()
+            recall_items = list(probed.json())
+            hit_xingye = any("星野" in str(item.get("content") or "") for item in recall_items)
+            mentions_xingye = "星野" in recall_content
             entry = {
                 "prompt": prompt,
                 "offline": bool(recall.get("offline")),
                 "content_preview": recall_content[:400],
-                "mentions_xingye": "星野" in recall_content,
+                "mentions_xingye": mentions_xingye,
+                "recall_hit": hit_xingye,
             }
             recalls.append(entry)
             if recall.get("offline") or OFFLINE in recall_content:
                 failed = True
-            if "星野" not in recall_content and not any(
-                "星野" in str(item) for item in report["memories"]
-            ):
+            if not mentions_xingye or not hit_xingye:
                 failed = True
         report["recall"] = recalls
 

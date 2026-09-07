@@ -303,9 +303,7 @@ async def test_login_audit_failure_sets_no_browser_credentials(
 
     monkeypatch.setattr(auth_router, "_stage_auth_audit", fail_audit, raising=False)
     app = create_app(test_settings)
-    with TestClient(
-        app, base_url="https://testserver", raise_server_exceptions=False
-    ) as client:
+    with TestClient(app, base_url="https://testserver", raise_server_exceptions=False) as client:
         response = _login(client)
 
     assert response.status_code == 500
@@ -326,9 +324,7 @@ async def test_password_change_audit_failure_rolls_back_hash_and_sessions(
     user = await _user(db_session, must_change_password=True)
     user_id = user.id
     app = create_app(test_settings)
-    with TestClient(
-        app, base_url="https://testserver", raise_server_exceptions=False
-    ) as client:
+    with TestClient(app, base_url="https://testserver", raise_server_exceptions=False) as client:
         assert _login(client).status_code == 204
         original_hash = user.password_hash
         original_session = await db_session.scalar(

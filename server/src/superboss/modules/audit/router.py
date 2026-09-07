@@ -34,8 +34,6 @@ async def list_audit_events(
         users = (await session.scalars(select(User).where(User.id.in_(actor_ids)))).all()
         names = {user.id: user.display_name or user.username for user in users}
     return [
-        AuditRead.model_validate(item).model_copy(
-            update={"actor_name": names.get(item.actor_id)}
-        )
+        AuditRead.model_validate(item).model_copy(update={"actor_name": names.get(item.actor_id)})
         for item in events
     ]
