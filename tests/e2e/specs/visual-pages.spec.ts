@@ -28,6 +28,7 @@ test.describe('六页视觉回归 1280', () => {
         await expect(page.locator('[role="alert"]')).toHaveCount(0)
         await expect(page).toHaveScreenshot('chat.png', {
             ...SNAPSHOT,
+            fullPage: false,
             mask: [page.locator('.shell__account')],
         })
 
