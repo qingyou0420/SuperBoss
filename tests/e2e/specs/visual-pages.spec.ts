@@ -36,7 +36,9 @@ test.describe('六页视觉回归 1280', () => {
             page.getByRole('button', { name: '确认入库' }),
         ).toBeVisible()
         await expect(
-            page.getByText('已入库 · 记一笔 房租 ¥ 8,000.00'),
+            page.getByText('已入库 · 记一笔 房租 ¥ 8,000.00', {
+                exact: true,
+            }),
         ).toBeVisible()
         await expect(page).toHaveScreenshot('chat-with-card.png', {
             ...SNAPSHOT,
