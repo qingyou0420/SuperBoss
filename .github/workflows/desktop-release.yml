@@ -1,0 +1,44 @@
+name: desktop-release
+on:
+  push:
+    tags:
+      - "desktop-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag such as desktop-v0.1.0
+        required: true
+        type: string
+permissions:
+  contents: write
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: Install frontend deps
+        working-directory: desktop
+        run: npm ci
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: desktop
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: SuperBoss ${{ github.event.inputs.tag || github.ref_name }}
+          releaseBody: Windows 启动器。本机仍需仓库克隆与 Docker Desktop，见 docs/runbooks/desktop-client.md。
+          releaseDraft: true
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true
+          args: --bundles nsis

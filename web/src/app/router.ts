@@ -150,6 +150,24 @@ export function createAppRouter(
                         meta: { roles: ['OWNER'] },
                     },
                     {
+                        path: 'workbench',
+                        name: 'workbench',
+                        component: () => import('../pages/WorkbenchPage.vue'),
+                        meta: { roles: ['OWNER', 'STAFF'] },
+                    },
+                    {
+                        path: 'overview',
+                        name: 'overview',
+                        component: () => import('../pages/OverviewPage.vue'),
+                        meta: { roles: ['OWNER', 'MANAGER'] },
+                    },
+                    {
+                        path: 'map',
+                        name: 'map',
+                        component: () => import('../pages/MapPage.vue'),
+                        meta: { roles: ['OWNER', 'STAFF'] },
+                    },
+                    {
                         path: 'projects',
                         name: 'projects',
                         component: () =>

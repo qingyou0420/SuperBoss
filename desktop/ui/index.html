@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SuperBoss</title>
+    <link rel="stylesheet" href="./app.css" />
+  </head>
+  <body>
+    <p class="brand">SuperBoss</p>
+    <main class="panel">
+      <h1>本机工作台</h1>
+      <p class="lead" id="headline">正在检测本机栈…</p>
+      <dl class="facts" id="facts"></dl>
+      <label class="home-label" for="home-input">仓库路径</label>
+      <div class="home-row">
+        <input id="home-input" spellcheck="false" autocomplete="off" />
+        <button type="button" class="ghost" id="save-home">保存路径</button>
+      </div>
+      <div class="actions">
+        <button type="button" class="primary" id="start">启动本机栈</button>
+        <button type="button" class="primary" id="open" disabled>打开工作台</button>
+        <button type="button" class="ghost" id="update-stack">更新本机栈</button>
+        <button type="button" class="ghost" id="stop">停止本机栈</button>
+        <button type="button" class="ghost" id="write-hosts" hidden>写入 hosts</button>
+      </div>
+      <div class="update-row">
+        <button type="button" class="ghost" id="check-update">检查客户端更新</button>
+        <button type="button" class="primary" id="install-update" hidden>安装并重启</button>
+        <p class="muted" id="update-note"></p>
+      </div>
+      <p class="error" id="error" hidden></p>
+      <ul class="warnings" id="warnings"></ul>
+      <pre class="log" id="log" hidden></pre>
+    </main>
+    <script src="./app.js"></script>
+  </body>
+</html>

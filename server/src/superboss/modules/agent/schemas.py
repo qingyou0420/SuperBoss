@@ -134,7 +134,7 @@ class MemoryCard(BaseModel):
         return _text(value, 2000)
 
 
-CARD_MODELS = {
+CARD_MODELS: dict[CardKind, type[BaseModel]] = {
     CardKind.FINANCE_ENTRY: FinanceEntryCard,
     CardKind.FINANCE_ADJUST: FinanceAdjustCard,
     CardKind.PROJECT_CREATE: ProjectCreateCard,

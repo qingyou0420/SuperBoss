@@ -15,6 +15,7 @@ from superboss.core.db import Base
 from superboss.modules.agent import models as agent_models
 from superboss.modules.audit import models as audit_models
 from superboss.modules.auth import models as auth_models
+from superboss.modules.directory import models as directory_models
 from superboss.modules.files import models as file_models
 from superboss.modules.finance import models as finance_models
 from superboss.modules.knowledge import models as knowledge_models
@@ -30,6 +31,7 @@ model_modules = (
     finance_models,
     agent_models,
     knowledge_models,
+    directory_models,
 )
 
 config = context.config

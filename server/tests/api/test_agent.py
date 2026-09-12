@@ -219,7 +219,27 @@ def test_owner_filters_conversations_by_title(agent_client) -> None:
     assert found.status_code == 200
     assert {item["title"] for item in found.json()} == {"星野合作"}
     empty = client.get("/api/v1/agent/conversations", params={"q": "不存在的会话"})
+    assert empty.status_code == 200
     assert empty.json() == []
+
+
+def test_owner_deletes_a_conversation(agent_client) -> None:
+    client = agent_client
+    _login(client)
+    headers = _csrf(client)
+    created = client.post("/api/v1/agent/conversations", json={"title": "待删"}, headers=headers)
+    assert created.status_code == 201
+    conversation_id = created.json()["id"]
+    deleted = client.delete(
+        f"/api/v1/agent/conversations/{conversation_id}",
+        headers=headers,
+    )
+    assert deleted.status_code == 204
+    listed = client.get("/api/v1/agent/conversations")
+    assert listed.status_code == 200
+    assert listed.json() == []
+    missing = client.get(f"/api/v1/agent/conversations/{conversation_id}/messages")
+    assert missing.status_code == 404
 
 
 def test_owner_patches_card_before_confirm(agent_client) -> None:

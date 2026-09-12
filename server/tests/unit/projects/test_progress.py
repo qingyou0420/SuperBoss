@@ -18,5 +18,6 @@ def test_progress_is_the_completed_milestone_ratio() -> None:
 def test_progress_stays_put_without_milestones() -> None:
     project = Project(name="空项目", progress_percent=12)
     project.milestones = []
+    project.nodes = []
     _sync_progress(project)
     assert project.progress_percent == 12

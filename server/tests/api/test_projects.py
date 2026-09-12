@@ -16,6 +16,7 @@ from superboss.core.config import Settings
 from superboss.main import create_app
 from superboss.modules.auth.models import AuthSession
 from superboss.modules.auth.service import AuthService
+from superboss.modules.finance.models import FinanceEntry
 from superboss.modules.projects.models import Project
 from superboss.modules.users.models import Role, User, UserStatus
 from tests.identity import LOCAL_TEST_PASSWORD, local_user
@@ -31,6 +32,7 @@ async def api_client(
     with TestClient(app, base_url="https://testserver") as client:
         yield client
     await db_session.rollback()
+    await db_session.execute(delete(FinanceEntry))
     await db_session.execute(delete(Project))
     await db_session.execute(delete(AuthSession))
     await db_session.execute(delete(User))
@@ -405,3 +407,67 @@ async def test_revoked_browser_session_is_rejected_immediately(
     response = api_client.get("/api/v1/projects")
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "AUTHENTICATION_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_owner_deletes_a_project_without_finance(
+    api_client: TestClient, db_session: AsyncSession
+) -> None:
+    del db_session
+    _login(api_client, "owner-code")
+    created = api_client.post(
+        "/api/v1/projects", json={"name": "待删项目"}, headers=_csrf_headers(api_client)
+    )
+    assert created.status_code == 201
+    project_id = created.json()["id"]
+    deleted = api_client.delete(f"/api/v1/projects/{project_id}", headers=_csrf_headers(api_client))
+    assert deleted.status_code == 204
+    listed = api_client.get("/api/v1/projects")
+    assert listed.status_code == 200
+    assert all(item["id"] != project_id for item in listed.json())
+    missing = api_client.get(f"/api/v1/projects/{project_id}")
+    assert missing.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_owner_cannot_delete_project_with_finance_entries(
+    api_client: TestClient, db_session: AsyncSession
+) -> None:
+    project = Project(name="有账项目")
+    db_session.add(project)
+    await db_session.commit()
+    _login(api_client, "owner-code")
+    cost = api_client.post(
+        "/api/v1/finance/entries",
+        json={
+            "kind": "COST",
+            "scope": "PROJECT",
+            "project_id": str(project.id),
+            "amount_cents": 800_000,
+            "occurred_on": "2026-09-01",
+            "category": "外包",
+        },
+        headers=_csrf_headers(api_client),
+    )
+    assert cost.status_code == 201
+    blocked = api_client.delete(f"/api/v1/projects/{project.id}", headers=_csrf_headers(api_client))
+    _assert_error(blocked, 409, "PROJECT_HAS_ENTRIES", "Project has finance entries")
+    still = api_client.get(f"/api/v1/projects/{project.id}")
+    assert still.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_staff_cannot_delete_a_project(
+    api_client: TestClient, db_session: AsyncSession
+) -> None:
+    project = Project(name="员工可见")
+    db_session.add(local_user("staff-1", display_name="Staff"))
+    db_session.add(project)
+    await db_session.commit()
+    _login(api_client, "staff-code")
+    _assert_error(
+        api_client.delete(f"/api/v1/projects/{project.id}", headers=_csrf_headers(api_client)),
+        403,
+        "FORBIDDEN",
+        "You cannot perform this action",
+    )

@@ -43,6 +43,8 @@ const project = {
     progress_percent: 0,
     starts_on: null,
     due_on: null,
+    service_fee_cents: null,
+    lead_user_id: null,
     milestones: [],
 }
 
@@ -57,6 +59,33 @@ const projectConflictBody = {
 describe('strict project API contracts', () => {
     test('uses a finite M1 list ceiling', () => {
         expect(MAX_PROJECTS_PER_RESPONSE).toBe(1000)
+    })
+
+    test('keeps workflow nodes when the API returns them', async () => {
+        const withNodes = {
+            ...project,
+            nodes: [
+                {
+                    id: '019f2b8e-18f0-7f31-9f42-3e6a76b9f812',
+                    sort_order: 0,
+                    title: '筹备与资料确认',
+                    planned_start: '2026-09-01',
+                    planned_end: '2026-09-03',
+                    status: 'OPEN',
+                    completed_at: null,
+                    preparation: ['核对本小区议题和委托资料'],
+                    document_name: '筹备工作安排.pdf',
+                    photo_required: false,
+                    evidence: [],
+                },
+            ],
+            schedule_changes: [],
+        }
+        await expect(
+            createProjectsApi(clientReturning(withNodes)).get(project.id),
+        ).resolves.toMatchObject({
+            nodes: [{ title: '筹备与资料确认', status: 'OPEN' }],
+        })
     })
 
     test('accepts only exact bounded ProjectRead objects', async () => {
@@ -157,6 +186,28 @@ describe('strict project API contracts', () => {
             )
         }
         expect(calls).toBe(0)
+    })
+
+    test('deletes a project with 204', async () => {
+        const adapter: AxiosAdapter = async (config) => {
+            expect(config.method).toBe('delete')
+            expect(config.url).toBe(`/projects/${project.id}`)
+            return response(config, 204, '')
+        }
+        const api = createProjectsApi(createHttpClient({ adapter }))
+        await expect(api.remove(project.id)).resolves.toBeUndefined()
+    })
+
+    test('maps finance-linked delete conflict without exposing the server message', () => {
+        const blocked = new HttpClientError(409, {
+            error: {
+                code: 'PROJECT_HAS_ENTRIES',
+                message: 'Project has finance entries',
+                request_id: 'bba39a39-47ba-4ac5-9250-ccdba1d7f25e',
+            },
+        })
+        expect(projectErrorMessage(blocked)).toBe('项目下还有记账，无法删除。')
+        expect(projectErrorMessage(blocked)).not.toContain('finance')
     })
 
     test('maps only a strict project error envelope and never renders its server message', () => {

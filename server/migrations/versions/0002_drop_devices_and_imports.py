@@ -69,14 +69,11 @@ def downgrade() -> None:
         op.execute("ALTER TABLE sessions ADD COLUMN kind VARCHAR(16) NOT NULL DEFAULT 'user'")
         op.execute("ALTER TABLE sessions ADD COLUMN device_id UUID")
         op.execute(
-            "ALTER TABLE sessions ADD CONSTRAINT ck_sessions_kind "
-            "CHECK (kind IN ('user','device'))"
+            "ALTER TABLE sessions ADD CONSTRAINT ck_sessions_kind CHECK (kind IN ('user','device'))"
         )
         op.execute(
             "ALTER TABLE sessions ADD CONSTRAINT ck_sessions_subject CHECK ("
             "(kind = 'user' AND user_id IS NOT NULL AND device_id IS NULL) OR "
             "(kind = 'device' AND device_id IS NOT NULL AND user_id IS NULL))"
         )
-        op.execute(
-            "CREATE INDEX ix_sessions_device_created ON sessions (device_id, created_at)"
-        )
+        op.execute("CREATE INDEX ix_sessions_device_created ON sessions (device_id, created_at)")

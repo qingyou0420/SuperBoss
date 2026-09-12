@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 
+import { centsFromYuan } from '../../api/finance'
 import { dateShort } from '../../api/parse'
 import {
     projectErrorMessage,
@@ -8,6 +9,7 @@ import {
     type Project,
     type ProjectStage,
 } from '../../api/projects'
+import { usersApi, type OwnerUser } from '../../api/users'
 import Dot from '../../components/ui/Dot.vue'
 import EmptyLine from '../../components/ui/EmptyLine.vue'
 import InlineError from '../../components/ui/InlineError.vue'
@@ -24,11 +26,21 @@ const description = ref('')
 const stage = ref<ProjectStage>('PLANNING')
 const startsOn = ref('')
 const dueOn = ref('')
+const feeYuan = ref('')
+const leadUserId = ref('')
+const staff = ref<OwnerUser[]>([])
 const loading = ref(false)
 const creating = ref(false)
 const errorMessage = ref('')
 const drawerOpen = ref(false)
 const filter = ref<'active' | 'archived'>('active')
+const pendingDelete = ref<Project>()
+const deleteOpen = computed({
+    get: () => pendingDelete.value !== undefined,
+    set: (open: boolean) => {
+        if (!open) pendingDelete.value = undefined
+    },
+})
 let loadSeq = 0
 
 const visible = computed(() =>
@@ -85,12 +97,18 @@ async function createProject(): Promise<void> {
             stage: stage.value,
             starts_on: startsOn.value || null,
             due_on: dueOn.value || null,
+            ...(feeYuan.value.trim()
+                ? { service_fee_cents: centsFromYuan(feeYuan.value) }
+                : {}),
+            ...(leadUserId.value ? { lead_user_id: leadUserId.value } : {}),
         })
         name.value = ''
         description.value = ''
         stage.value = 'PLANNING'
         startsOn.value = ''
         dueOn.value = ''
+        feeYuan.value = ''
+        leadUserId.value = ''
         drawerOpen.value = false
         await loadProjects()
         const others = projects.value.filter((item) => item.id !== created.id)
@@ -102,7 +120,40 @@ async function createProject(): Promise<void> {
     }
 }
 
-onMounted(loadProjects)
+async function archiveProject(project: Project): Promise<void> {
+    errorMessage.value = ''
+    try {
+        await projectsApi.update(project.id, { stage: 'ARCHIVED' })
+        await loadProjects()
+    } catch (error) {
+        errorMessage.value = projectErrorMessage(error)
+    }
+}
+
+function requestDelete(project: Project): void {
+    pendingDelete.value = project
+}
+
+async function confirmDelete(): Promise<void> {
+    const project = pendingDelete.value
+    if (!project) return
+    errorMessage.value = ''
+    try {
+        await projectsApi.remove(project.id)
+        pendingDelete.value = undefined
+        await loadProjects()
+    } catch (error) {
+        pendingDelete.value = undefined
+        errorMessage.value = projectErrorMessage(error)
+    }
+}
+
+onMounted(async () => {
+    await loadProjects()
+    if (canCreate.value) {
+        staff.value = await usersApi.list().catch(() => [])
+    }
+})
 </script>
 
 <template>
@@ -139,9 +190,42 @@ onMounted(loadProjects)
                     <Dot :tone="dueTone(project)" />
                     {{ dateShort(project.due_on) }}
                 </span>
+                <el-dropdown v-if="canCreate" trigger="click">
+                    <el-button text native-type="button">···</el-button>
+                    <template #dropdown>
+                        <el-dropdown-menu>
+                            <el-dropdown-item
+                                v-if="project.stage !== 'ARCHIVED'"
+                                @click="archiveProject(project)"
+                                >{{
+                                    projectsCopy.archiveAction
+                                }}</el-dropdown-item
+                            >
+                            <el-dropdown-item @click="requestDelete(project)">{{
+                                projectsCopy.remove
+                            }}</el-dropdown-item>
+                        </el-dropdown-menu>
+                    </template>
+                </el-dropdown>
             </li>
         </ul>
         <EmptyLine v-if="!visible.length" :message="projectsCopy.empty" />
+        <el-dialog
+            v-model="deleteOpen"
+            :title="projectsCopy.remove"
+            width="360px"
+            :close-on-click-modal="false"
+        >
+            <p>{{ projectsCopy.deleteConfirm }}</p>
+            <template #footer>
+                <el-button @click="pendingDelete = undefined">{{
+                    projectsCopy.close
+                }}</el-button>
+                <el-button type="primary" @click="confirmDelete">{{
+                    projectsCopy.confirm
+                }}</el-button>
+            </template>
+        </el-dialog>
         <el-drawer
             v-model="drawerOpen"
             :title="projectsCopy.create"
@@ -171,6 +255,19 @@ onMounted(loadProjects)
                     type="date"
                     value-format="YYYY-MM-DD"
                 />
+                <label>{{ projectsCopy.feeYuan }}</label>
+                <el-input v-model="feeYuan" />
+                <label>{{ projectsCopy.lead }}</label>
+                <el-select v-model="leadUserId" clearable>
+                    <el-option
+                        v-for="user in staff.filter(
+                            (item) => item.role === 'STAFF',
+                        )"
+                        :key="user.id"
+                        :label="user.display_name"
+                        :value="user.id"
+                    />
+                </el-select>
                 <label>{{ projectsCopy.description }}</label>
                 <el-input v-model="description" type="textarea" />
                 <el-button
@@ -193,7 +290,7 @@ onMounted(loadProjects)
 }
 .rows li {
     display: grid;
-    grid-template-columns: minmax(140px, 1.4fr) 4em 120px 3em 6em;
+    grid-template-columns: minmax(140px, 1.4fr) 4em 120px 3em 6em 2em;
     gap: 16px;
     align-items: center;
     min-height: 48px;

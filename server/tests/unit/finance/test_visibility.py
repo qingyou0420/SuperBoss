@@ -31,11 +31,10 @@ def test_default_visibility_follows_scope_and_kind() -> None:
     )
 
 
-def test_staff_sees_only_shared_project_costs() -> None:
+def test_staff_does_not_see_finance_entries() -> None:
     staff = Actor(uuid4(), Role.STAFF)
-    assert entry_is_visible(staff, FinanceKind.COST, FinanceScope.PROJECT, FinanceVisibility.ALL)
     assert not entry_is_visible(
-        staff, FinanceKind.COST, FinanceScope.PROJECT, FinanceVisibility.MANAGEMENT
+        staff, FinanceKind.COST, FinanceScope.PROJECT, FinanceVisibility.ALL
     )
     assert not entry_is_visible(
         staff, FinanceKind.COST, FinanceScope.COMPANY, FinanceVisibility.ALL

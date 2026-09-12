@@ -205,6 +205,11 @@ export function createAgentApi(client: BrowserHttpClient) {
             )
             if (response.status !== 204) throw new AgentContractError()
         },
+        async remove(id: string): Promise<void> {
+            if (!uuid(id)) throw new AgentContractError()
+            const response = await client.delete(`/agent/conversations/${id}`)
+            if (response.status !== 204) throw new AgentContractError()
+        },
         async monthlyUsage(): Promise<{
             prompt_tokens: number
             completion_tokens: number

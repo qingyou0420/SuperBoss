@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { createMemoryHistory, createRouter } from 'vue-router'
 
 import { projectsApi } from '../src/api/projects'
+import { projectsCopy } from '../src/copy/pages/projects'
 import ProjectsPage from '../src/pages/owner/ProjectsPage.vue'
 import { useAuthStore } from '../src/stores/auth'
 
@@ -12,6 +13,8 @@ vi.mock('../src/api/projects', () => ({
     projectsApi: {
         list: vi.fn(),
         create: vi.fn(),
+        update: vi.fn(),
+        remove: vi.fn(),
     },
 }))
 
@@ -22,6 +25,8 @@ const extras = {
     progress_percent: 0,
     starts_on: null,
     due_on: null,
+    service_fee_cents: null,
+    lead_user_id: null,
     milestones: [],
 }
 const regular = {
@@ -208,5 +213,31 @@ describe('OWNER project management page', () => {
         expect(
             screen.queryByText(/sentinel|postgres|traceback/i),
         ).not.toBeInTheDocument()
+    })
+
+    test('deletes a project after confirm', async () => {
+        mockedProjects.remove.mockResolvedValue(undefined)
+        mockedProjects.list
+            .mockResolvedValueOnce([regular, acceptance])
+            .mockResolvedValueOnce([acceptance])
+        renderPage()
+        expect(await screen.findByText('正式项目')).toBeInTheDocument()
+        await fireEvent.click(screen.getAllByRole('button', { name: '···' })[0])
+        await fireEvent.click(
+            (
+                await screen.findAllByRole('menuitem', {
+                    name: projectsCopy.remove,
+                })
+            )[0],
+        )
+        expect(
+            await screen.findByText(projectsCopy.deleteConfirm),
+        ).toBeInTheDocument()
+        await fireEvent.click(
+            screen.getByRole('button', { name: projectsCopy.confirm }),
+        )
+        await waitFor(() =>
+            expect(mockedProjects.remove).toHaveBeenCalledWith(regular.id),
+        )
     })
 })

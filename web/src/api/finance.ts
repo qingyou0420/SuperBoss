@@ -38,6 +38,18 @@ export interface FinanceEntry {
     created_via: 'FORM' | 'CARD'
     created_at: string
     adjustments: FinanceAdjustment[]
+    batch_key?: string
+    paid_on?: string | null
+    paid_cents?: number | null
+    voucher?: string
+    paid_total_cents?: number
+    unpaid_cents?: number
+    payments?: Array<{
+        id: string
+        paid_on: string
+        amount_cents: number
+        created_at: string
+    }>
 }
 
 export interface FinanceEntryCreate {
@@ -73,6 +85,65 @@ export interface FinanceSummary {
     month: string
     company: CompanyTotals | null
     projects: ProjectTotals[]
+}
+
+export interface FinanceOverview {
+    active_count: number
+    completed_count: number
+    completed_fee_cents: number
+    completed_gross_cents: number
+    received_cents: number
+    paid_cents: number
+    unpaid_cents: number
+    net_inflow_cents: number
+    has_opening_balance: boolean
+    opening_balance_cents?: number
+    opening_as_of?: string
+    available_cents?: number | null
+    placeholder?: boolean
+    payroll_same_day?: string
+    months: Array<{
+        month: string
+        cost_cents: number
+        income_cents: number
+        company_fixed_cents: number
+    }>
+    receivables: Array<{
+        project_id: string
+        project_name: string
+        fee_cents: number
+        received_cents: number
+        outstanding_cents: number
+    }>
+    pending_rewards: Array<{
+        project_id: string
+        project_name: string
+        surplus_bonus_cents: number
+        pool_pay_cents: number
+        payroll_on: string | null
+    }>
+    pipeline: { commissioned: number; talking: number }
+}
+
+export interface FinanceImportResult {
+    batch_key: string
+    inserted: number
+    skipped: number
+    unresolved: unknown[]
+    parse_unresolved?: unknown[]
+    replayed: boolean
+    entries?: unknown[]
+}
+
+export interface FinanceImportRowRecord {
+    id: string
+    batch_key: string
+    row_index: number
+    status: string
+    reason: string
+    fingerprint: string
+    entry_id: string | null
+    payload: Record<string, unknown>
 }
 
 export class FinanceContractError extends Error {
@@ -169,6 +240,62 @@ function parseEntry(value: unknown): FinanceEntry {
         created_via: value.created_via,
         created_at: value.created_at,
         adjustments: value.adjustments.map(parseAdjustment),
+        ...('batch_key' in value
+            ? { batch_key: String(value.batch_key || '') }
+            : {}),
+        ...('paid_on' in value
+            ? {
+                  paid_on:
+                      typeof value.paid_on === 'string' ? value.paid_on : null,
+              }
+            : {}),
+        ...('paid_cents' in value
+            ? {
+                  paid_cents:
+                      typeof value.paid_cents === 'number'
+                          ? value.paid_cents
+                          : null,
+              }
+            : {}),
+        ...('voucher' in value
+            ? {
+                  voucher:
+                      typeof value.voucher === 'string' ? value.voucher : '',
+              }
+            : {}),
+        ...('paid_total_cents' in value
+            ? {
+                  paid_total_cents:
+                      typeof value.paid_total_cents === 'number'
+                          ? value.paid_total_cents
+                          : 0,
+              }
+            : {}),
+        ...('unpaid_cents' in value
+            ? {
+                  unpaid_cents:
+                      typeof value.unpaid_cents === 'number'
+                          ? value.unpaid_cents
+                          : 0,
+              }
+            : {}),
+        ...('payments' in value && Array.isArray(value.payments)
+            ? {
+                  payments: value.payments
+                      .filter((item): item is Record<string, unknown> =>
+                          isRecord(item),
+                      )
+                      .map((item) => ({
+                          id: String(item.id || ''),
+                          paid_on: String(item.paid_on || ''),
+                          amount_cents:
+                              typeof item.amount_cents === 'number'
+                                  ? item.amount_cents
+                                  : 0,
+                          created_at: String(item.created_at || ''),
+                      })),
+              }
+            : {}),
     }
 }
 
@@ -280,6 +407,214 @@ export function createFinanceApi(client: BrowserHttpClient) {
             })
             if (response.status !== 200) throw new FinanceContractError()
             return parseSummary(response.data)
+        },
+        async overview(): Promise<FinanceOverview> {
+            const response = await client.get('/finance/overview')
+            if (response.status !== 200 || !isRecord(response.data)) {
+                throw new FinanceContractError()
+            }
+            const data = response.data
+            return {
+                active_count: Number(data.active_count) || 0,
+                completed_count: Number(data.completed_count) || 0,
+                completed_fee_cents: Number(data.completed_fee_cents) || 0,
+                completed_gross_cents: Number(data.completed_gross_cents) || 0,
+                received_cents: Number(data.received_cents) || 0,
+                paid_cents: Number(data.paid_cents) || 0,
+                unpaid_cents: Number(data.unpaid_cents) || 0,
+                net_inflow_cents: Number(data.net_inflow_cents) || 0,
+                has_opening_balance: Boolean(data.has_opening_balance),
+                opening_balance_cents: Number(data.opening_balance_cents) || 0,
+                opening_as_of: String(data.opening_as_of || ''),
+                available_cents:
+                    data.available_cents === null ||
+                    data.available_cents === undefined
+                        ? null
+                        : Number(data.available_cents) || 0,
+                placeholder: Boolean(data.placeholder),
+                payroll_same_day: String(data.payroll_same_day || ''),
+                months: Array.isArray(data.months)
+                    ? (data.months as FinanceOverview['months'])
+                    : [],
+                receivables: Array.isArray(data.receivables)
+                    ? (data.receivables as FinanceOverview['receivables'])
+                    : [],
+                pending_rewards: Array.isArray(data.pending_rewards)
+                    ? (data.pending_rewards as FinanceOverview['pending_rewards'])
+                    : [],
+                pipeline: isRecord(data.pipeline)
+                    ? {
+                          commissioned: Number(data.pipeline.commissioned) || 0,
+                          talking: Number(data.pipeline.talking) || 0,
+                      }
+                    : { commissioned: 0, talking: 0 },
+            }
+        },
+        async importBatch(
+            batchKey: string,
+            rows: Array<Record<string, unknown>>,
+        ): Promise<FinanceImportResult> {
+            const response = await client.post('/finance/import', {
+                batch_key: batchKey,
+                rows,
+            })
+            if (response.status !== 200 || !isRecord(response.data)) {
+                throw new FinanceContractError()
+            }
+            return {
+                batch_key: String(response.data.batch_key || batchKey),
+                inserted: Number(response.data.inserted) || 0,
+                skipped: Number(response.data.skipped) || 0,
+                unresolved: Array.isArray(response.data.unresolved)
+                    ? response.data.unresolved
+                    : [],
+                replayed: Boolean(response.data.replayed),
+                entries: Array.isArray(response.data.entries)
+                    ? response.data.entries
+                    : [],
+            }
+        },
+        async importFile(
+            file: File,
+            batchKey?: string,
+        ): Promise<FinanceImportResult> {
+            const body = new FormData()
+            body.append('file', file)
+            const suffix = batchKey
+                ? `?batch_key=${encodeURIComponent(batchKey)}`
+                : ''
+            const response = await client.post(
+                `/finance/imports${suffix}`,
+                body,
+            )
+            if (response.status !== 200 || !isRecord(response.data)) {
+                throw new FinanceContractError()
+            }
+            return {
+                batch_key: String(response.data.batch_key || ''),
+                inserted: Number(response.data.inserted) || 0,
+                skipped: Number(response.data.skipped) || 0,
+                unresolved: Array.isArray(response.data.unresolved)
+                    ? response.data.unresolved
+                    : [],
+                parse_unresolved: Array.isArray(response.data.parse_unresolved)
+                    ? response.data.parse_unresolved
+                    : [],
+                replayed: Boolean(response.data.replayed),
+                entries: Array.isArray(response.data.entries)
+                    ? response.data.entries
+                    : [],
+            }
+        },
+        async listImportRows(
+            status = 'UNRESOLVED',
+            paging?: { offset?: number; limit?: number },
+        ): Promise<{
+            items: FinanceImportRowRecord[]
+            total: number
+        }> {
+            const response = await client.get('/finance/import-rows', {
+                params: {
+                    status,
+                    offset: String(paging?.offset ?? 0),
+                    limit: String(paging?.limit ?? 200),
+                },
+            })
+            if (response.status !== 200 || !isRecord(response.data)) {
+                throw new FinanceContractError()
+            }
+            const items = Array.isArray(response.data.items)
+                ? response.data.items
+                : []
+            return {
+                items: items.filter(isRecord).map((item) => ({
+                    id: String(item.id || ''),
+                    batch_key: String(item.batch_key || ''),
+                    row_index: Number(item.row_index) || 0,
+                    status: String(item.status || ''),
+                    reason: String(item.reason || ''),
+                    fingerprint: String(item.fingerprint || ''),
+                    entry_id:
+                        typeof item.entry_id === 'string'
+                            ? item.entry_id
+                            : null,
+                    payload: isRecord(item.payload) ? item.payload : {},
+                })),
+                total: Number(response.data.total) || 0,
+            }
+        },
+        async resolveImportRow(
+            batchKey: string,
+            rowIndex: number,
+            action: 'link_voucher' | 'insert_independent',
+            entryId?: string,
+        ): Promise<FinanceImportRowRecord> {
+            const response = await client.post(
+                `/finance/imports/${encodeURIComponent(batchKey)}/rows/${rowIndex}/resolve`,
+                { action, entry_id: entryId || null },
+            )
+            if (response.status !== 200 || !isRecord(response.data)) {
+                throw new FinanceContractError()
+            }
+            return {
+                id: String(response.data.id || ''),
+                batch_key: String(response.data.batch_key || batchKey),
+                row_index: Number(response.data.row_index) || rowIndex,
+                status: String(response.data.status || ''),
+                reason: String(response.data.reason || ''),
+                fingerprint: String(response.data.fingerprint || ''),
+                entry_id:
+                    typeof response.data.entry_id === 'string'
+                        ? response.data.entry_id
+                        : null,
+                payload: isRecord(response.data.payload)
+                    ? response.data.payload
+                    : {},
+            }
+        },
+        async markPaid(
+            entryId: string,
+            paidOn: string,
+            paidCents?: number,
+            idempotencyKey?: string,
+        ): Promise<FinanceEntry> {
+            if (!uuid(entryId) || !DATE.test(paidOn)) {
+                throw new FinanceContractError()
+            }
+            const response = await client.post(
+                `/finance/entries/${entryId}/pay`,
+                {
+                    paid_on: paidOn,
+                    paid_cents: paidCents,
+                    idempotency_key: idempotencyKey || undefined,
+                },
+            )
+            if (response.status !== 200) throw new FinanceContractError()
+            return parseEntry(response.data)
+        },
+        async upsertMonthCost(
+            month: string,
+            amountCents: number,
+        ): Promise<{ month: string; amount_cents: number }> {
+            if (!MONTH.test(month)) throw new FinanceContractError()
+            const response = await client.put(`/finance/month-costs/${month}`, {
+                amount_cents: amountCents,
+            })
+            if (response.status !== 200 || !isRecord(response.data)) {
+                throw new FinanceContractError()
+            }
+            return {
+                month: String(response.data.month),
+                amount_cents: Number(response.data.amount_cents) || 0,
+            }
+        },
+        async rewards(projectId: string): Promise<Record<string, unknown>> {
+            if (!uuid(projectId)) throw new FinanceContractError()
+            const response = await client.get(`/finance/rewards/${projectId}`)
+            if (response.status !== 200 || !isRecord(response.data)) {
+                throw new FinanceContractError()
+            }
+            return response.data
         },
         async create(command: FinanceEntryCreate): Promise<FinanceEntry> {
             if (

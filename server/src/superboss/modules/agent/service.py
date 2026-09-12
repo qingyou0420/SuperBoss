@@ -3,8 +3,10 @@
 import asyncio
 import json
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable
+import zipfile
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -17,6 +19,7 @@ from superboss.core.llm import (
     LLMClient,
     LLMRequestError,
     LLMResult,
+    LLMToolCall,
     LLMUnavailable,
     OfflineLLM,
     iter_llm,
@@ -60,6 +63,25 @@ _MAX_TOOL_ROUNDS = 6
 _OFFLINE = "霜月暂时离线，你仍可以直接使用各页面录入。"
 _ATTACHMENT_BYTES = 200_000
 _ATTACHMENT_CHARS = 1500
+_STRUCTURED_SUFFIXES = {".xlsx", ".xlsm", ".xls", ".zip", ".docx", ".pdf"}
+_MAX_STRUCTURED_BYTES = 25 * 1024 * 1024
+
+
+def _copy_tool_calls(calls: object) -> list[dict[str, Any]]:
+    copied: list[dict[str, Any]] = []
+    if not isinstance(calls, list):
+        return copied
+    for item in calls:
+        if not isinstance(item, dict):
+            continue
+        function = item.get("function")
+        copied.append(
+            {
+                **item,
+                "function": dict(function) if isinstance(function, dict) else function,
+            }
+        )
+    return copied
 
 
 def replay_window_row(*, role: str, content: str, tool_calls: object | None) -> dict[str, Any]:
@@ -73,11 +95,60 @@ def replay_window_row(*, role: str, content: str, tool_calls: object | None) -> 
         return payload
     if role == "assistant":
         payload = {"role": "assistant", "content": content or None}
-        calls = stored.get("tool_calls")
-        if isinstance(calls, list) and calls:
+        calls = _copy_tool_calls(stored.get("tool_calls"))
+        if calls:
             payload["tool_calls"] = calls
         return payload
     return {"role": role, "content": content}
+
+
+def replay_history(rows: Sequence[AgentMessage]) -> list[dict[str, Any]]:
+    """Pair tool_calls with tool rows even when seq was scrambled by backfill."""
+    tools_by_id: dict[str, AgentMessage] = {}
+    for row in rows:
+        if row.role is not MessageRole.TOOL:
+            continue
+        stored = row.tool_calls if isinstance(row.tool_calls, dict) else {}
+        call_id = stored.get("tool_call_id")
+        if call_id:
+            tools_by_id[str(call_id)] = row
+
+    nodes: list[tuple[int, list[dict[str, Any]], str]] = []
+    for row in rows:
+        if row.role is MessageRole.TOOL:
+            continue
+        payload = replay_window_row(
+            role=row.role.value, content=row.content, tool_calls=row.tool_calls
+        )
+        block = [payload]
+        if row.role is MessageRole.ASSISTANT:
+            for call in payload.get("tool_calls") or []:
+                if not isinstance(call, dict):
+                    continue
+                call_id = str(call.get("id") or "").strip()
+                if not call_id:
+                    call_id = str(uuid4())
+                    call["id"] = call_id
+                matched = tools_by_id.get(call_id)
+                if matched is not None:
+                    block.append(
+                        replay_window_row(
+                            role="tool",
+                            content=matched.content,
+                            tool_calls=matched.tool_calls,
+                        )
+                    )
+                else:
+                    block.append({"role": "tool", "tool_call_id": call_id, "content": "{}"})
+        nodes.append((row.seq, block, row.role.value))
+
+    first_user = next((index for index, item in enumerate(nodes) if item[2] == "user"), None)
+    if first_user is not None and first_user > 0:
+        nodes = [nodes[first_user], *nodes[:first_user], *nodes[first_user + 1 :]]
+    history: list[dict[str, Any]] = []
+    for _, block, _ in nodes:
+        history.extend(block)
+    return history
 
 
 _STOPWORDS = frozenset(
@@ -173,6 +244,10 @@ def format_attachment_excerpt(filename: str, *, state: FileState, data: bytes | 
         text = extract_text(filename, data)
     except ExtractError as error:
         return f"[附件 {filename}：{error}]"
+    except zipfile.BadZipFile:
+        return f"[附件 {filename}：无法作为完整压缩文件解析]"
+    except Exception as error:  # noqa: BLE001 -- keep chat excerpt from crashing the turn
+        return f"[附件 {filename}：无法解析（{error.__class__.__name__}）]"
     return f"[附件 {filename}]\n{text[:_ATTACHMENT_CHARS]}"
 
 
@@ -233,6 +308,10 @@ class AgentService:
     async def archive_conversation(self, conversation_id: UUID) -> None:
         conversation = await self._conversation(conversation_id)
         conversation.archived_at = utcnow()
+
+    async def delete_conversation(self, conversation_id: UUID) -> None:
+        conversation = await self._conversation(conversation_id)
+        await self.session.delete(conversation)
 
     async def monthly_usage(self) -> dict[str, object]:
         start = utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -300,7 +379,8 @@ class AgentService:
         content = command.content
         if command.file_id is not None:
             excerpt = await self._attachment_excerpt(command.file_id)
-            content = f"{content}\n\n{excerpt}".strip() if content else excerpt
+            tagged = f"[受信附件 file_id={command.file_id}]\n{excerpt}"
+            content = f"{content}\n\n{tagged}".strip() if content else tagged
         self.session.add(
             AgentMessage(
                 conversation_id=conversation.id,
@@ -319,14 +399,21 @@ class AgentService:
         if file is None:
             raise NotFoundError("FILE_NOT_FOUND", "File not found")
         data: bytes | None = None
+        suffix = Path(file.filename or "").suffix.lower()
+        structured = suffix in _STRUCTURED_SUFFIXES
+        limit = _MAX_STRUCTURED_BYTES if structured else _ATTACHMENT_BYTES
         if file.state == FileState.CLEAN and self.storage is not None:
             chunks: list[bytes] = []
             total = 0
+            truncated = False
             async for chunk in self.storage.stream(file.object_key):
                 chunks.append(chunk)
                 total += len(chunk)
-                if total >= _ATTACHMENT_BYTES:
+                if total >= limit:
+                    truncated = True
                     break
+            if truncated and structured:
+                return f"[附件 {file.filename}：文件过大，未能完整解析。受信附件 file_id={file.id}]"
             data = b"".join(chunks)
         return format_attachment_excerpt(file.filename, state=file.state, data=data)
 
@@ -455,7 +542,14 @@ class AgentService:
                         if on_token is not None:
                             await on_token(chunk.content)
                     if chunk.done:
-                        result.tool_calls = chunk.tool_calls or []
+                        result.tool_calls = [
+                            LLMToolCall(
+                                id=item.id.strip() if item.id.strip() else str(uuid4()),
+                                name=item.name,
+                                arguments=item.arguments,
+                            )
+                            for item in (chunk.tool_calls or [])
+                        ]
                         usage["prompt_tokens"] += chunk.prompt_tokens
                         usage["completion_tokens"] += chunk.completion_tokens
                 last_content = result.content
@@ -466,7 +560,7 @@ class AgentService:
                     "content": result.content or None,
                     "tool_calls": [
                         {
-                            "id": item.id or str(uuid4()),
+                            "id": item.id,
                             "type": "function",
                             "function": {"name": item.name, "arguments": item.arguments},
                         }
@@ -495,6 +589,7 @@ class AgentService:
                             tool_calls={"tool_call_id": call.id},
                         )
                     )
+                await self.session.flush()
             else:
                 last_content = last_content or "工具调用次数已达上限，请拆成更小的请求。"
         except (LLMUnavailable, LLMRequestError):
@@ -542,12 +637,7 @@ class AgentService:
                 break
             rows.append(earlier)
         rows.reverse()
-        return [
-            replay_window_row(
-                role=item.role.value, content=item.content, tool_calls=item.tool_calls
-            )
-            for item in rows
-        ]
+        return replay_history(rows)
 
     async def confirm_card(self, card_id: UUID, request_id: UUID) -> CardRead:
         card = await self._card(card_id)

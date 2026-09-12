@@ -106,6 +106,16 @@ describe('agent API', () => {
         })
     })
 
+    test('deletes a conversation with 204', async () => {
+        const adapter: AxiosAdapter = async (config) => {
+            expect(config.method).toBe('delete')
+            expect(config.url).toBe(`/agent/conversations/${ID}`)
+            return response(config, 204, '')
+        }
+        const api = createAgentApi(createHttpClient({ adapter }))
+        await expect(api.remove(ID)).resolves.toBeUndefined()
+    })
+
     test('lists conversations with a search query', async () => {
         const adapter: AxiosAdapter = async (config) => {
             expect(config.params).toEqual({ q: '房租' })

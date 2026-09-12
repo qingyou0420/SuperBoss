@@ -115,14 +115,15 @@ afterEach(() => {
 describe('Task13 OWNER navigation and Drive integration', () => {
     test('OWNER lands on chat and other roles land on projects', () => {
         expect(homePath('OWNER')).toBe('/chat')
-        expect(homePath('MANAGER')).toBe('/projects')
-        expect(homePath('STAFF')).toBe('/projects')
+        expect(homePath('MANAGER')).toBe('/overview')
+        expect(homePath('STAFF')).toBe('/workbench')
     })
 
     test.each([
         ['/drive', 'drive'],
         ['/finance', 'finance'],
         ['/chat', 'chat'],
+        ['/map', 'map'],
     ])('registers %s for signed-in roles', (path, name) => {
         const router = createAppRouter(createMemoryHistory())
         const resolved = router.resolve(path)
@@ -148,11 +149,27 @@ describe('Task13 OWNER navigation and Drive integration', () => {
         })
         await router.push('/owner')
         await router.isReady()
+        const pinia = createPinia()
+        setActivePinia(pinia)
+        useAuthStore().user = {
+            username: 'owner',
+            display_name: '清游',
+            role: 'OWNER',
+            must_change_password: false,
+        }
         render(AppShell, {
-            global: { plugins: [createPinia(), router, ElementPlus] },
+            global: { plugins: [pinia, router, ElementPlus] },
         })
 
-        for (const label of ['项目', '财务', '网盘']) {
+        for (const label of [
+            '霜月',
+            '工作台',
+            '业务地图',
+            '经营总览',
+            '财务',
+            '会务项目',
+            '网盘',
+        ]) {
             expect(
                 screen.getByRole('link', { name: label }),
             ).toBeInTheDocument()

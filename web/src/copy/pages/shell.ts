@@ -2,8 +2,11 @@ export const shellCopy = {
     nav: '工作台导航',
     logout: '退出',
     chat: '霜月',
+    map: '业务地图',
+    workbench: '工作台',
+    overview: '经营总览',
     finance: '财务',
-    projects: '项目',
+    projects: '会务项目',
     drive: '网盘',
     knowledge: '知识库',
     members: '成员',
@@ -11,4 +14,7 @@ export const shellCopy = {
     soul: '霜月设置',
     memory: '记忆',
     password: '修改密码',
+    placeholder:
+        '当前为占位数据，真实流程、知识包、财务账本和期初余额到位后替换。地图不伪造经纬度。',
+    seedPlaceholder: '写入占位数据',
 }

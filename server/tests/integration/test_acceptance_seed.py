@@ -289,11 +289,38 @@ def test_cli_has_no_password_arguments_or_password_environment_inputs(
     parser = module.build_parser()
     options = {option for action in parser._actions for option in action.option_strings}
     assert "--password" not in options and "--password-file" not in options
-    monkeypatch.setenv("SUPERBOSS_OWNER_PASSWORD", "forbidden environment secret")
-    monkeypatch.setenv("SUPERBOSS_ACCEPTANCE_STAFF_PASSWORD", "forbidden staff secret")
-    result = _run(
+
+    def forbidden(_prompt: str) -> str:
+        raise AssertionError("environment passwords must not prompt")
+
+    monkeypatch.setenv("SUPERBOSS_OWNER_PASSWORD", OWNER_PASSWORD)
+    monkeypatch.setenv("SUPERBOSS_ACCEPTANCE_STAFF_PASSWORD", STAFF_PASSWORD)
+    assert _run(module._read_passwords(forbidden)) == (OWNER_PASSWORD, STAFF_PASSWORD)
+
+    monkeypatch.delenv("SUPERBOSS_ACCEPTANCE_STAFF_PASSWORD", raising=False)
+    with pytest.raises(module.SeedRefusedError):
+        _run(module._read_passwords(lambda _prompt: STAFF_PASSWORD))
+
+    monkeypatch.delenv("SUPERBOSS_OWNER_PASSWORD", raising=False)
+    monkeypatch.setenv("SUPERBOSS_ACCEPTANCE_STAFF_PASSWORD", STAFF_PASSWORD)
+    with pytest.raises(module.SeedRefusedError):
+        _run(module._read_passwords(lambda _prompt: OWNER_PASSWORD))
+
+    monkeypatch.delenv("SUPERBOSS_OWNER_PASSWORD", raising=False)
+    monkeypatch.delenv("SUPERBOSS_ACCEPTANCE_STAFF_PASSWORD", raising=False)
+    assert _run(
         module._read_passwords(
             _reader(OWNER_PASSWORD, OWNER_PASSWORD, STAFF_PASSWORD, STAFF_PASSWORD)
         )
-    )
-    assert result == (OWNER_PASSWORD, STAFF_PASSWORD)
+    ) == (OWNER_PASSWORD, STAFF_PASSWORD)
+    with pytest.raises(module.SeedRefusedError):
+        _run(
+            module._read_passwords(
+                _reader(
+                    OWNER_PASSWORD,
+                    "mismatched owner confirmation",
+                    STAFF_PASSWORD,
+                    STAFF_PASSWORD,
+                )
+            )
+        )

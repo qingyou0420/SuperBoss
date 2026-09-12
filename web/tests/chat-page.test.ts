@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
         revise: vi.fn(),
         reject: vi.fn(),
         archive: vi.fn(),
+        remove: vi.fn(),
     },
 }))
 
@@ -283,5 +284,35 @@ describe('chat page', () => {
         expect(
             document.querySelector('.composer__row [role="status"]'),
         ).not.toBeInTheDocument()
+    })
+
+    test('deletes a conversation after confirm', async () => {
+        mocks.agentApi.remove.mockResolvedValue(undefined)
+        const pinia = createPinia()
+        setActivePinia(pinia)
+        useAuthStore().user = {
+            username: 'owner',
+            display_name: '清游',
+            role: 'OWNER',
+            must_change_password: false,
+        }
+        render(ChatPage, { global: { plugins: [pinia, ElementPlus] } })
+        expect(await screen.findByText('房租')).toBeInTheDocument()
+        await fireEvent.click(screen.getByRole('button', { name: '···' }))
+        await fireEvent.click(
+            (
+                await screen.findAllByRole('menuitem', {
+                    name: chatCopy.delete,
+                })
+            )[0],
+        )
+        expect(
+            await screen.findByText(chatCopy.deleteConfirm),
+        ).toBeInTheDocument()
+        await fireEvent.click(screen.getByRole('button', { name: chatCopy.ok }))
+        await waitFor(() => {
+            expect(mocks.agentApi.remove).toHaveBeenCalledWith(ID)
+        })
+        expect(mocks.agentApi.archive).not.toHaveBeenCalled()
     })
 })

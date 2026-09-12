@@ -12,7 +12,8 @@ def test_system_prompt_puts_constraints_before_soul_and_memory() -> None:
     assert prompt.index(SYSTEM_CONSTRAINTS[:12]) == 0
     assert "项目名用中文" in prompt
     assert "谈过房租" in prompt
-    assert "不得声称已经入库" in SYSTEM_CONSTRAINTS or "不得声称已经入库" in prompt
+    assert "已授权操作不需要再做成提案卡片" in SYSTEM_CONSTRAINTS
+    assert "查询、试算和预览工具立即执行" in prompt
 
 
 def test_finance_card_payload_is_strict() -> None:

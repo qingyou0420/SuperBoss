@@ -4,7 +4,13 @@
 
 ## 1. Hosts
 
-以管理员身份把下面两行加入 `C:\Windows\System32\drivers\etc\hosts`：
+以管理员身份写入（会弹出 UAC）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\ops\write-local-hosts.ps1
+```
+
+若当前终端不是管理员，桌面启动器里的「写入 hosts」会提权执行同一脚本。写入的内容是：
 
 ```
 127.0.0.1 app.localhost

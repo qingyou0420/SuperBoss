@@ -6,7 +6,7 @@ import vueParser from 'vue-eslint-parser'
 
 export default tseslint.config(
     {
-        ignores: ['dist', 'node_modules', 'coverage'],
+        ignores: ['dist', 'design-dist', 'node_modules', 'coverage'],
     },
     js.configs.recommended,
     ...pluginVue.configs['flat/essential'],
@@ -24,6 +24,9 @@ export default tseslint.config(
                 Event: 'readonly',
                 HTMLInputElement: 'readonly',
                 navigator: 'readonly',
+                window: 'readonly',
+                globalThis: 'readonly',
+                sessionStorage: 'readonly',
             },
         },
         rules: {

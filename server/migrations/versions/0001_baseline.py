@@ -12,6 +12,7 @@ from superboss.core.db import Base
 from superboss.modules.agent import models as agent_models  # noqa: F401
 from superboss.modules.audit import models as audit_models  # noqa: F401
 from superboss.modules.auth import models as auth_models  # noqa: F401
+from superboss.modules.directory import models as directory_models  # noqa: F401
 from superboss.modules.files import models as file_models  # noqa: F401
 from superboss.modules.finance import models as finance_models  # noqa: F401
 from superboss.modules.knowledge import models as knowledge_models  # noqa: F401

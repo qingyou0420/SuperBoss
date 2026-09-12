@@ -29,7 +29,7 @@ async def list_audit_events(
         limit=limit, action=action
     )
     actor_ids = {item.actor_id for item in events if item.actor_id}
-    names: dict[UUID, str] = {}
+    names: dict[UUID | None, str] = {}
     if actor_ids:
         users = (await session.scalars(select(User).where(User.id.in_(actor_ids)))).all()
         names = {user.id: user.display_name or user.username for user in users}

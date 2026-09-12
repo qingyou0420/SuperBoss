@@ -2,7 +2,7 @@
 
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,7 +46,123 @@ def _function(
 
 
 TOOLS: list[dict[str, Any]] = [
-    _function("list_projects", "列出全部项目、阶段、进度和里程碑。", {}, []),
+    _function(
+        "list_projects",
+        "列出全部项目、阶段、进度、约定服务费和当前节点。",
+        {},
+        [],
+    ),
+    _function(
+        "list_directory",
+        "搜索业务地图名录。不合并同名来源行。",
+        {"query": {"type": "string"}, "district": {"type": "string"}},
+        [],
+    ),
+    _function(
+        "record_communication",
+        "把老板已确认的沟通直接写入名录，不走卡片。",
+        {
+            "entry_id": {"type": "string"},
+            "occurred_on": {"type": "string"},
+            "contact_name": {"type": "string"},
+            "contact_role": {"type": "string"},
+            "demand": {"type": "string"},
+            "result": {"type": "string"},
+            "next_step": {"type": "string"},
+            "status": {
+                "type": "string",
+                "enum": ["LEARNING", "CONTACTING", "COMMISSIONED", "PAUSED", "DROPPED"],
+            },
+        },
+        ["entry_id", "occurred_on", "contact_name", "contact_role", "demand", "result"],
+    ),
+    _function(
+        "preview_schedule_shift",
+        "试算从某节点起顺延或提前若干天，不写库。",
+        {
+            "project_id": {"type": "string"},
+            "node_id": {"type": "string"},
+            "days": {"type": "integer"},
+        },
+        ["project_id", "node_id", "days"],
+    ),
+    _function(
+        "apply_schedule_shift",
+        "老板已与客户确认后，从某节点起调整后续排期并记录原因。",
+        {
+            "project_id": {"type": "string"},
+            "node_id": {"type": "string"},
+            "days": {"type": "integer"},
+            "reason": {"type": "string"},
+        },
+        ["project_id", "node_id", "days", "reason"],
+    ),
+    _function(
+        "complete_project_node",
+        "确认当前阶段完成。必须提供已上传文件的 file_id，不能用任意文字代替。",
+        {
+            "project_id": {"type": "string"},
+            "node_id": {"type": "string"},
+            "evidence": {"type": "array", "items": {"type": "string"}},
+        },
+        ["project_id", "node_id"],
+    ),
+    _function(
+        "convert_directory_to_project",
+        "已确定委托后，从名录建立会务项目并保留原沟通链。",
+        {
+            "entry_id": {"type": "string"},
+            "name": {"type": "string"},
+            "starts_on": {"type": "string"},
+            "service_fee_cents": {"type": "integer"},
+        },
+        ["entry_id"],
+    ),
+    _function(
+        "import_finance_batch",
+        "把已核对的账本行直接入账。同一 batch_key 重传不重复记账。",
+        {
+            "batch_key": {"type": "string"},
+            "rows": {"type": "array", "items": {"type": "object"}},
+        },
+        ["batch_key", "rows"],
+    ),
+    _function(
+        "import_finance_from_file",
+        "读取老板提交的账本附件并入账。支持 xlsx；异常行逐条返回，已成功行重试不重复。",
+        {
+            "file_id": {"type": "string"},
+            "batch_key": {"type": "string"},
+        },
+        ["file_id"],
+    ),
+    _function(
+        "get_finance_overview",
+        "经营总览。没有期初余额时不把净流入当成银行可用余额。",
+        {},
+        [],
+    ),
+    _function(
+        "get_project_rewards",
+        "按确认服务费和直接成本计算节余奖金、抽成和毛利。",
+        {"project_id": {"type": "string"}},
+        ["project_id"],
+    ),
+    _function(
+        "record_knowledge",
+        "按老板指令写入知识链。publish 为 true 时直接发布。",
+        {
+            "title": {"type": "string"},
+            "body_md": {"type": "string"},
+            "stage_title": {"type": "string"},
+            "change_reason": {"type": "string"},
+            "project_id": {"type": "string"},
+            "is_canonical": {"type": "boolean"},
+            "publish": {"type": "boolean"},
+            "tags": {"type": "array", "items": {"type": "string"}},
+        },
+        ["title"],
+    ),
     _function(
         "get_finance_summary",
         "按月汇总财务。STAFF 不可见公司与收入，但老板可见全部。",
@@ -226,13 +342,78 @@ async def _run(context: ToolContext, name: str, payload: dict[str, Any]) -> obje
                 "name": item.name,
                 "stage": item.stage.value,
                 "progress_percent": item.progress_percent,
-                "milestones": [
-                    {"id": str(point.id), "title": point.title, "due_on": point.due_on}
-                    for point in item.milestones
+                "service_fee_cents": item.service_fee_cents,
+                "nodes": [
+                    {
+                        "id": str(node.id),
+                        "title": node.title,
+                        "status": node.status.value,
+                        "planned_end": node.planned_end,
+                    }
+                    for node in item.nodes
                 ],
             }
             for item in projects
         ]
+    if name == "list_directory":
+        from superboss.modules.directory.service import DirectoryService, to_read
+
+        query = payload.get("query") if isinstance(payload.get("query"), str) else None
+        district = payload.get("district") if isinstance(payload.get("district"), str) else None
+        rows, total = await DirectoryService(context.session).list_entries(
+            context.actor, query=query, district=district, limit=20
+        )
+        return {
+            "total": total,
+            "items": [to_read(item, context.actor) for item in rows],
+        }
+    if name == "record_communication":
+        from datetime import date as date_cls
+
+        from superboss.modules.directory.models import CommunicationStatus
+        from superboss.modules.directory.schemas import CommunicationCreate
+        from superboss.modules.directory.service import DirectoryService
+
+        command = CommunicationCreate(
+            occurred_on=date_cls.fromisoformat(str(payload["occurred_on"])),
+            contact_name=str(payload["contact_name"]),
+            contact_role=str(payload["contact_role"]),
+            demand=str(payload["demand"]),
+            result=str(payload["result"]),
+            next_step=str(payload.get("next_step") or ""),
+            status=cast(CommunicationStatus, payload.get("status") or "LEARNING"),
+        )
+        row = await DirectoryService(context.session).add_communication(
+            context.actor, UUID(str(payload["entry_id"])), command
+        )
+        return {"id": str(row.id), "written": True}
+    if name == "preview_schedule_shift":
+        service = ProjectService(context.session)
+        project = await service.get(context.actor, UUID(str(payload["project_id"])))
+        return service.preview_shift(project, UUID(str(payload["node_id"])), int(payload["days"]))
+    if name == "apply_schedule_shift":
+        project = await ProjectService(context.session).apply_shift(
+            context.actor,
+            UUID(str(payload["project_id"])),
+            UUID(str(payload["node_id"])),
+            int(payload["days"]),
+            str(payload.get("reason") or ""),
+        )
+        return {"project_id": str(project.id), "written": True, "due_on": project.due_on}
+    if name == "complete_project_node":
+        raw_evidence = payload.get("evidence")
+        evidence: list[object] = raw_evidence if isinstance(raw_evidence, list) else []
+        project = await ProjectService(context.session).complete_node(
+            context.actor,
+            UUID(str(payload["project_id"])),
+            UUID(str(payload["node_id"])),
+            [str(item) for item in evidence],
+        )
+        return {
+            "project_id": str(project.id),
+            "progress_percent": project.progress_percent,
+            "written": True,
+        }
     if name == "get_finance_summary":
         month = payload.get("month")
         summary = await FinanceService(context.session).summary(
@@ -264,6 +445,103 @@ async def _run(context: ToolContext, name: str, payload: dict[str, Any]) -> obje
             }
             for item in files
         ]
+    if name == "convert_directory_to_project":
+        from datetime import date as date_cls
+
+        from superboss.modules.directory.schemas import ConvertProjectCreate
+        from superboss.modules.directory.service import DirectoryService
+
+        starts = payload.get("starts_on")
+        project = await DirectoryService(context.session).convert_to_project(
+            context.actor,
+            UUID(str(payload["entry_id"])),
+            ConvertProjectCreate(
+                name=str(payload.get("name") or ""),
+                starts_on=date_cls.fromisoformat(str(starts)) if starts else None,
+                service_fee_cents=payload.get("service_fee_cents"),
+            ),
+        )
+        return {"project_id": str(project.id), "name": project.name, "written": True}
+    if name == "import_finance_batch":
+        from superboss.modules.finance.schemas import FinanceImportCommand
+
+        result = await FinanceService(context.session).import_batch(
+            context.actor, FinanceImportCommand.model_validate(payload)
+        )
+        return {
+            "batch_key": result["batch_key"],
+            "inserted": result["inserted"],
+            "skipped": result["skipped"],
+            "unresolved": result["unresolved"],
+            "replayed": result["replayed"],
+            "written": True,
+        }
+    if name == "import_finance_from_file":
+        from hashlib import sha256
+
+        from superboss.modules.files.models import File, FileState
+
+        file = await context.session.get(File, UUID(str(payload["file_id"])))
+        if file is None:
+            return {"error": "FILE_NOT_FOUND"}
+        if file.state is not FileState.CLEAN:
+            return {"error": "FILE_NOT_CLEAN"}
+        if context.storage is None:
+            return {"error": "STORAGE_UNAVAILABLE"}
+        chunks: list[bytes] = []
+        async for chunk in context.storage.stream(file.object_key):
+            chunks.append(chunk)
+        payload_bytes = b"".join(chunks)
+        key = str(payload.get("batch_key") or sha256(payload_bytes).hexdigest()[:32])
+        result = await FinanceService(context.session).import_from_file(
+            context.actor,
+            payload_bytes,
+            batch_key=key,
+            filename=file.filename,
+            source_file_id=file.id,
+        )
+        return {
+            "batch_key": result["batch_key"],
+            "inserted": result["inserted"],
+            "skipped": result["skipped"],
+            "unresolved": result["unresolved"],
+            "parse_unresolved": result.get("parse_unresolved") or [],
+            "replayed": result["replayed"],
+            "written": True,
+        }
+    if name == "get_finance_overview":
+        return await FinanceService(context.session).overview(context.actor)
+    if name == "get_project_rewards":
+        return await FinanceService(context.session).rewards_for(
+            context.actor, UUID(str(payload["project_id"]))
+        )
+    if name == "record_knowledge":
+        from superboss.modules.knowledge.models import KnowledgeStatus
+        from superboss.modules.knowledge.schemas import KnowledgeDocCreate
+        from superboss.modules.knowledge.service import KnowledgeService
+
+        knowledge_service = KnowledgeService(context.session)
+        raw_tags = payload.get("tags")
+        tags: list[object] = raw_tags if isinstance(raw_tags, list) else []
+        doc = await knowledge_service.create(
+            context.actor,
+            KnowledgeDocCreate(
+                title=str(payload["title"]),
+                body_md=str(payload.get("body_md") or ""),
+                tags=[str(item) for item in tags][:20],
+                project_id=UUID(str(payload["project_id"])) if payload.get("project_id") else None,
+                stage_title=str(payload.get("stage_title") or ""),
+                change_reason=str(payload.get("change_reason") or ""),
+                is_canonical=bool(payload.get("is_canonical")),
+            ),
+        )
+        if payload.get("publish"):
+            from superboss.modules.knowledge.schemas import KnowledgeDocUpdate
+
+            doc = await knowledge_service.update(
+                context.actor, doc.id, KnowledgeDocUpdate(status=KnowledgeStatus.PUBLISHED)
+            )
+        return {"id": str(doc.id), "status": doc.status.value, "written": True}
     if name == "search_knowledge":
         from superboss.modules.knowledge.service import KnowledgeService
 

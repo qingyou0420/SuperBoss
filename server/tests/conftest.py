@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete
+from sqlalchemy import delete, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from testcontainers.community.postgres import PostgresContainer
 
@@ -22,10 +22,42 @@ from superboss.modules.agent.models import (
 )
 from superboss.modules.audit.models import AuditLog
 from superboss.modules.auth.models import AuthSession
+from superboss.modules.directory.models import (
+    DirectoryCommunication,
+    DirectoryConflict,
+    DirectoryEntry,
+    DirectoryImportBatch,
+    DirectoryProjectLink,
+    DirectorySourceRow,
+)
 from superboss.modules.files.models import File, Folder
-from superboss.modules.finance.models import FinanceAdjustment, FinanceEntry
-from superboss.modules.knowledge.models import KnowledgeDoc, KnowledgePoint
-from superboss.modules.projects.models import Project, ProjectMilestone
+from superboss.modules.finance.models import (
+    CompanyMonthCost,
+    CompanySetting,
+    FinanceAdjustment,
+    FinanceEntry,
+    FinanceImportBatch,
+    FinanceImportRow,
+    FinancePayment,
+    RewardAllocation,
+)
+from superboss.modules.knowledge.models import (
+    KnowledgeDoc,
+    KnowledgePoint,
+    KnowledgeRevision,
+    KnowledgeRevisionPollution,
+    KnowledgeRevisionReviewEvent,
+)
+from superboss.modules.projects.models import (
+    Project,
+    ProjectLeadHistory,
+    ProjectMilestone,
+    ProjectNode,
+    ProjectScheduleChange,
+    WorkflowTemplate,
+    WorkflowTemplateNode,
+    WorkflowTemplateVersion,
+)
 from superboss.modules.users.models import Role, User
 from tests.identity import local_user
 
@@ -69,13 +101,36 @@ async def db_session(postgres_database: str) -> AsyncIterator[AsyncSession]:
             await connection.execute(delete(AgentConversation))
             await connection.execute(delete(AgentMemory))
             await connection.execute(delete(AgentSoulVersion))
+            await connection.execute(delete(FinanceImportRow))
+            await connection.execute(delete(FinanceImportBatch))
+            await connection.execute(delete(FinancePayment))
             await connection.execute(delete(FinanceAdjustment))
             await connection.execute(delete(FinanceEntry))
+            await connection.execute(delete(RewardAllocation))
+            await connection.execute(delete(CompanyMonthCost))
+            await connection.execute(delete(CompanySetting))
+            await connection.execute(delete(KnowledgeRevisionReviewEvent))
+            await connection.execute(delete(KnowledgeRevisionPollution))
+            await connection.execute(text("DELETE FROM knowledge_legacy_confirmation_map"))
+            await connection.execute(text("DELETE FROM knowledge_unrecorded_ok_candidates"))
+            await connection.execute(delete(KnowledgeRevision))
             await connection.execute(delete(KnowledgePoint))
             await connection.execute(delete(KnowledgeDoc))
             await connection.execute(delete(File))
             await connection.execute(delete(Folder))
+            await connection.execute(delete(DirectoryConflict))
+            await connection.execute(delete(DirectorySourceRow))
+            await connection.execute(delete(DirectoryImportBatch))
+            await connection.execute(delete(DirectoryProjectLink))
+            await connection.execute(delete(DirectoryCommunication))
+            await connection.execute(delete(DirectoryEntry))
+            await connection.execute(delete(ProjectScheduleChange))
+            await connection.execute(delete(ProjectLeadHistory))
+            await connection.execute(delete(ProjectNode))
             await connection.execute(delete(ProjectMilestone))
+            await connection.execute(delete(WorkflowTemplateNode))
+            await connection.execute(delete(WorkflowTemplateVersion))
+            await connection.execute(delete(WorkflowTemplate))
             await connection.execute(delete(Project))
             await connection.execute(delete(User))
 

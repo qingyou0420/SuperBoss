@@ -25,7 +25,4 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.execute("UPDATE users SET role = 'STAFF' WHERE role = 'MANAGER'")
     op.execute("ALTER TABLE users DROP CONSTRAINT IF EXISTS ck_users_role")
-    op.execute(
-        "ALTER TABLE users ADD CONSTRAINT ck_users_role "
-        "CHECK (role IN ('OWNER', 'STAFF'))"
-    )
+    op.execute("ALTER TABLE users ADD CONSTRAINT ck_users_role CHECK (role IN ('OWNER', 'STAFF'))")

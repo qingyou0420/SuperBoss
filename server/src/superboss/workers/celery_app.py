@@ -1,7 +1,7 @@
 """Celery application configuration with no broker connection at import time."""
 
 from celery import Celery  # type: ignore[import-untyped]
-from celery.schedules import crontab
+from celery.schedules import crontab  # type: ignore[import-untyped]
 
 from superboss.core.config import get_settings
 

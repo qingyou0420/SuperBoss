@@ -20,9 +20,7 @@ def upgrade() -> None:
         "CREATE INDEX IF NOT EXISTS ix_agent_messages_conversation_seq "
         "ON agent_messages (conversation_id, seq)"
     )
-    op.execute(
-        "ALTER TABLE agent_conversations ADD COLUMN IF NOT EXISTS summarized_until BIGINT"
-    )
+    op.execute("ALTER TABLE agent_conversations ADD COLUMN IF NOT EXISTS summarized_until BIGINT")
     op.execute("ALTER TABLE projects DROP COLUMN IF EXISTS is_test")
 
 

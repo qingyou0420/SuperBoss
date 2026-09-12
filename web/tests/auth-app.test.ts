@@ -9,6 +9,7 @@ import { authApi } from '../src/api/auth'
 import * as httpModule from '../src/api/http'
 import { HttpClientError } from '../src/api/http'
 import { projectsApi } from '../src/api/projects'
+import { usersApi } from '../src/api/users'
 import { createAppRouter, safePostLoginPath } from '../src/app/router'
 import LoginPage from '../src/pages/LoginPage.vue'
 import PasswordChangePage from '../src/pages/PasswordChangePage.vue'
@@ -177,6 +178,7 @@ beforeEach(() => {
     localStorage.clear()
     sessionStorage.clear()
     mockedProjects.list.mockResolvedValue([])
+    vi.mocked(usersApi.list).mockResolvedValue([])
 })
 
 describe('local auth store lifecycle', () => {

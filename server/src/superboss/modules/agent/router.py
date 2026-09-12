@@ -1,6 +1,7 @@
 """OWNER-only 霜月 routes."""
 
 import json
+from collections.abc import AsyncIterator
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request, status
@@ -77,6 +78,13 @@ async def archive_conversation(
     await service.archive_conversation(conversation_id)
 
 
+@router.delete("/conversations/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_conversation(
+    conversation_id: UUID, service: AgentService = Depends(get_service)
+) -> None:
+    await service.delete_conversation(conversation_id)
+
+
 @router.get("/conversations/{conversation_id}/messages", response_model=list[MessageRead])
 async def list_messages(
     conversation_id: UUID, service: AgentService = Depends(get_service)
@@ -117,7 +125,7 @@ async def chat_stream(
         enqueue_extract=request.app.state.enqueue_memory_extract,
     )
 
-    async def events():
+    async def events() -> AsyncIterator[str]:
         try:
             async for kind, payload in service.chat_stream(conversation_id, command):
                 data = (

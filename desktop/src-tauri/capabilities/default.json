@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "SuperBoss launcher",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

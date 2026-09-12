@@ -35,5 +35,6 @@ def test_blank_pdf_asks_for_text_version() -> None:
 
 
 def test_rejects_images_without_ocr() -> None:
-    with pytest.raises(ExtractError):
-        extract_text("scan.png", b"\x89PNG")
+    text = extract_text("scan.png", b"\x89PNG")
+    assert "OCR" in text
+    assert "scan.png" in text

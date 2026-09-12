@@ -13,6 +13,7 @@ export const errorCopy = {
     knowledge: '知识库加载失败',
     projects: '项目操作失败',
     projectNameConflict: '项目名称已存在。',
+    projectHasEntries: '项目下还有记账，无法删除。',
 }
 
 export function shortRequestId(id: string | undefined): string {

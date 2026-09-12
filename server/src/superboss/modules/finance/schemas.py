@@ -108,6 +108,15 @@ class FinanceAdjustmentRead(BaseModel):
     created_at: datetime
 
 
+class FinancePaymentRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    paid_on: date
+    amount_cents: int
+    created_at: datetime
+
+
 class FinanceEntryRead(BaseModel):
     id: UUID
     kind: FinanceKind
@@ -123,6 +132,13 @@ class FinanceEntryRead(BaseModel):
     created_via: CreatedVia
     created_at: datetime
     adjustments: list[FinanceAdjustmentRead]
+    batch_key: str = ""
+    paid_on: date | None = None
+    paid_cents: int | None = None
+    voucher: str = ""
+    paid_total_cents: int = 0
+    unpaid_cents: int = 0
+    payments: list[FinancePaymentRead] = Field(default_factory=list)
 
 
 class CompanyTotals(BaseModel):
@@ -148,3 +164,90 @@ class FinanceSummary(BaseModel):
         if not _MONTH.fullmatch(value):
             raise ValueError("month must be YYYY-MM")
         return value
+
+
+class FinanceImportRow(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: FinanceKind
+    scope: FinanceScope
+    project_id: UUID | None = None
+    project_name: str = ""
+    amount_cents: int = Field(ge=1, le=1_000_000_000_000)
+    occurred_on: date
+    category: str
+    memo: str = ""
+    voucher: str = ""
+    source_row: int | None = Field(default=None, ge=1)
+    source_sheet: str = ""
+
+    @field_validator("category")
+    @classmethod
+    def canonical_category(cls, value: str) -> str:
+        return _canonical_text(value, maximum=64)
+
+    @field_validator("memo", "voucher", "project_name")
+    @classmethod
+    def canonical_optional(cls, value: str) -> str:
+        return value.strip(_EDGE)[:1000]
+
+
+class FinanceImportCommand(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    batch_key: str
+    rows: list[FinanceImportRow] = Field(default_factory=list, max_length=500)
+
+    @field_validator("batch_key")
+    @classmethod
+    def canonical_batch(cls, value: str) -> str:
+        return _canonical_text(value, maximum=64)
+
+
+class FinanceImportRowRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    batch_key: str
+    row_index: int
+    status: str
+    reason: str
+    fingerprint: str
+    entry_id: UUID | None = None
+    payload: dict[str, object] = Field(default_factory=dict)
+
+
+class FinanceImportRowListRead(BaseModel):
+    items: list[FinanceImportRowRead]
+    total: int
+
+
+class FinanceImportResolve(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["link_voucher", "insert_independent"]
+    entry_id: UUID | None = None
+
+
+class FinancePayCommand(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    paid_on: date
+    paid_cents: int | None = Field(default=None, ge=1, le=1_000_000_000_000)
+    idempotency_key: str = ""
+
+    @field_validator("idempotency_key")
+    @classmethod
+    def strip_key(cls, value: str) -> str:
+        return value.strip()[:64]
+
+
+class CompanyMonthCostWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    amount_cents: int = Field(ge=0, le=1_000_000_000_000)
+
+
+class CompanyMonthCostRead(BaseModel):
+    month: str
+    amount_cents: int

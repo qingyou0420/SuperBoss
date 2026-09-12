@@ -3,6 +3,7 @@
 import logging
 from uuid import UUID
 
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from superboss.core.actors import Actor
@@ -46,7 +47,7 @@ from superboss.modules.projects.service import ProjectService
 _LOG = logging.getLogger(__name__)
 
 
-def parse_card_payload(kind: CardKind, payload: object) -> object:
+def parse_card_payload(kind: CardKind, payload: object) -> BaseModel:
     model = CARD_MODELS[kind]
     return model.model_validate(payload)
 

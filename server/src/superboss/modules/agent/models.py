@@ -85,8 +85,12 @@ class AgentConversation(Base):
     )
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     summarized_until: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    messages: Mapped[list["AgentMessage"]] = relationship(back_populates="conversation")
-    cards: Mapped[list["AgentCard"]] = relationship(back_populates="conversation")
+    messages: Mapped[list["AgentMessage"]] = relationship(
+        back_populates="conversation", cascade="all, delete-orphan"
+    )
+    cards: Mapped[list["AgentCard"]] = relationship(
+        back_populates="conversation", cascade="all, delete-orphan"
+    )
 
 
 class AgentMessage(Base):

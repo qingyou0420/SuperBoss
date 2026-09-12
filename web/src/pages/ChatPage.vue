@@ -40,6 +40,13 @@ const pendingFileName = ref('')
 const pendingPreview = ref('')
 const pendingStatus = ref('')
 const drafting = ref(false)
+const pendingDeleteId = ref('')
+const deleteOpen = computed({
+    get: () => pendingDeleteId.value !== '',
+    set: (open: boolean) => {
+        if (!open) pendingDeleteId.value = ''
+    },
+})
 const projectNames = ref<Record<string, string>>({})
 const folderNames = ref<Record<string, string>>({})
 
@@ -112,14 +119,42 @@ function beginDraft(): void {
     currentId.value = ''
     messages.value = []
     cards.value = []
+    offline.value = false
+    errorMessage.value = ''
 }
 
-async function archiveConversation(id: string): Promise<void> {
-    await agentApi.archive(id)
+async function dropConversation(id: string): Promise<void> {
     conversations.value = conversations.value.filter((item) => item.id !== id)
     if (currentId.value === id) {
         currentId.value = conversations.value[0]?.id ?? ''
+        if (!currentId.value) drafting.value = true
         await loadThread()
+    }
+}
+
+async function archiveConversation(id: string): Promise<void> {
+    try {
+        await agentApi.archive(id)
+        await dropConversation(id)
+    } catch (error) {
+        errorMessage.value = agentErrorMessage(error)
+    }
+}
+
+function requestDeleteConversation(id: string): void {
+    pendingDeleteId.value = id
+}
+
+async function confirmDeleteConversation(): Promise<void> {
+    const id = pendingDeleteId.value
+    if (!id) return
+    try {
+        await agentApi.remove(id)
+        pendingDeleteId.value = ''
+        await dropConversation(id)
+    } catch (error) {
+        pendingDeleteId.value = ''
+        errorMessage.value = agentErrorMessage(error)
     }
 }
 
@@ -246,6 +281,8 @@ async function onFilePicked(file: File): Promise<void> {
 async function selectConversation(id: string): Promise<void> {
     drafting.value = false
     currentId.value = id
+    offline.value = false
+    errorMessage.value = ''
     await loadThread()
 }
 
@@ -313,16 +350,18 @@ onMounted(async () => {
                         @click="selectConversation(item.id)"
                         >{{ item.title }}</el-button
                     >
-                    <el-dropdown
-                        trigger="click"
-                        @command="archiveConversation(item.id)"
-                    >
+                    <el-dropdown trigger="click">
                         <el-button text native-type="button">···</el-button>
                         <template #dropdown>
                             <el-dropdown-menu>
-                                <el-dropdown-item>{{
-                                    chatCopy.archive
-                                }}</el-dropdown-item>
+                                <el-dropdown-item
+                                    @click="archiveConversation(item.id)"
+                                    >{{ chatCopy.archive }}</el-dropdown-item
+                                >
+                                <el-dropdown-item
+                                    @click="requestDeleteConversation(item.id)"
+                                    >{{ chatCopy.delete }}</el-dropdown-item
+                                >
                             </el-dropdown-menu>
                         </template>
                     </el-dropdown>
@@ -412,6 +451,22 @@ onMounted(async () => {
                 </div>
             </form>
         </div>
+        <el-dialog
+            v-model="deleteOpen"
+            :title="chatCopy.delete"
+            width="360px"
+            :close-on-click-modal="false"
+        >
+            <p>{{ chatCopy.deleteConfirm }}</p>
+            <template #footer>
+                <el-button @click="pendingDeleteId = ''">{{
+                    chatCopy.close
+                }}</el-button>
+                <el-button type="primary" @click="confirmDeleteConversation">{{
+                    chatCopy.ok
+                }}</el-button>
+            </template>
+        </el-dialog>
     </section>
 </template>
 

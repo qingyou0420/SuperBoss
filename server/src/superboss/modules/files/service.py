@@ -283,6 +283,19 @@ class FileService:
         await self.ensure_downloadable(file)
         return await self._storage().presign_get(file.object_key, 60)
 
+    async def presign_published_knowledge_source(
+        self, actor: Actor, file_id: UUID, allowed_ids: set[UUID]
+    ) -> str:
+        if actor.role == Role.MANAGER:
+            raise ForbiddenError("FOLDER_FORBIDDEN", "You cannot access this folder")
+        if file_id not in allowed_ids:
+            raise ForbiddenError("FOLDER_FORBIDDEN", "You cannot access this folder")
+        file = await self.session.get(File, file_id)
+        if file is None:
+            raise NotFoundError("FILE_NOT_FOUND", "File not found")
+        await self.ensure_downloadable(file)
+        return await self._storage().presign_get(file.object_key, 60)
+
     async def presign_part(self, actor: Actor, upload_id: UUID, part_number: int) -> str:
         if not 1 <= part_number <= 10000:
             raise ValueError("invalid part number")

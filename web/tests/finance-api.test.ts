@@ -160,4 +160,34 @@ describe('finance API contracts', () => {
             ).summary('2026-09'),
         ).rejects.toBeInstanceOf(FinanceContractError)
     })
+
+    test('sends payment idempotency key and keeps payments', async () => {
+        const calls: Array<{ data?: unknown; url?: string }> = []
+        const adapter: AxiosAdapter = async (config) => {
+            calls.push({ data: config.data, url: config.url })
+            return response(config, 200, {
+                ...entry,
+                paid_total_cents: 100_000,
+                unpaid_cents: 1_100_000,
+                payments: [
+                    {
+                        id: ENTRY_ID,
+                        paid_on: '2026-09-10',
+                        amount_cents: 100_000,
+                        created_at: '2026-09-10T00:00:00Z',
+                    },
+                ],
+            })
+        }
+        const api = createFinanceApi(createHttpClient({ adapter }))
+        const paid = await api.markPaid(
+            ENTRY_ID,
+            '2026-09-10',
+            100_000,
+            'pay-key-1',
+        )
+        expect(paid.paid_total_cents).toBe(100_000)
+        expect(paid.payments).toHaveLength(1)
+        expect(JSON.stringify(calls[0]?.data || {})).toContain('pay-key-1')
+    })
 })

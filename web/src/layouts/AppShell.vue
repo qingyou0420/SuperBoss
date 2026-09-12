@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
+import { placeholderApi } from '../api/placeholder'
 import { accountNav, homePath, mainNav } from '../app/navigation'
 import { shellCopy } from '../copy/pages/shell'
 import { useAuthStore } from '../stores/auth'
@@ -28,6 +29,12 @@ function onCommand(path: string): void {
     }
     void router.push(path)
 }
+
+const showPlaceholder = ref(false)
+onMounted(async () => {
+    const status = await placeholderApi.status().catch(() => null)
+    showPlaceholder.value = Boolean(status?.is_placeholder || status?.seeded)
+})
 </script>
 
 <template>
@@ -61,8 +68,11 @@ function onCommand(path: string): void {
                 </template>
             </el-dropdown>
         </header>
+        <p v-if="showPlaceholder" class="shell__note">
+            {{ shellCopy.placeholder }}
+        </p>
         <main class="shell__main" :style="{ maxWidth: width }">
-            <router-view />
+            <router-view :key="String(route.params.projectId || route.path)" />
         </main>
     </div>
 </template>
@@ -102,6 +112,13 @@ function onCommand(path: string): void {
     background: transparent;
     color: var(--sb-ink);
     cursor: pointer;
+}
+.shell__note {
+    margin: 0;
+    padding: 8px 40px;
+    color: var(--sb-ink-2);
+    font-size: var(--sb-sm);
+    border-bottom: 1px solid var(--sb-line);
 }
 .shell__main {
     padding: 40px 28px 64px;

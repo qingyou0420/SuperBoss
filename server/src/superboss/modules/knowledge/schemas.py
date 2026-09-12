@@ -1,6 +1,7 @@
 """Knowledge HTTP and card schemas."""
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -39,6 +40,10 @@ class KnowledgeDocCreate(BaseModel):
     body_md: str = ""
     tags: list[str] = Field(default_factory=list, max_length=20)
     points: list[KnowledgePointWrite] = Field(default_factory=list, max_length=100)
+    project_id: UUID | None = None
+    stage_title: str = ""
+    change_reason: str = ""
+    is_canonical: bool = False
 
     @field_validator("title")
     @classmethod
@@ -53,6 +58,10 @@ class KnowledgeDocUpdate(BaseModel):
     body_md: str | None = None
     tags: list[str] | None = None
     status: KnowledgeStatus | None = None
+    project_id: UUID | None = None
+    stage_title: str | None = None
+    change_reason: str | None = None
+    is_canonical: bool | None = None
 
 
 class KnowledgeIngestCard(BaseModel):
@@ -72,6 +81,29 @@ class KnowledgePointRead(BaseModel):
     title: str
     body_md: str
     sort_order: int
+    source_file_id: UUID | None = None
+
+
+class KnowledgeRevisionRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    version: int
+    body_md: str
+    change_reason: str
+    stage_title: str
+    is_canonical: bool
+    source_file_id: UUID | None = None
+    points_json: list[dict[str, object]] = Field(default_factory=list)
+    released: bool = False
+    points_review: str = "OK"
+    created_at: datetime
+
+
+class KnowledgePointsReview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["confirm", "clear"]
 
 
 class KnowledgeDocRead(BaseModel):
@@ -83,4 +115,12 @@ class KnowledgeDocRead(BaseModel):
     tags: list[str]
     status: KnowledgeStatus
     updated_at: datetime
-    points: list[KnowledgePointRead] = ()
+    project_id: UUID | None = None
+    stage_title: str = ""
+    change_reason: str = ""
+    is_canonical: bool = False
+    source_file_id: UUID | None = None
+    published_revision_id: UUID | None = None
+    draft_revision_id: UUID | None = None
+    points: list[KnowledgePointRead] = Field(default_factory=list)
+    revisions: list[KnowledgeRevisionRead] = Field(default_factory=list)

@@ -23,6 +23,7 @@ Supported origin for local acceptance: `https://app.localhost`.
 - [Live acceptance](docs/runbooks/m1-owner-acceptance.md)
 - [PostgreSQL and object backup/restore](docs/runbooks/backup-before-m1-pilot.md)
 - [Current iteration plan](SuperBoss-迭代方案-三层账号与霜月.md)
+- [Desktop launcher (Tauri)](docs/runbooks/desktop-client.md)
 
 ## Local stack
 
@@ -33,7 +34,7 @@ docker compose --env-file .env -f docker-compose.dev.yml exec -T api alembic upg
 docker compose --env-file .env -f docker-compose.dev.yml ps
 ```
 
-Deploy on the internal host is `git pull` (deploy key) → `docker compose build` → `alembic upgrade head` → restart. There is no public Release or client self-update.
+Deploy on the internal host is `git pull` (deploy key) → `docker compose build` → `alembic upgrade head` → restart. The optional Windows launcher in `desktop/` can start that stack and check GitHub Releases for installer updates; see [desktop-client.md](docs/runbooks/desktop-client.md). The SPA is unchanged and still cookie-only on `https://app.localhost`.
 
 Bootstrap the OWNER through the interactive command in `local-auth-setup.md`, then sign in at `https://app.localhost/login`. Never put a password in `.env` or a command argument.
 
